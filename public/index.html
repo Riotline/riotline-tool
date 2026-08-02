@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VALORANT Broadcast Production Tool</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ff4655'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>VALORANT Broadcast Tool</h1>
+          <p class="brand-sub">Match lookup for graphics production</p>
+        </div>
+      </div>
+
+      <div class="routing">
+        <label>
+          <span>Account routing</span>
+          <select id="routing"></select>
+        </label>
+        <label>
+          <span>Match region</span>
+          <select id="region"></select>
+        </label>
+      </div>
+    </header>
+
+    <div id="key-warning" class="banner banner-warn" hidden>
+      <strong>No API key loaded.</strong> Copy <code>.env.example</code> to <code>.env</code>, set
+      <code>RIOT_API_KEY</code>, then restart the server.
+    </div>
+
+    <main class="layout">
+      <!-- ---------------------------------------------- step 1: search --- -->
+      <section class="panel panel-search">
+        <h2 class="panel-title"><span class="step">1</span> Player</h2>
+
+        <form id="search-form" autocomplete="off">
+          <label class="field">
+            <span>Riot ID</span>
+            <input
+              id="riot-id"
+              type="text"
+              placeholder="Name#TAG"
+              spellcheck="false"
+              required
+              aria-describedby="riot-id-help"
+            />
+          </label>
+          <p id="riot-id-help" class="field-help">Include the tagline, e.g. <code>TenZ#SEN</code></p>
+          <button id="search-btn" type="submit" class="btn btn-primary">Get recent matches</button>
+        </form>
+
+        <div id="player-card" class="player-card" hidden>
+          <div class="player-name" id="player-name"></div>
+          <div class="player-puuid">
+            <span id="player-puuid"></span>
+            <button type="button" class="btn-copy" data-copy-target="player-puuid" title="Copy PUUID">Copy</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------ step 2: match list --- -->
+      <section class="panel panel-matches">
+        <h2 class="panel-title">
+          <span class="step">2</span> Recent matches
+          <span id="match-count" class="pill" hidden></span>
+        </h2>
+        <div id="match-list" class="match-list">
+          <p class="empty">Search a Riot ID to load the match history.</p>
+        </div>
+      </section>
+
+      <!-- --------------------------------------- step 3: match details --- -->
+      <section class="panel panel-details">
+        <h2 class="panel-title">
+          <span class="step">3</span> Match details
+          <span class="detail-actions">
+            <button type="button" id="copy-json" class="btn btn-ghost" hidden>Copy JSON</button>
+            <button type="button" id="download-json" class="btn btn-ghost" hidden>Download JSON</button>
+          </span>
+        </h2>
+        <div id="match-details">
+          <p class="empty">Select a match to pull its full detail payload.</p>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
