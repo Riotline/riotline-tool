@@ -1,0 +1,775 @@
+/**
+ * Graphics dashboard - edits the broadcast scoreboard.
+ *
+ * The editors write into a local copy of the graphic state and POST it to the
+ * server (debounced). The server pushes it back out over SSE, which is what
+ * both the preview iframe and any OBS browser source are listening to - so the
+ * preview is not a re-implementation of the graphic, it *is* the graphic.
+ *
+ * Slot 1 of each roster is the MVP panel. Choosing an MVP moves that player to
+ * slot 1 rather than setting a flag, so the state can never say one thing and
+ * the layout show another.
+ */
+
+import { onLookupMatch } from './store.js';
+import { STATS, STAT_FIELDS, STAT_SLOTS, statDef } from './stats.js';
+import {
+  FONT_CHOICES,
+  PRESET_FIELDS,
+  PRESET_GROUPS,
+  PRESET_KEYS,
+  decodePreset,
+  encodePreset,
+} from './preset-schema.js';
+
+const SIDES = ['left', 'right'];
+const SLOTS = 5;
+// Slots 1 and 2 also appear on the roster rows; slot 3 is MVP-panel only.
+const ROW_STAT_SLOTS = 2;
+const SAVE_DEBOUNCE_MS = 180;
+
+const $ = (id) => document.getElementById(id);
+
+// ------------------------------------------------------------- elements ---
+
+const els = {
+  tabs: [...document.querySelectorAll('.tab')],
+  panels: { lookup: $('tab-lookup'), graphic: $('tab-graphic') },
+  importBtn: $('g-import'),
+  importHint: $('g-import-hint'),
+  swapBtn: $('g-swap'),
+  sortBtn: $('g-sort'),
+  resetBtn: $('g-reset'),
+  status: $('g-status'),
+  obsUrl: $('g-obs-url'),
+  openLink: $('g-open'),
+  checker: $('g-checker'),
+  frame: $('preview-frame'),
+  preview: $('preview'),
+  editors: { match: $('ed-match'), left: $('ed-left'), right: $('ed-right'), style: $('ed-style') },
+};
+
+// ----------------------------------------------------------------- tabs ---
+
+function showTab(name) {
+  for (const tab of els.tabs) tab.setAttribute('aria-selected', String(tab.dataset.tab === name));
+  for (const [key, panel] of Object.entries(els.panels)) panel.hidden = key !== name;
+  // The topbar's routing selects belong to the lookup flow only. A body class
+  // rather than [hidden] so app.js's own show/hide logic is not fought over.
+  document.body.classList.toggle('tab-graphic', name === 'graphic');
+  if (name === 'graphic') fitPreview();
+}
+
+for (const tab of els.tabs) tab.addEventListener('click', () => showTab(tab.dataset.tab));
+
+// -------------------------------------------------------------- helpers ---
+
+function el(tag, className, attrs = {}, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === false || value === null || value === undefined) continue;
+    node.setAttribute(key, value === true ? '' : value);
+  }
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+const readPath = (source, path) =>
+  path.split('.').reduce((value, part) => (value === null || value === undefined ? value : value[part]), source);
+
+function writePath(target, path, value) {
+  const parts = path.split('.');
+  const last = parts.pop();
+  const host = parts.reduce((value, part) => value[part], target);
+  host[last] = value;
+}
+
+const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { detail: message }));
+
+// --------------------------------------------------------------- saving ---
+
+let state = null;
+let catalogue = { agents: [], maps: [] };
+let saveTimer = null;
+let saveGeneration = 0;
+
+function setStatus(kind, label) {
+  els.status.className = `save-status ${kind}`.trim();
+  els.status.textContent = label;
+}
+
+function queueSave() {
+  setStatus('saving', 'Saving...');
+  // Any edit can drift the styling away from the preset it came from, so the
+  // badge is refreshed here rather than at each of the seventeen controls.
+  markModified();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
+}
+
+async function save() {
+  const generation = ++saveGeneration;
+  try {
+    const response = await fetch('/api/graphic', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
+
+    // Adopt the sanitised copy so the dashboard and the graphic can never
+    // disagree - but only if nothing has been typed since this save started.
+    if (generation === saveGeneration) state = payload.state;
+    setStatus('', 'Saved');
+  } catch (error) {
+    setStatus('failed', 'Not saved');
+    toast(`Graphic not saved: ${error.message}`);
+  }
+}
+
+// -------------------------------------------------------- field builders ---
+
+function field(label, input) {
+  const wrap = el('label', 'g-field');
+  wrap.append(el('span', null, {}, label), input);
+  return wrap;
+}
+
+/** Text/URL input bound to a dotted path in the state. */
+function textField(label, path, { placeholder = '', maxlength = 120 } = {}) {
+  const input = el('input', null, { type: 'text', spellcheck: 'false', placeholder, maxlength });
+  input.value = readPath(state, path) ?? '';
+  input.addEventListener('input', () => {
+    writePath(state, path, input.value);
+    queueSave();
+  });
+  return field(label, input);
+}
+
+function numberField(label, path, { min = 0, max = 999 } = {}) {
+  const input = el('input', null, { type: 'number', min, max, step: '1' });
+  input.value = String(readPath(state, path) ?? 0);
+  input.addEventListener('input', () => {
+    // A cleared box means zero, not "keep the old number" - otherwise the
+    // graphic silently keeps a stale score while the field looks empty.
+    const parsed = Number.parseInt(input.value, 10);
+    writePath(state, path, Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : 0);
+    queueSave();
+  });
+  return field(label, input);
+}
+
+function selectField(label, path, options, { allowUnknown = true } = {}) {
+  const select = el('select');
+  const current = String(readPath(state, path) ?? '');
+  const values = options.includes(current) || !current || !allowUnknown ? options : [current, ...options];
+
+  select.append(el('option', null, { value: '' }, '- none -'));
+  for (const value of values) select.append(el('option', null, { value }, value));
+  select.value = current;
+
+  select.addEventListener('change', () => {
+    writePath(state, path, select.value);
+    queueSave();
+  });
+  return field(label, select);
+}
+
+function colourField(label, path) {
+  const input = el('input', null, { type: 'color' });
+  input.value = readPath(state, path) || '#000000';
+  input.addEventListener('input', () => {
+    writePath(state, path, input.value);
+    queueSave();
+  });
+  return field(label, input);
+}
+
+function checkField(label, path) {
+  const input = el('input', null, { type: 'checkbox' });
+  input.checked = Boolean(readPath(state, path));
+  input.addEventListener('change', () => {
+    writePath(state, path, input.checked);
+    queueSave();
+  });
+  const wrap = el('label', 'checkline');
+  wrap.append(input, el('span', null, {}, label));
+  return wrap;
+}
+
+function rangeField(label, path, { min = 0, max = 1, step = 0.05 } = {}) {
+  const input = el('input', null, { type: 'range', min, max, step });
+  input.value = String(readPath(state, path) ?? 0);
+  input.addEventListener('input', () => {
+    writePath(state, path, Number.parseFloat(input.value));
+    queueSave();
+  });
+  return field(label, input);
+}
+
+const grid = (columns, children) => {
+  const node = el('div', `field-grid${columns ? ` cols-${columns}` : ''}`);
+  node.append(...children);
+  return node;
+};
+
+const title = (text, extra) => {
+  const node = el('h2', 'panel-title', {}, text);
+  if (extra) node.append(extra);
+  return node;
+};
+
+const subhead = (text) => el('div', 'subhead', {}, text);
+
+// ------------------------------------------------------- editor: match ---
+
+/**
+ * One stat row: which stat it shows, and an optional label override. Changing
+ * the stat rebuilds this panel so the label placeholder tracks the new choice,
+ * and rebuilds the rosters so their stat headings follow.
+ */
+function statRowField(slot) {
+  const select = el('select');
+  for (const stat of STATS) select.append(el('option', null, { value: stat.key }, stat.label));
+  select.value = state.statRows[slot];
+
+  select.addEventListener('change', () => {
+    state.statRows[slot] = select.value;
+    queueSave();
+    buildMatchEditor();
+    for (const side of SIDES) buildSideEditor(side);
+  });
+
+  const label = el('input', null, {
+    type: 'text',
+    maxlength: 16,
+    // Blank shows the stat's own name, so most operators never touch this.
+    placeholder: statDef(state.statRows[slot]).label,
+  });
+  label.value = state.labels[`stat${slot + 1}`] ?? '';
+  label.addEventListener('input', () => {
+    state.labels[`stat${slot + 1}`] = label.value;
+    queueSave();
+  });
+
+  const where = slot < ROW_STAT_SLOTS ? 'MVP panel + roster rows' : 'MVP panel only';
+  return grid(2, [field(`Row ${slot + 1} - ${where}`, select), field('Label override', label)]);
+}
+
+function buildMatchEditor() {
+  const host = els.editors.match;
+  const mapNames = catalogue.maps.map((map) => map.name);
+
+  host.replaceChildren(
+    title('Match'),
+    grid(2, [
+      selectField('Map', 'map', mapNames),
+      textField('Match ID', 'matchId', { placeholder: 'optional' }),
+    ]),
+    grid(null, [
+      textField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
+      textField('Centre logo URL', 'eventLogo', { placeholder: 'https://... event or league logo' }),
+    ]),
+    subhead('Stat rows'),
+    ...Array.from({ length: STAT_SLOTS }, (_, slot) => statRowField(slot)),
+    subhead('MVP banner'),
+    grid(2, [textField('Banner text', 'labels.mvp', { maxlength: 16 })]),
+  );
+}
+
+// -------------------------------------------------------- editor: sides ---
+
+function movePlayer(side, from, to) {
+  const roster = state[side].players;
+  if (to < 0 || to >= roster.length) return;
+  const [moved] = roster.splice(from, 1);
+  roster.splice(to, 0, moved);
+  queueSave();
+  buildSideEditor(side);
+}
+
+function playerRow(side, index) {
+  const path = `${side}.players.${index}`;
+  const isMvp = index === 0;
+  const agentNames = catalogue.agents.map((agent) => agent.name);
+
+  const row = el('div', `player-row${isMvp ? ' is-mvp' : ''}`);
+
+  const head = el('div', 'player-row-head');
+  head.append(el('span', 'slot-tag', {}, isMvp ? 'Slot 1 - MVP panel' : `Slot ${index + 1}`));
+
+  const tools = el('div', 'row-tools');
+  if (!isMvp) {
+    const mvpBtn = el('button', 'mini-btn', { type: 'button', title: 'Show this player in the MVP panel' }, 'Make MVP');
+    mvpBtn.addEventListener('click', () => movePlayer(side, index, 0));
+    tools.append(mvpBtn);
+  }
+
+  const up = el('button', 'mini-btn', { type: 'button', title: 'Move up' }, '▲');
+  up.disabled = index === 0;
+  up.addEventListener('click', () => movePlayer(side, index, index - 1));
+
+  const down = el('button', 'mini-btn', { type: 'button', title: 'Move down' }, '▼');
+  down.disabled = index === SLOTS - 1;
+  down.addEventListener('click', () => movePlayer(side, index, index + 1));
+
+  tools.append(up, down);
+  head.append(tools);
+
+  row.append(
+    head,
+    grid(2, [
+      textField('Player name', `${path}.name`, { maxlength: 40 }),
+      textField('Tag', `${path}.tag`, { placeholder: 'optional', maxlength: 16 }),
+    ]),
+    grid(null, [selectField('Agent', `${path}.agent`, agentNames)]),
+    // Every stat is editable regardless of which rows are on air, so switching
+    // a row to KAST mid-broadcast does not mean typing ten new numbers.
+    grid(4, STAT_FIELDS.map((stat) => numberField(stat.label, `${path}.${stat.key}`, { max: stat.max }))),
+  );
+  return row;
+}
+
+function buildSideEditor(side) {
+  const host = els.editors[side];
+  const swatchColour = state.preset[side === 'left' ? 'leftBg' : 'rightBg'];
+  const swatch = el('span', 'side-swatch');
+  swatch.style.background = swatchColour;
+
+  const heading = title(side === 'left' ? 'Left side' : 'Right side');
+  heading.prepend(swatch);
+
+  host.replaceChildren(
+    heading,
+    grid(2, [
+      textField('Team name', `${side}.teamName`, { placeholder: side === 'left' ? 'ATK' : 'DEF', maxlength: 24 }),
+      textField('Result text', `${side}.result`, { placeholder: 'WIN / LOSS', maxlength: 16 }),
+    ]),
+    grid(2, [numberField('Rounds won', `${side}.roundsWon`, { max: 99 }), checkField('Won the match', `${side}.won`)]),
+    grid(null, [textField('Team logo URL', `${side}.logo`, { placeholder: 'https://...' })]),
+    subhead(`Roster - rows show ${state.statRows.slice(0, ROW_STAT_SLOTS).map((key) => statDef(key).label).join(' + ')}`),
+    ...Array.from({ length: SLOTS }, (_, index) => playerRow(side, index)),
+  );
+}
+
+// -------------------------------------------------------- editor: style ---
+
+// -------------------------------------------------------------- presets ---
+
+let presetLibrary = [];
+
+const activePreset = () => presetLibrary.find((entry) => entry.id === state.presetId) ?? null;
+
+/**
+ * Has the operator changed anything since applying the preset? Compared field
+ * by field against the saved copy so the badge cannot claim "unchanged" while
+ * the graphic on air says otherwise.
+ */
+const isModified = () => {
+  const entry = activePreset();
+  if (!entry) return true;
+  return PRESET_KEYS.some((key) => entry.preset[key] !== state.preset[key]);
+};
+
+/** Called on every edit - the badge tracks changes, not just preset applies. */
+function markModified() {
+  const badge = els.editors.style.querySelector('.preset-state');
+  if (!badge) return;
+
+  const edited = isModified();
+  badge.textContent = edited ? 'edited' : 'matches preset';
+  badge.classList.toggle('is-edited', edited);
+}
+
+async function presetAction(body) {
+  const response = await fetch('/api/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
+
+  presetLibrary = payload.presets;
+
+  // Applying and saving both rewrite the live styling, so pull it back in.
+  const graphic = await fetch('/api/graphic').then((r) => r.json());
+  state = graphic.state;
+  buildAll();
+  setStatus('', 'Saved');
+  return payload;
+}
+
+function presetBar() {
+  const select = el('select', 'preset-select');
+  for (const entry of presetLibrary) {
+    select.append(el('option', null, { value: entry.id }, entry.builtIn ? `${entry.name} (built-in)` : entry.name));
+  }
+  if (!activePreset()) select.append(el('option', null, { value: '' }, 'Custom'));
+  select.value = state.presetId ?? '';
+
+  select.addEventListener('change', async () => {
+    try {
+      await presetAction({ action: 'apply', id: select.value });
+      toast(`Applied "${presetLibrary.find((e) => e.id === select.value)?.name ?? select.value}"`);
+    } catch (error) {
+      toast(`Could not apply that preset: ${error.message}`);
+    }
+  });
+
+  const button = (label, hint, onClick) => {
+    const node = el('button', 'mini-btn', { type: 'button', title: hint }, label);
+    node.addEventListener('click', onClick);
+    return node;
+  };
+
+  const entry = activePreset();
+  const tools = el('div', 'preset-tools');
+
+  tools.append(
+    button('Save as…', 'Save the current styling as a new preset', async () => {
+      const name = window.prompt('Name this preset:', entry ? `${entry.name} copy` : 'My preset');
+      if (name === null) return;
+      try {
+        await presetAction({ action: 'save', name, preset: state.preset });
+        toast(`Saved "${name}"`);
+      } catch (error) {
+        toast(`Could not save: ${error.message}`);
+      }
+    }),
+  );
+
+  // Built-ins are read-only on purpose: there is always a known-good look to
+  // fall back to. "Save as..." covers making an edited copy.
+  const update = button('Update', 'Overwrite this preset with the current styling', async () => {
+    try {
+      await presetAction({ action: 'save', id: entry.id, name: entry.name, preset: state.preset });
+      toast(`Updated "${entry.name}"`);
+    } catch (error) {
+      toast(`Could not update: ${error.message}`);
+    }
+  });
+  update.disabled = !entry || entry.builtIn;
+
+  const remove = button('Delete', 'Delete this preset', async () => {
+    if (!window.confirm(`Delete the preset "${entry.name}"? The graphic keeps its current look.`)) return;
+    try {
+      await presetAction({ action: 'delete', id: entry.id });
+      toast(`Deleted "${entry.name}"`);
+    } catch (error) {
+      toast(`Could not delete: ${error.message}`);
+    }
+  });
+  remove.disabled = !entry || entry.builtIn;
+
+  tools.append(update, remove);
+
+  tools.append(
+    button('Copy code', 'Copy a share code for this look', async () => {
+      const code = encodePreset(entry?.name ?? 'Custom', state.preset);
+      try {
+        await navigator.clipboard.writeText(code);
+        toast('Preset code copied - paste it to another operator');
+      } catch {
+        window.prompt('Copy this preset code:', code);
+      }
+    }),
+    button('Paste code', 'Load a look from a share code', async () => {
+      const code = window.prompt('Paste a preset code:');
+      if (!code) return;
+
+      const decoded = decodePreset(code);
+      if (!decoded) {
+        toast('That does not look like a preset code.');
+        return;
+      }
+      try {
+        await presetAction({ action: 'save', name: decoded.name, preset: decoded.preset });
+        toast(`Loaded "${decoded.name}"`);
+      } catch (error) {
+        toast(`Could not load that code: ${error.message}`);
+      }
+    }),
+  );
+
+  const head = el('div', 'preset-head');
+  head.append(el('span', null, {}, 'Preset'), el('span', 'preset-state'));
+
+  const bar = el('div', 'preset-bar');
+  bar.append(head, select, tools);
+  return bar;
+}
+
+/**
+ * A colour that can be switched off entirely (currently just the page
+ * background: blank means transparent, which is what an OBS source wants).
+ */
+function optionalColourField(label, path) {
+  const toggle = el('input', null, { type: 'checkbox' });
+  const picker = el('input', null, { type: 'color' });
+
+  const current = readPath(state, path);
+  toggle.checked = Boolean(current);
+  picker.value = current || '#000000';
+  picker.disabled = !toggle.checked;
+
+  const push = () => {
+    picker.disabled = !toggle.checked;
+    writePath(state, path, toggle.checked ? picker.value : '');
+    queueSave();
+  };
+
+  toggle.addEventListener('change', push);
+  picker.addEventListener('input', push);
+
+  const line = el('label', 'checkline');
+  line.append(toggle, el('span', null, {}, label));
+
+  const wrap = el('div', 'g-field');
+  wrap.append(line, picker);
+  return wrap;
+}
+
+/** One editor control per schema field, chosen by its declared type. */
+function presetField(field) {
+  const path = `preset.${field.key}`;
+  switch (field.type) {
+    case 'font':
+      return selectField(field.label, path, FONT_CHOICES, { allowUnknown: false });
+    case 'ratio':
+      return rangeField(field.label, path);
+    case 'bool':
+      return checkField(field.label, path);
+    case 'hexOff':
+      return optionalColourField(field.label, path);
+    default:
+      return colourField(field.label, path);
+  }
+}
+
+function buildStyleEditor() {
+  const host = els.editors.style;
+  const groups = [];
+
+  for (const group of PRESET_GROUPS) {
+    const fields = PRESET_FIELDS.filter((field) => field.group === group);
+    // Toggles read better stacked; colours pair up two to a row.
+    const columns = fields.every((field) => field.type === 'bool') ? null : 2;
+    groups.push(subhead(group), grid(columns, fields.map(presetField)));
+  }
+
+  host.replaceChildren(title('Style'), presetBar(), ...groups);
+  // The bar is rebuilt on every apply, so seed the badge rather than leaving it
+  // blank until the operator's first edit.
+  markModified();
+
+  // The side headings carry a swatch of the background colour they control.
+  for (const input of host.querySelectorAll('input[type="color"]')) {
+    input.addEventListener('input', () => {
+      for (const side of SIDES) {
+        const swatch = els.editors[side].querySelector('.side-swatch');
+        if (swatch) swatch.style.background = state.preset[side === 'left' ? 'leftBg' : 'rightBg'];
+      }
+    });
+  }
+}
+
+function buildAll() {
+  buildMatchEditor();
+  for (const side of SIDES) buildSideEditor(side);
+  buildStyleEditor();
+}
+
+// -------------------------------------------------------------- actions ---
+
+els.swapBtn.addEventListener('click', () => {
+  // Colours stay put: they describe the left and right halves of the design,
+  // not the teams. Only the content moves.
+  [state.left, state.right] = [state.right, state.left];
+  queueSave();
+  for (const side of SIDES) buildSideEditor(side);
+  toast('Sides swapped');
+});
+
+els.sortBtn.addEventListener('click', () => {
+  for (const side of SIDES) {
+    state[side].players.sort((a, b) => (b.acs ?? 0) - (a.acs ?? 0) || (b.kills ?? 0) - (a.kills ?? 0));
+  }
+  queueSave();
+  for (const side of SIDES) buildSideEditor(side);
+  toast('Rosters sorted by ACS - top player is now the MVP');
+});
+
+els.resetBtn.addEventListener('click', async () => {
+  if (!window.confirm('Reset the graphic to defaults? Every field will be cleared.')) return;
+
+  const response = await fetch('/api/graphic', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reset: true }),
+  });
+  const payload = await response.json();
+  state = payload.state;
+  buildAll();
+  setStatus('', 'Saved');
+  toast('Graphic reset');
+});
+
+els.checker.addEventListener('change', () => {
+  els.frame.classList.toggle('checker', els.checker.checked);
+});
+
+// -------------------------------------------------------------- preview ---
+
+function fitPreview() {
+  const width = els.frame.clientWidth;
+  if (width) els.preview.style.transform = `scale(${width / 1920})`;
+}
+
+new ResizeObserver(fitPreview).observe(els.frame);
+window.addEventListener('resize', fitPreview);
+
+// --------------------------------------------------------------- import ---
+
+const emptyPlayer = () => ({
+  name: '',
+  tag: '',
+  agent: '',
+  ...Object.fromEntries(STAT_FIELDS.map((stat) => [stat.key, 0])),
+});
+
+/**
+ * A normalised player from any of the three sources. Missing stats become 0
+ * rather than being dropped - the field still has to exist so the operator can
+ * type it in if the source did not report it.
+ */
+const mapPlayer = (player) => ({
+  name: player.name ?? '',
+  tag: player.tag ?? '',
+  agent: player.agent ?? '',
+  kills: player.kills ?? 0,
+  deaths: player.deaths ?? 0,
+  assists: player.assists ?? 0,
+  acs: player.acs ?? player.score ?? 0,
+  adr: player.adr ?? 0,
+  firstKills: player.firstKills ?? 0,
+  hsPct: player.hsPct ?? 0,
+  kast: player.kast ?? 0,
+});
+
+/** Blue before Red - that is the order the graphic's left/right halves assume. */
+const teamRank = (id) => ['blue', 'red'].indexOf(String(id).toLowerCase()) + 1 || 9;
+
+function groupByTeam(players) {
+  const groups = new Map();
+  for (const player of players) {
+    const id = String(player.teamId ?? 'Players');
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(player);
+  }
+  return groups;
+}
+
+/**
+ * Normalised match detail -> graphic state.
+ *
+ * Team names and logos are deliberately preserved: those are the org names the
+ * operator typed, and no data source knows them. Everything a source *does*
+ * know - scores, rosters, agents, map - is overwritten.
+ */
+function importMatch(match) {
+  const players = match.players ?? [];
+  if (!players.length) {
+    toast('That match returned no per-player stats - nothing to import.');
+    return false;
+  }
+
+  const groups = groupByTeam(players);
+  let rosters;
+
+  if (groups.size === 2) {
+    rosters = [...groups.entries()].sort((a, b) => teamRank(a[0]) - teamRank(b[0]));
+  } else {
+    // Deathmatch, or a source that did not report teams. Split the leaderboard
+    // so the operator has something to edit rather than an empty graphic.
+    const ranked = [...players].sort((a, b) => (b.acs ?? 0) - (a.acs ?? 0));
+    rosters = [
+      [null, ranked.slice(0, SLOTS)],
+      [null, ranked.slice(SLOTS, SLOTS * 2)],
+    ];
+    toast(`Match has ${groups.size} team(s) - split the leaderboard in half, check the rosters.`);
+  }
+
+  SIDES.forEach((side, position) => {
+    const [teamId, roster] = rosters[position] ?? [null, []];
+    const team = (match.teams ?? []).find((entry) => String(entry.id) === String(teamId));
+
+    const ranked = [...roster].sort((a, b) => (b.acs ?? 0) - (a.acs ?? 0)).slice(0, SLOTS);
+
+    state[side] = {
+      ...state[side],
+      result: team?.won === true ? 'WIN' : team?.won === false ? 'LOSS' : state[side].result,
+      won: team?.won === true,
+      roundsWon: team?.roundsWon ?? 0,
+      players: Array.from({ length: SLOTS }, (_, index) =>
+        ranked[index] ? mapPlayer(ranked[index]) : emptyPlayer(),
+      ),
+    };
+  });
+
+  if (match.map) state.map = match.map;
+  state.matchId = match.matchId ?? '';
+
+  queueSave();
+  buildMatchEditor();
+  for (const side of SIDES) buildSideEditor(side);
+  return true;
+}
+
+let pendingImport = null;
+
+onLookupMatch(({ match }) => {
+  pendingImport = match;
+  els.importBtn.disabled = !match;
+  els.importHint.hidden = Boolean(match);
+});
+
+els.importBtn.addEventListener('click', () => {
+  if (!pendingImport) return;
+  if (importMatch(pendingImport)) toast('Match imported into the graphic');
+});
+
+// ----------------------------------------------------------------- start ---
+
+async function start() {
+  els.obsUrl.textContent = `${location.origin}/output.html`;
+  els.openLink.href = '/output.html';
+
+  const [graphic, assetData, presetData] = await Promise.all([
+    fetch('/api/graphic').then((r) => r.json()),
+    fetch('/api/valorant-assets')
+      .then((r) => (r.ok ? r.json() : { agents: [], maps: [] }))
+      .catch(() => ({ agents: [], maps: [] })),
+    fetch('/api/presets')
+      .then((r) => r.json())
+      .catch(() => ({ presets: [] })),
+  ]);
+
+  state = graphic.state;
+  catalogue = assetData;
+  presetLibrary = presetData.presets ?? [];
+
+  if (!catalogue.agents.length) {
+    toast('Agent and map lists unavailable - type names by hand, art will be missing.');
+  }
+
+  buildAll();
+  setStatus('', 'Saved');
+  fitPreview();
+}
+
+start().catch((error) => {
+  els.editors.match.replaceChildren(el('p', 'empty', {}, `Could not load the graphic: ${error.message}`));
+});

@@ -20,6 +20,11 @@
         </div>
       </div>
 
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button type="button" class="tab" role="tab" data-tab="lookup" aria-selected="true">Match lookup</button>
+        <button type="button" class="tab" role="tab" data-tab="graphic" aria-selected="false">Graphics dashboard</button>
+      </nav>
+
       <div class="routing" id="henrik-routing">
         <label>
           <span>Region</span>
@@ -45,7 +50,7 @@
 
     <div id="key-warning" class="banner banner-warn" hidden></div>
 
-    <main class="layout">
+    <main class="layout" id="tab-lookup" role="tabpanel">
       <!-- ---------------------------------------------- step 1: search --- -->
       <section class="panel panel-search">
         <h2 class="panel-title"><span class="step">1</span> Player</h2>
@@ -125,8 +130,60 @@
       </section>
     </main>
 
+    <!-- ================================================ graphics dashboard === -->
+    <main class="graphic-tab" id="tab-graphic" role="tabpanel" hidden>
+      <div class="graphic-toolbar">
+        <button type="button" id="g-import" class="btn btn-primary" disabled>Import from match lookup</button>
+        <button type="button" id="g-swap" class="btn btn-ghost">Swap sides</button>
+        <button type="button" id="g-sort" class="btn btn-ghost">Sort by ACS</button>
+        <button type="button" id="g-reset" class="btn btn-ghost">Reset graphic</button>
+
+        <span class="toolbar-gap"></span>
+
+        <label class="obs-url">
+          <span>OBS browser source</span>
+          <span class="obs-url-row">
+            <code id="g-obs-url">/output.html</code>
+            <button type="button" class="btn-copy" data-copy-target="g-obs-url" title="Copy URL">Copy</button>
+            <a class="btn btn-ghost" id="g-open" href="/output.html" target="_blank" rel="noopener">Open</a>
+          </span>
+        </label>
+
+        <span id="g-status" class="save-status">Saved</span>
+      </div>
+
+      <p id="g-import-hint" class="banner banner-warn graphic-hint">
+        <strong>Nothing to import yet. </strong>Pull up a match on the
+        <em>Match lookup</em> tab, then come back and press Import.
+      </p>
+
+      <section class="panel preview-panel">
+        <h2 class="panel-title">
+          Live preview
+          <span class="pill">1920 &times; 1080</span>
+          <span class="detail-actions">
+            <label class="checkline">
+              <input type="checkbox" id="g-checker" checked />
+              <span>Show transparency</span>
+            </label>
+          </span>
+        </h2>
+        <div class="preview-frame checker" id="preview-frame">
+          <iframe id="preview" src="/output.html" title="Scoreboard preview" scrolling="no"></iframe>
+        </div>
+      </section>
+
+      <div class="editor-grid">
+        <section class="panel" id="ed-match"></section>
+        <section class="panel" id="ed-left"></section>
+        <section class="panel" id="ed-right"></section>
+        <section class="panel" id="ed-style"></section>
+      </div>
+    </main>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="/app.js" type="module"></script>
+    <script src="/dashboard.js" type="module"></script>
   </body>
 </html>

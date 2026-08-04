@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VALORANT Scoreboard - Output</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Gabarito:wght@400;500;600;700;800;900&family=Oswald:wght@400;500;600;700&family=Poppins:wght@300;400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/graphic.css" />
+  </head>
+
+  <!--
+    OBS browser source: 1920 x 1080, "Shutdown source when not visible" off.
+    The page holds an SSE connection to the local server and repaints whenever
+    the dashboard saves, so it never needs refreshing mid-broadcast.
+
+    The markup below is a fixed skeleton. Updates only ever rewrite text and
+    image URLs - nothing is recreated - so a repaint cannot flash an image
+    that is already on screen.
+  -->
+  <body>
+    <div id="stage-wrap">
+      <div class="stage" id="stage">
+        <!-- ------------------------------------------------- left side --- -->
+        <div class="col col-side col-left">
+          <div class="head">
+            <!-- Logo first in the DOM but absolutely positioned, so it sits
+                 behind the text without taking layout space from it. -->
+            <div class="head-logo"><img data-img="left.logo" alt="" /></div>
+            <div class="head-team">
+              <div class="head-name" data-bind="left.teamName" data-fit="1"></div>
+              <div class="head-result" data-bind="left.result"></div>
+            </div>
+            <div class="head-score" data-bind="left.roundsWon"></div>
+          </div>
+
+          <div class="mvp">
+            <div class="mvp-id">
+              <div class="mvp-banner" data-bind="labels.mvp"></div>
+              <div class="mvp-spacer"></div>
+              <div class="mvp-who">
+                <div class="mvp-agent" data-bind="left.mvp.agent"></div>
+                <div class="mvp-name" data-bind="left.mvp.name" data-fit="1.9"></div>
+              </div>
+            </div>
+            <div class="mvp-spacer"></div>
+            <div class="mvp-stats">
+              <div data-bind="left.mvp.s0"></div>
+              <div class="mvp-spacer"></div>
+              <div data-bind="left.mvp.s1"></div>
+              <div class="mvp-spacer"></div>
+              <div data-bind="left.mvp.s2"></div>
+            </div>
+            <div class="mvp-portrait"><img data-img="left.mvp.portrait" alt="" /></div>
+          </div>
+
+          <div class="bottom">
+            <div class="map">
+              <img data-img="map.image" alt="" />
+              <p class="map-name" data-bind="map.name"></p>
+            </div>
+            <div class="rows" data-rows="left"></div>
+          </div>
+        </div>
+
+        <!-- ----------------------------------------------- centre strip --- -->
+        <div class="col col-mid">
+          <div class="mid-logo"><img data-img="eventLogo" alt="" /></div>
+          <div class="mid-labels">
+            <div data-bind="labels.s0"></div>
+            <div class="mvp-spacer"></div>
+            <div data-bind="labels.s1"></div>
+            <div class="mvp-spacer"></div>
+            <div data-bind="labels.s2"></div>
+          </div>
+          <div class="mid-rows" id="mid-rows"></div>
+        </div>
+
+        <!-- ------------------------------------------------ right side --- -->
+        <div class="col col-side col-right">
+          <div class="head">
+            <div class="head-logo"><img data-img="right.logo" alt="" /></div>
+            <div class="head-score" data-bind="right.roundsWon"></div>
+            <div class="head-team">
+              <div class="head-name" data-bind="right.teamName" data-fit="1"></div>
+              <div class="head-result" data-bind="right.result"></div>
+            </div>
+          </div>
+
+          <div class="mvp">
+            <div class="mvp-stats">
+              <div data-bind="right.mvp.s0"></div>
+              <div class="mvp-spacer"></div>
+              <div data-bind="right.mvp.s1"></div>
+              <div class="mvp-spacer"></div>
+              <div data-bind="right.mvp.s2"></div>
+            </div>
+            <div class="mvp-spacer"></div>
+            <div class="mvp-id">
+              <div class="mvp-banner" data-bind="labels.mvp"></div>
+              <div class="mvp-spacer"></div>
+              <div class="mvp-who">
+                <div class="mvp-agent" data-bind="right.mvp.agent"></div>
+                <div class="mvp-name" data-bind="right.mvp.name" data-fit="1.9"></div>
+              </div>
+            </div>
+            <div class="mvp-portrait"><img data-img="right.mvp.portrait" alt="" /></div>
+          </div>
+
+          <div class="bottom">
+            <div class="rows" data-rows="right"></div>
+            <div class="team-art"><img data-img="right.logo" alt="" /></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/output.js" type="module"></script>
+  </body>
+</html>

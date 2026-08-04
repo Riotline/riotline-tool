@@ -755,3 +755,391 @@ pre {
   font-size: 13px;
   box-shadow: 0 6px 26px rgba(0, 0, 0, 0.55);
 }
+
+/* ============================================================== tabs === */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.tab {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 16px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab[aria-selected="true"] {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ================================================ graphics dashboard === */
+
+.graphic-tab {
+  padding: 16px 22px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.graphic-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+}
+
+.toolbar-gap {
+  flex: 1 1 auto;
+}
+
+.graphic-hint {
+  border: 1px solid rgba(242, 179, 61, 0.35);
+  border-radius: var(--radius);
+  margin: 0;
+}
+
+.obs-url {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.obs-url > span:first-child {
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.obs-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.obs-url code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 5px 9px;
+  color: var(--text-dim);
+}
+
+.save-status {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  min-width: 74px;
+  text-align: right;
+}
+
+.save-status.saving {
+  color: var(--warn);
+}
+
+.save-status.failed {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------ preview --- */
+
+.preview-panel {
+  padding-bottom: 12px;
+}
+
+.preview-frame {
+  position: relative;
+  width: 100%;
+  /* The stage is a fixed 1920x1080; the frame just reserves the same ratio. */
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0b0f14;
+}
+
+/* Makes an alpha background visible, so an operator can see what OBS will key. */
+.preview-frame.checker {
+  background-color: #22262c;
+  background-image:
+    linear-gradient(45deg, #2c3138 25%, transparent 25%, transparent 75%, #2c3138 75%),
+    linear-gradient(45deg, #2c3138 25%, transparent 25%, transparent 75%, #2c3138 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 12px 12px;
+}
+
+#preview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1920px;
+  height: 1080px;
+  border: 0;
+  transform-origin: top left;
+  background: transparent;
+}
+
+/* ------------------------------------------------------------ editors --- */
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.field-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.field-grid.cols-2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+.field-grid.cols-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.g-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.g-field > span {
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.g-field input,
+.g-field select {
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  width: 100%;
+  min-width: 0;
+}
+
+.g-field input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.g-field input[type="color"] {
+  padding: 2px;
+  height: 30px;
+  cursor: pointer;
+}
+
+.g-field input[type="range"] {
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.checkline input {
+  width: auto;
+  accent-color: var(--accent);
+}
+
+.subhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.subhead::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ------------------------------------------------------ player editor --- */
+
+.player-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: var(--bg-raised);
+  display: grid;
+  gap: 8px;
+}
+
+.player-row.is-mvp {
+  border-color: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.player-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.slot-tag {
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.player-row.is-mvp .slot-tag {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.row-tools {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.mini-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+}
+
+.mini-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+.mini-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.side-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+
+@media (max-width: 900px) {
+  .field-grid.cols-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* The topbar routing selects and key warnings belong to the lookup flow. A
+   body class, not [hidden], so app.js's own show/hide logic is not fought. */
+body.tab-graphic #henrik-routing,
+body.tab-graphic #riot-routing,
+body.tab-graphic #key-warning {
+  display: none !important;
+}
+
+/* The primary button is full-width inside the search form; in the toolbar it
+   is one control among several. */
+.graphic-toolbar .btn-primary {
+  width: auto;
+}
+
+.graphic-toolbar a.btn {
+  text-decoration: none;
+  display: inline-block;
+}
+
+/* --------------------------------------------------------- preset bar --- */
+
+.preset-bar {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.preset-select {
+  width: 100%;
+}
+
+.preset-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.preset-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Whether the live styling still matches the preset it came from. */
+.preset-state.is-edited {
+  color: var(--warn);
+}
+
+.preset-state:not(:empty)::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+}

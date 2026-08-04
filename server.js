@@ -10,6 +10,10 @@
  * The proxy exists because neither source allows cross-origin browser calls,
  * and API keys must never reach the client.
  *
+ * It also hosts the broadcast graphic (see graphics.js): /graphic edits the
+ * state, /output.html renders it, and they stay in sync over SSE because OBS
+ * runs the output page in its own browser process.
+ *
  * Zero npm dependencies - Node 18+ built-ins only.
  */
 
@@ -35,9 +39,18 @@ import {
   trackerMatchList,
 } from './providers.js';
 import { makeTrackerBrowser } from './browser.js';
+import {
+  FONT_CHOICES,
+  PLAYERS_PER_SIDE,
+  STAT_SLOTS,
+  makeAssetCache,
+  makeGraphicStore,
+  makePresetStore,
+} from './graphics.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
+const STATE_DIR = path.join(ROOT, '.state');
 
 /** Riot VAL platform routing hosts - match + content endpoints. */
 const PLATFORM_HOSTS = ['ap', 'br', 'esports', 'eu', 'kr', 'latam', 'na'];
@@ -97,6 +110,14 @@ const DEFAULT_PLATFORM = pick(process.env.HENRIK_PLATFORM, HENRIK_PLATFORMS, 'pc
 
 const riotGet = makeRiotClient(RIOT_API_KEY);
 
+// Broadcast graphic: state survives a restart, asset catalogue survives being
+// offline. Both live in .state/ so nothing user-authored is at risk.
+const graphics = makeGraphicStore(path.join(STATE_DIR, 'graphic.json'));
+const presets = makePresetStore(path.join(STATE_DIR, 'presets.json'));
+const assets = makeAssetCache(path.join(STATE_DIR, 'valorant-assets.json'));
+const restoredGraphic = await graphics.load();
+await presets.load();
+
 // ----------------------------------------------------------------- riot ---
 
 function splitRiotId(riotId) {
@@ -143,7 +164,19 @@ async function handleApi(pathname, params) {
         platform: DEFAULT_PLATFORM,
         platforms: HENRIK_PLATFORMS,
         henrikModes: HENRIK_MODES,
+        fonts: FONT_CHOICES,
+        playersPerSide: PLAYERS_PER_SIDE,
+        statSlots: STAT_SLOTS,
       };
+
+    case '/api/valorant-assets':
+      return assets.get();
+
+    case '/api/graphic':
+      return { revision: graphics.revision, state: graphics.state };
+
+    case '/api/presets':
+      return { presets: presets.list(), activeId: graphics.state.presetId };
 
     case '/api/account': {
       const { gameName, tagLine } = splitRiotId(params.get('riotId'));
@@ -257,8 +290,136 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+// ------------------------------------------------------- graphic plumbing ---
+
+const MAX_BODY_BYTES = 256 * 1024;
+
+/** Read a JSON request body, capped - this endpoint is the only writable one. */
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new ProviderError(413, 'Graphic payload too large.'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw.trim()) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new ProviderError(400, 'Graphic payload was not valid JSON.'));
+      }
+    });
+
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Preset actions. Applying one writes into the live graphic, which is what
+ * pushes it out to every open output source; the others only touch the library.
+ */
+async function handlePresetAction(body) {
+  const action = String(body?.action ?? '');
+  const id = String(body?.id ?? '');
+
+  switch (action) {
+    case 'apply': {
+      const entry = presets.get(id);
+      if (!entry) throw new ProviderError(404, `No preset called "${id}".`);
+      // Only the styling block moves - never the scoreboard on air.
+      graphics.patch({ preset: entry.preset, presetId: entry.id });
+      break;
+    }
+
+    case 'save': {
+      const saved = presets.save({ id: body?.id ?? null, name: body?.name, preset: body?.preset });
+      // Adopt it so the dashboard shows the new preset as the active one.
+      graphics.patch({ preset: saved.preset, presetId: saved.id });
+      await presets.flush();
+      return { presets: presets.list(), activeId: saved.id, saved };
+    }
+
+    case 'delete': {
+      if (!presets.remove(id)) throw new ProviderError(400, 'That preset cannot be deleted.');
+      await presets.flush();
+      break;
+    }
+
+    default:
+      throw new ProviderError(400, `Unknown preset action: ${action || '(none)'}`);
+  }
+
+  return { presets: presets.list(), activeId: graphics.state.presetId };
+}
+
+/**
+ * Server-sent events, one connection per output source. OBS keeps the page
+ * open for the whole broadcast, so the heartbeat exists to stop an idle proxy
+ * or the OS from quietly dropping a connection that then never updates again.
+ */
+function streamGraphic(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-store',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const send = ({ revision, state }) => {
+    res.write(`event: graphic\ndata: ${JSON.stringify({ revision, state })}\n\n`);
+  };
+
+  send({ revision: graphics.revision, state: graphics.state });
+
+  const unsubscribe = graphics.subscribe(send);
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 20_000);
+
+  const stop = () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  };
+  req.on('close', stop);
+  res.on('error', stop);
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? '127.0.0.1'}`);
+
+  if (url.pathname === '/api/graphic/events' && req.method === 'GET') {
+    return streamGraphic(req, res);
+  }
+
+  // The graphic is the one piece of mutable state, so it is the one writable
+  // route; everything else stays read-only.
+  if (url.pathname === '/api/graphic' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      const state = body?.reset === true ? graphics.reset() : graphics.replace(body?.state ?? body);
+      return sendJson(res, 200, { revision: graphics.revision, state });
+    } catch (error) {
+      const status = error instanceof ProviderError ? error.status : 400;
+      return sendJson(res, status, { error: { status, message: error.message } });
+    }
+  }
+
+  if (url.pathname === '/api/presets' && req.method === 'POST') {
+    try {
+      return sendJson(res, 200, await handlePresetAction(await readJsonBody(req)));
+    } catch (error) {
+      const status = error instanceof ProviderError ? error.status : 400;
+      return sendJson(res, status, { error: { status, message: error.message } });
+    }
+  }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return sendJson(res, 405, { error: { status: 405, message: 'Only GET is supported.' } });
@@ -277,11 +438,15 @@ const server = createServer(async (req, res) => {
   }
 });
 
-// Don't leave a headless Chromium behind on Ctrl+C.
+// Don't leave a headless Chromium behind on Ctrl+C, and don't truncate an
+// in-flight graphic save.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    void browser?.close().finally(() => process.exit(0));
-    if (!browser) process.exit(0);
+    void Promise.all([graphics.flush(), presets.flush()])
+      .catch(() => {})
+      .then(() => browser?.close())
+      .catch(() => {})
+      .finally(() => process.exit(0));
   });
 }
 
@@ -291,6 +456,8 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  Riotline Tool');
   console.log(line);
   console.log(`  UI              http://127.0.0.1:${PORT}`);
+  console.log(`  OBS source      http://127.0.0.1:${PORT}/output.html   (1920x1080, transparent)`);
+  console.log(`  Graphic state   ${restoredGraphic ? 'restored from .state/graphic.json' : 'defaults'}`);
   console.log(`  Default source  ${DEFAULT_PROVIDER}`);
   console.log(`  Riot region     ${DEFAULT_REGION} / routing ${DEFAULT_ROUTING}`);
   console.log(`  HenrikDev       ${HENRIK_API_KEY ? 'key loaded' : 'missing (HENRIK_API_KEY)'} | ${DEFAULT_AFFINITY}/${DEFAULT_PLATFORM}`);

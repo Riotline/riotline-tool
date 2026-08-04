@@ -180,6 +180,100 @@ function riotRankName(content, tier) {
   return hit?.tierName ? titleCase(hit.tierName) : `Tier ${tier}`;
 }
 
+/** A trade only counts if the avenging kill lands promptly - the usual cutoff. */
+const TRADE_WINDOW_MS = 3000;
+
+/**
+ * First bloods and KAST, derived from the round-by-round kill timeline.
+ *
+ * Neither is pre-aggregated by Riot or HenrikDev, but the broadcast graphic
+ * offers both as stat rows, so they are reconstructed from the same event list:
+ *
+ *   first blood - whoever landed the earliest kill of a round
+ *   KAST        - share of rounds where a player got a Kill, an Assist,
+ *                 Survived, or was Traded (their killer died within 3s)
+ *
+ * @param {Iterable<{round: unknown, at: number, killer: string, victim?: string, assistants?: string[]}>} events
+ * @param {{playerIds?: string[], rounds?: number}} context
+ * @returns {Map<string, {firstKills: number, kast: number|null}>} keyed by whatever id the caller used
+ */
+export function combatTally(events, { playerIds = [], rounds = 0 } = {}) {
+  const byRound = new Map();
+  for (const event of events) {
+    if (!Number.isFinite(event?.at)) continue;
+    const round = String(event.round ?? '');
+    if (!byRound.has(round)) byRound.set(round, []);
+    byRound.get(round).push(event);
+  }
+
+  const firstKills = new Map();
+  const kastRounds = new Map();
+  const bump = (map, id) => id && map.set(id, (map.get(id) ?? 0) + 1);
+
+  for (const list of byRound.values()) {
+    list.sort((a, b) => a.at - b.at);
+    bump(firstKills, list[0]?.killer);
+
+    const credited = new Set();
+    const diedAt = new Map();
+
+    for (const event of list) {
+      if (event.killer) credited.add(event.killer);
+      for (const assistant of event.assistants ?? []) credited.add(assistant);
+      // One death per player per round, but guard against duplicate events.
+      if (event.victim && !diedAt.has(event.victim)) diedAt.set(event.victim, event.at);
+    }
+
+    // Survived.
+    for (const id of playerIds) if (!diedAt.has(id)) credited.add(id);
+
+    // Traded: the player who killed you died soon after you did.
+    for (const [victim, at] of diedAt) {
+      const killer = list.find((event) => event.victim === victim)?.killer;
+      const avengedAt = killer === undefined ? undefined : diedAt.get(killer);
+      if (avengedAt !== undefined && avengedAt > at && avengedAt - at <= TRADE_WINDOW_MS) credited.add(victim);
+    }
+
+    for (const id of credited) bump(kastRounds, id);
+  }
+
+  // A round with no kills at all (spike defused untouched) still counts as
+  // KAST for everyone, and would otherwise be missing from byRound entirely.
+  const silentRounds = Math.max(0, rounds - byRound.size);
+
+  const tally = new Map();
+  for (const id of playerIds) {
+    tally.set(id, {
+      firstKills: firstKills.get(id) ?? 0,
+      kast: rounds ? Math.round((((kastRounds.get(id) ?? 0) + silentRounds) / rounds) * 100) : null,
+    });
+  }
+  return tally;
+}
+
+/** Riot: kills hang off each round's per-player stats, timed from round start. */
+function riotCombat(match) {
+  const events = [];
+  for (const [index, round] of (match.roundResults ?? []).entries()) {
+    for (const entry of round.playerStats ?? []) {
+      for (const kill of entry.kills ?? []) {
+        events.push({
+          round: round.roundNum ?? index,
+          at: kill.timeSinceRoundStartMillis ?? Number.POSITIVE_INFINITY,
+          killer: kill.killer ?? entry.puuid,
+          victim: kill.victim ?? null,
+          assistants: (kill.assistants ?? []).map((assist) => assist?.assistant ?? assist).filter(Boolean),
+        });
+      }
+    }
+  }
+
+  return combatTally(events, {
+    playerIds: (match.players ?? []).map((player) => player.puuid).filter(Boolean),
+    rounds: (match.roundResults ?? []).length,
+  });
+}
+
 /** Per-player damage/headshot totals, summed across rounds (Riot does not pre-aggregate). */
 function riotDamageTotals(match) {
   const totals = new Map();
@@ -221,6 +315,7 @@ export async function riotMatchDetail(riotGet, { matchId, region }) {
 
   const info = match.matchInfo ?? {};
   const totals = riotDamageTotals(match);
+  const combat = riotCombat(match);
 
   const players = (match.players ?? []).map((player) => {
     const stats = player.stats ?? {};
@@ -243,6 +338,8 @@ export async function riotMatchDetail(riotGet, { matchId, region }) {
       acs: played ? Math.round((stats.score ?? 0) / played) : null,
       adr: played ? Math.round(damage.damage / played) : null,
       hsPct: shots ? Math.round((damage.head / shots) * 100) : null,
+      firstKills: combat.get(player.puuid)?.firstKills ?? 0,
+      kast: combat.get(player.puuid)?.kast ?? null,
     };
   });
 
@@ -729,6 +826,13 @@ export async function trackerMatchDetail(config, { matchId, handle, type }) {
         const pct = statValue(stats, 'headshotsPercentage', 'headshotPercentage');
         return pct !== null ? Math.round(pct) : null;
       })(),
+      // tracker pre-aggregates both of these, under either name depending on
+      // the payload - no round timeline needed here.
+      firstKills: statValue(stats, 'firstBloods', 'firstKills') ?? 0,
+      kast: (() => {
+        const kast = statValue(stats, 'kast', 'kastPercentage', 'kAST');
+        return kast === null ? null : Math.round(kast);
+      })(),
     };
   });
 
@@ -878,6 +982,56 @@ const henrikTimestamp = (value) => {
   return Number.isNaN(parsed) ? null : parsed;
 };
 
+/**
+ * First bloods and KAST, keyed by puuid.
+ *
+ * v4 exposes a flat `kills` timeline; older shapes nest the same events under
+ * each round's per-player stats. Both are read, because neither the graphic nor
+ * the tracker fallback can rely on which shape a given payload arrived in.
+ */
+function henrikCombat(match) {
+  const events = [];
+  const seen = new Set();
+
+  // A puuid can appear as an object, a *_puuid field, or a bare string.
+  const id = (value) => (typeof value === 'string' ? value : (value?.puuid ?? null));
+
+  const push = (kill, roundHint) => {
+    const killer = id(kill?.killer) ?? kill?.killer_puuid ?? null;
+    const at = kill?.time_in_round_in_ms ?? kill?.kill_time_in_round;
+    if (!killer || !Number.isFinite(at)) return;
+
+    const victim = id(kill?.victim) ?? kill?.victim_puuid ?? null;
+    const round = kill.round ?? roundHint;
+
+    // The two shapes can both be present; do not count a kill twice.
+    const fingerprint = `${round}|${at}|${killer}|${victim}`;
+    if (seen.has(fingerprint)) return;
+    seen.add(fingerprint);
+
+    events.push({
+      round,
+      at,
+      killer,
+      victim,
+      assistants: (kill.assistants ?? []).map(id).filter(Boolean),
+    });
+  };
+
+  for (const kill of match.kills ?? []) push(kill, null);
+
+  for (const [index, round] of (match.rounds ?? []).entries()) {
+    for (const entry of round.stats ?? round.player_stats ?? []) {
+      for (const kill of entry.kill_events ?? entry.kills ?? []) push(kill, index);
+    }
+  }
+
+  return combatTally(events, {
+    playerIds: (match.players ?? []).map((player) => player.puuid).filter(Boolean),
+    rounds: henrikRoundsPlayed(match, (match.teams ?? [])[0]),
+  });
+}
+
 /** Rounds actually played - the rounds array is authoritative, team totals are the fallback. */
 function henrikRoundsPlayed(match, team) {
   if (Array.isArray(match.rounds) && match.rounds.length) return match.rounds.length;
@@ -910,6 +1064,7 @@ function henrikSummary(match, puuid) {
 function henrikDetail(match) {
   const metadata = match.metadata ?? {};
   const teams = match.teams ?? [];
+  const combat = henrikCombat(match);
 
   const normalisedTeams = teams.map((team) => ({
     id: team.team_id ?? null,
@@ -941,6 +1096,8 @@ function henrikDetail(match) {
       acs: played ? Math.round((stats.score ?? 0) / played) : null,
       adr: played ? Math.round(damage / played) : null,
       hsPct: shots ? Math.round(((stats.headshots ?? 0) / shots) * 100) : null,
+      firstKills: combat.get(player.puuid)?.firstKills ?? 0,
+      kast: combat.get(player.puuid)?.kast ?? null,
     };
   });
 

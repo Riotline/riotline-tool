@@ -4,3 +4,4 @@ node_modules/
 *.hidden
 .playwright-profile/
 tools/probe-output/
+.state/

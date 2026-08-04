@@ -12,6 +12,8 @@
  * either source without branching on the provider.
  */
 
+import { setLookupMatch } from './store.js';
+
 // ------------------------------------------------------------ elements ---
 
 const $ = (id) => document.getElementById(id);
@@ -90,6 +92,9 @@ function toast(message) {
     els.toast.hidden = true;
   }, 2200);
 }
+
+// The graphics tab shares this toast rather than growing its own.
+window.addEventListener('app-toast', (event) => toast(String(event.detail ?? '')));
 
 async function api(path, params = {}) {
   const url = new URL(path, location.origin);
@@ -343,6 +348,8 @@ async function selectMatch(matchId) {
     renderMatchDetails(match);
     els.copyJson.hidden = false;
     els.downloadJson.hidden = false;
+    // Hand it to the graphics tab so it can be imported without re-fetching.
+    setLookupMatch(match, state.handle);
   } catch (error) {
     showError(els.details, error);
   }
@@ -350,6 +357,7 @@ async function selectMatch(matchId) {
 
 function resetDetails() {
   state.selectedMatch = null;
+  setLookupMatch(null);
   els.copyJson.hidden = true;
   els.downloadJson.hidden = true;
   els.details.replaceChildren(el('p', { class: 'empty', text: 'Select a match to pull its full detail payload.' }));

@@ -1,0 +1,617 @@
+/*
+ * Broadcast scoreboard graphic.
+ *
+ * Laid out on a fixed 1920x1080 stage rather than in viewport units: OBS
+ * renders the browser source at an exact canvas size, and a fixed stage means
+ * a font size chosen here is the font size that goes to air. The stage is then
+ * scaled as a whole to fit whatever window it happens to be previewed in.
+ *
+ * Every colour is a custom property set from the preset, so restyling the
+ * graphic never touches this file.
+ */
+
+:root {
+  --left-bg: #21597a;
+  --right-bg: #131313;
+  --global-text: #30a4e7;
+  --left-big: #131313;
+  --left-small: #30a4e7;
+  --right-big: #ff3434;
+  --right-small: #ffffff;
+  --mvp-banner-bg: #db3131;
+  --mvp-banner-text: #131313;
+  --mvp-name: #5ad4e4;
+  --mvp-agent: #ffffff;
+  --panel-opacity: 0.45;
+  --font: "Gabarito";
+  --panel: rgba(0, 0, 0, var(--panel-opacity));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  /* Transparent by default - OBS composites this over the game feed. */
+  background: transparent;
+}
+
+body {
+  font-family: var(--font), "Gabarito", "Poppins", "Segoe UI", system-ui, sans-serif;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ---------------------------------------------------------------- stage --- */
+
+#stage-wrap {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.stage {
+  width: 1920px;
+  height: 1080px;
+  flex: none;
+  display: flex;
+  flex-direction: row;
+  transform-origin: center center;
+}
+
+.stage.uppercase {
+  text-transform: uppercase;
+}
+
+/* Ratios taken from the reference layout: 42.7 / 11.3 / 42.7. */
+.col {
+  padding: 20px;
+  display: grid;
+  /* header | gap | mvp | gap | roster - identical in all three columns, which
+     is what keeps the centre labels aligned with the player rows. */
+  grid-template-rows: 16% 20px 30% 20px minmax(0, 1fr);
+  min-width: 0;
+}
+
+/* Rows are assigned explicitly so the 20px gap rows stay empty without needing
+   placeholder elements in the markup. */
+.head,
+.mid-logo {
+  grid-row: 1;
+}
+.mvp,
+.mid-labels {
+  grid-row: 3;
+}
+.bottom,
+.mid-rows {
+  grid-row: 5;
+}
+
+.col-side {
+  flex: 42.7 1 0;
+}
+
+.col-mid {
+  flex: 11.3 1 0;
+}
+
+/* --------------------------------------------------------------- header --- */
+
+/* The team logo is a watermark, not a column: absolutely positioned so a long
+   team name gets the whole band to itself instead of being squeezed into a
+   third of it. */
+.head {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.col-left .head {
+  background: var(--left-bg);
+}
+
+.col-right .head {
+  background: var(--right-bg);
+}
+
+/* A flex column so the name box is sized by its text rather than by the
+   container. A block child would be container-width with the text clipped at
+   that edge, and the squeeze transform would then only shrink already-truncated
+   text - the clip has to happen after the transform, not before it. */
+.head-team {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  margin: 20px 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.col-left .head-team {
+  margin-left: 32px;
+  align-items: flex-start;
+}
+
+.col-right .head-team {
+  margin-right: 32px;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.head-name {
+  font-size: 72px;
+  line-height: 1.05;
+  white-space: nowrap;
+  /* Deliberately no overflow:hidden - see .head-team. The .head band clips. */
+  /* Squeezed towards the edge it is anchored to, so a long name grows inward
+     rather than sliding away from the panel edge. */
+  transform-origin: left center;
+}
+
+.col-right .head-name {
+  transform-origin: right center;
+}
+
+.head-result {
+  font-size: 36px;
+  line-height: 1.2;
+}
+
+.col-left .head-name {
+  color: var(--left-big);
+}
+.col-left .head-result {
+  color: var(--left-small);
+}
+.col-right .head-name {
+  color: var(--right-big);
+}
+.col-right .head-result {
+  color: var(--right-small);
+}
+
+.head-logo {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  opacity: 0.2;
+  pointer-events: none;
+}
+
+.head-logo img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.head-score {
+  position: relative;
+  z-index: 1;
+  margin: 12px;
+  flex: 0 0 auto;
+  font-size: 128px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.col-left .head-score {
+  text-align: right;
+  color: var(--left-big);
+}
+
+.col-right .head-score {
+  text-align: left;
+  color: var(--right-big);
+}
+
+/* ------------------------------------------------------------ mvp panel --- */
+
+.mvp {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  /* Definite row: an auto row would be sized by its tallest item and could
+     then grow past the 30% band the layout allots this panel. */
+  grid-template-rows: minmax(0, 1fr);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.mvp-portrait {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.mvp-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  /* Fades the portrait into the panel instead of butting hard against the
+     text columns either side of it. */
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+}
+
+.mvp-id,
+.mvp-stats {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.mvp-banner {
+  margin: 32px 0;
+  font-size: 60px;
+  line-height: 1.1;
+  text-align: center;
+  background: var(--mvp-banner-bg);
+  color: var(--mvp-banner-text);
+}
+
+.col-left .mvp-banner {
+  width: 91.6667%;
+}
+
+.col-right .mvp-banner {
+  width: 100%;
+}
+
+.mvp-spacer {
+  flex: 1 1 auto;
+}
+
+.mvp-who {
+  width: 100%;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.col-left .mvp-who {
+  padding-left: 32px;
+  align-items: flex-start;
+}
+
+.col-right .mvp-who {
+  padding-right: 32px;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.mvp-agent {
+  font-size: 30px;
+  line-height: 1.2;
+  color: var(--mvp-agent);
+}
+
+.mvp-name {
+  font-size: 36px;
+  line-height: 1.2;
+  color: var(--mvp-name);
+  white-space: nowrap;
+  transform-origin: left center;
+}
+
+.col-right .mvp-name {
+  transform-origin: right center;
+}
+
+.mvp-stats {
+  margin: 0 16px;
+  font-size: 48px;
+  color: var(--global-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Deliberately not `> div`: the flex spacers between the values are divs too,
+   and giving them the same margins silently adds 80px to the panel's height. */
+.mvp-stats > div:not(.mvp-spacer) {
+  margin: 20px 0;
+}
+
+.col-left .mvp-stats {
+  text-align: right;
+}
+
+.col-right .mvp-stats {
+  text-align: left;
+  grid-row: 1;
+  grid-column: 1;
+}
+
+.col-right .mvp-id {
+  grid-row: 1;
+  grid-column: 3;
+}
+
+/* --------------------------------------------------------------- roster --- */
+
+.bottom {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* 32/68 is what the reference's 50%/75% widths collapse to once the roster's
+   68% min-width stops it shrinking any further. */
+.map,
+.team-art {
+  position: relative;
+  width: 32%;
+  flex: none;
+  overflow: hidden;
+}
+
+.team-art {
+  background: var(--right-bg);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.map img,
+.team-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.team-art img {
+  object-fit: contain;
+}
+
+.map-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  padding-bottom: 20px;
+  text-align: center;
+  font-size: 60px;
+  line-height: 1.1;
+  color: var(--global-text);
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.75);
+}
+
+.rows {
+  width: 68%;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.row {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.col-left .row {
+  background: var(--left-bg);
+}
+
+.col-right .row {
+  background: var(--right-bg);
+}
+
+.row-agent {
+  position: relative;
+  width: 20%;
+  flex: none;
+  background: #000;
+  overflow: hidden;
+}
+
+.row-agent > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.col-right .row-agent > img {
+  transform: scaleX(-1);
+}
+
+/* Role pip: a solid square in the row colour, with the role glyph knocked out
+   of it in the big-text colour. Masking rather than tinting keeps it readable
+   whatever the role icon's own palette is. */
+.role-pip {
+  position: absolute;
+  bottom: 0;
+  width: 25%;
+  height: 22%;
+  z-index: 2;
+}
+
+.col-left .role-pip {
+  right: 0;
+  background: var(--left-bg);
+}
+
+.col-right .role-pip {
+  left: 0;
+  background: var(--right-bg);
+}
+
+.role-pip > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+.col-left .role-pip > span {
+  background: var(--left-big);
+}
+
+.col-right .role-pip > span {
+  background: var(--right-big);
+}
+
+.row-info {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-width: 0;
+}
+
+.row-who {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: 4px;
+  min-width: 0;
+}
+
+.col-left .row-who {
+  padding-left: 20px;
+}
+
+.col-right .row-who {
+  padding-right: 20px;
+  text-align: right;
+  grid-row: 1;
+  grid-column: 2;
+}
+
+.row-agent-name {
+  font-size: 16px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.row-player-name {
+  font-size: 24px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.col-left .row-agent-name {
+  color: var(--left-small);
+}
+.col-left .row-player-name {
+  color: var(--left-big);
+}
+.col-right .row-agent-name {
+  color: var(--right-small);
+}
+.col-right .row-player-name {
+  color: var(--right-big);
+}
+
+.row-stats {
+  display: grid;
+  align-content: center;
+  gap: 20px;
+  font-size: 36px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+
+.col-left .row-stats {
+  padding-right: 20px;
+  text-align: right;
+  color: var(--left-big);
+}
+
+.col-right .row-stats {
+  padding-left: 20px;
+  text-align: left;
+  color: var(--right-big);
+  grid-row: 1;
+  grid-column: 1;
+}
+
+/* --------------------------------------------------------- centre column --- */
+
+.mid-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 20px 0;
+}
+
+.mid-logo img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.mid-labels {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  text-align: center;
+  font-size: 30px;
+  color: var(--global-text);
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Spacers excluded - see the note on .mvp-stats. */
+.mid-labels > div:not(.mvp-spacer) {
+  margin: 28px 0;
+}
+
+.mid-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--panel);
+  min-height: 0;
+}
+
+.mid-row {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  font-size: 24px;
+  color: var(--global-text);
+  min-height: 0;
+}
+
+/* Nothing loaded yet - an empty <img src=""> otherwise draws a broken icon. */
+img[hidden],
+[hidden] {
+  display: none !important;
+}
