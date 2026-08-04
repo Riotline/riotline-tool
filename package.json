@@ -2,14 +2,22 @@
   "name": "val-broadcast-tool",
   "version": "1.0.0",
   "private": true,
-  "description": "VALORANT match lookup UI for graphics broadcast production, backed by the official Riot Games API.",
+  "description": "VALORANT match lookup UI for graphics broadcast production. HenrikDev / Riot API / tracker.gg.",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "setup:tracker": "npm install playwright && npx playwright install chromium",
+    "tracker:login": "node tools/tracker-login.js",
+    "tracker:reset": "node -e \"import('./browser.js').then(m=>m.makeTrackerBrowser({}).resetProfile()).then(ok=>console.log(ok?'Browser profile cleared.':'Could not clear the profile - close any running browser and retry.'))\"",
+    "tracker:probe": "node tools/probe-tracker.js"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "comment": "No required dependencies. Playwright is optional and only used by the tracker.gg source - skip it with 'npm install --omit=optional'.",
+  "optionalDependencies": {
+    "playwright": "^1.62.1"
   }
 }

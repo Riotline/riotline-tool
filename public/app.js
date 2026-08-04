@@ -1,8 +1,15 @@
 /**
  * VALORANT Broadcast Production Tool - UI logic.
  *
- * Flow: Riot ID -> account (puuid) -> matchlist -> match detail.
- * All Riot calls go through the local proxy in server.js.
+ * Flow: Riot ID -> account -> match list -> match detail.
+ *
+ * Three interchangeable data sources, chosen with the "Data source" toggle:
+ *   henrik   - HenrikDev unofficial API (default; custom games, no production key)
+ *   riot     - official Riot Games API (needs a production key for match data)
+ *   tracker  - tracker.gg / Tracker Network
+ *
+ * The server normalises both into one shape, so everything below renders
+ * either source without branching on the provider.
  */
 
 // ------------------------------------------------------------ elements ---
@@ -13,11 +20,18 @@ const els = {
   form: $('search-form'),
   riotId: $('riot-id'),
   searchBtn: $('search-btn'),
+  routingBlock: $('riot-routing'),
   routing: $('routing'),
   region: $('region'),
+  henrikBlock: $('henrik-routing'),
+  affinity: $('affinity'),
+  platform: $('platform'),
+  typeField: $('type-field'),
+  matchType: $('match-type'),
   keyWarning: $('key-warning'),
   playerCard: $('player-card'),
   playerName: $('player-name'),
+  playerPuuidRow: $('player-puuid-row'),
   playerPuuid: $('player-puuid'),
   matchList: $('match-list'),
   matchCount: $('match-count'),
@@ -28,17 +42,20 @@ const els = {
 };
 
 const state = {
+  config: null,
+  provider: 'henrik',
   account: null,
+  handle: null,
   matches: [],
   selectedMatchId: null,
   selectedMatch: null,
-  content: null,
-  contentRegion: null,
 };
+
+const provider = () => document.querySelector('input[name="provider"]:checked')?.value ?? 'henrik';
 
 // ------------------------------------------------------------- helpers ---
 
-/** Build an element. Text goes in via textContent, so nothing is ever injected as HTML. */
+/** Build an element. Text always goes in via textContent - nothing is injected as HTML. */
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -51,10 +68,6 @@ function el(tag, attrs = {}, children = []) {
     if (child) node.append(child);
   }
   return node;
-}
-
-function clear(node) {
-  node.replaceChildren();
 }
 
 function showLoading(node, label) {
@@ -93,45 +106,10 @@ async function api(path, params = {}) {
   return payload;
 }
 
-// ------------------------------------------------------- formatting ---
-
-const QUEUE_NAMES = {
-  competitive: 'Competitive',
-  unrated: 'Unrated',
-  swiftplay: 'Swiftplay',
-  spikerush: 'Spike Rush',
-  deathmatch: 'Deathmatch',
-  ggteam: 'Escalation',
-  hurm: 'Team Deathmatch',
-  onefa: 'Replication',
-  premier: 'Premier',
-  newmap: 'New Map',
-  snowball: 'Snowball Fight',
-  '': 'Custom / Unrated Queue',
-};
-
-/** Fallback map names by asset path codename - used only when content-v1 is unavailable. */
-const MAP_FALLBACK = {
-  ascent: 'Ascent',
-  duality: 'Bind',
-  bonsai: 'Split',
-  triad: 'Haven',
-  port: 'Icebox',
-  foxtrot: 'Breeze',
-  canyon: 'Fracture',
-  pitt: 'Pearl',
-  jam: 'Lotus',
-  juliett: 'Sunset',
-  infinity: 'Abyss',
-  range: 'The Range',
-};
-
-const normId = (value) => String(value ?? '').replace(/-/g, '').toUpperCase();
-
-function formatQueue(queueId) {
-  const key = String(queueId ?? '').toLowerCase();
-  return QUEUE_NAMES[key] ?? (key ? key.charAt(0).toUpperCase() + key.slice(1) : 'Unknown');
-}
+const titleCase = (value) =>
+  String(value ?? '')
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 
 function formatDateTime(millis) {
   if (!millis) return 'Unknown date';
@@ -147,47 +125,26 @@ function formatDateTime(millis) {
 function formatDuration(millis) {
   if (!millis) return '-';
   const totalSeconds = Math.round(millis / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  return `${minutes}m ${String(totalSeconds % 60).padStart(2, '0')}s`;
+  return `${Math.floor(totalSeconds / 60)}m ${String(totalSeconds % 60).padStart(2, '0')}s`;
 }
 
-function agentName(characterId) {
-  const target = normId(characterId);
-  const match = state.content?.characters?.find((c) => normId(c.id) === target);
-  return match?.name ?? (characterId ? `${String(characterId).slice(0, 8)}...` : '-');
-}
+const sideClass = (teamId) => {
+  const side = String(teamId ?? '').toLowerCase();
+  return side === 'red' || side === 'blue' ? side : '';
+};
 
-function mapName(mapId) {
-  const path = String(mapId ?? '');
-  const match = state.content?.maps?.find((m) => (m.assetPath ?? '').toLowerCase() === path.toLowerCase());
-  if (match?.name) return match.name;
-
-  const codename = path.split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
-  return MAP_FALLBACK[codename] ?? (codename ? codename.charAt(0).toUpperCase() + codename.slice(1) : 'Unknown map');
-}
-
-function rankName(tier) {
-  if (tier === undefined || tier === null || tier === 0) return 'Unranked';
-  const episodes = state.content?.competitiveTiers ?? [];
-  const tiers = episodes.at(-1)?.tiers ?? [];
-  const match = tiers.find((t) => t.tier === tier);
-  return match?.tierName ? titleCase(match.tierName) : `Tier ${tier}`;
-}
-
-const titleCase = (value) =>
-  String(value)
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-
-// ------------------------------------------------------------- config ---
+// -------------------------------------------------------------- config ---
 
 async function loadConfig() {
   try {
     const config = await api('/api/config');
+    state.config = config;
 
     for (const [select, values, selected] of [
       [els.routing, config.routings, config.routing],
       [els.region, config.regions, config.region],
+      [els.affinity, config.affinities, config.affinity],
+      [els.platform, config.platforms, config.platform],
     ]) {
       select.replaceChildren(
         ...values.map((value) => el('option', { value, text: value.toUpperCase(), selected: value === selected })),
@@ -195,24 +152,73 @@ async function loadConfig() {
       select.value = selected;
     }
 
-    els.keyWarning.hidden = config.hasKey;
+    const radio = document.querySelector(`input[name="provider"][value="${config.provider}"]`);
+    if (radio) radio.checked = true;
+
+    syncProviderUi();
   } catch {
     els.matchList.replaceChildren(el('p', { class: 'empty', text: 'Could not reach the local server.' }));
   }
 }
 
-/** Agent/map/rank names. Best-effort: the UI degrades to IDs if this fails. */
-async function ensureContent(region) {
-  if (state.content && state.contentRegion === region) return;
-  try {
-    state.content = await api('/api/content', { region });
-    state.contentRegion = region;
-  } catch {
-    state.content = state.content ?? null;
+const PROVIDER_LABELS = { henrik: 'HenrikDev', riot: 'Riot API', tracker: 'tracker.gg' };
+
+const KEY_WARNINGS = {
+  henrik: [
+    'No HenrikDev key loaded. ',
+    'Set HENRIK_API_KEY in .env - free keys come from the HenrikDev Discord - then restart.',
+  ],
+  riot: ['No Riot API key loaded. ', 'Set RIOT_API_KEY in .env, then restart the server.'],
+  tracker: [
+    'tracker.gg source is disabled. ',
+    'It drives a real browser (the site is Cloudflare-protected and loads matches by XHR). ' +
+      'Set TRACKER_ENABLED=true in .env and make sure Playwright is installed, then restart. No API key needed.',
+  ],
+};
+
+/** Show only the controls the selected source uses, and warn about a missing key. */
+function syncProviderUi() {
+  const current = provider();
+  state.provider = current;
+
+  const config = state.config;
+  if (!config) return;
+
+  // Riot's matchlist has no mode filter; the other two do.
+  const modes = current === 'henrik' ? config.henrikModes : current === 'tracker' ? config.matchTypes : null;
+
+  els.typeField.hidden = !modes;
+  els.routingBlock.hidden = current !== 'riot';
+  els.henrikBlock.hidden = current !== 'henrik';
+
+  if (modes) {
+    els.matchType.replaceChildren(...modes.map((value) => el('option', { value, text: titleCase(value) })));
+    els.matchType.value = modes.includes('custom') ? 'custom' : modes[0];
+  }
+
+  const hasKey = { henrik: config.hasHenrikKey, riot: config.hasRiotKey, tracker: config.hasTrackerKey }[current];
+  els.keyWarning.hidden = Boolean(hasKey);
+
+  if (!hasKey) {
+    const [lead, body] = KEY_WARNINGS[current];
+    els.keyWarning.replaceChildren(el('strong', { text: lead }), document.createTextNode(body));
   }
 }
 
-// ------------------------------------------------- step 1 + 2: search ---
+for (const radio of document.querySelectorAll('input[name="provider"]')) {
+  radio.addEventListener('change', () => {
+    syncProviderUi();
+    state.matches = [];
+    els.matchCount.hidden = true;
+    els.playerCard.hidden = true;
+    els.matchList.replaceChildren(
+      el('p', { class: 'empty', text: 'Data source changed - search again to reload the match list.' }),
+    );
+    resetDetails();
+  });
+}
+
+// -------------------------------------------------- step 1 + 2: search ---
 
 els.form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -220,27 +226,48 @@ els.form.addEventListener('submit', async (event) => {
   const riotId = els.riotId.value.trim();
   if (!riotId) return;
 
-  const region = els.region.value;
+  const current = provider();
+  state.provider = current;
+
   els.searchBtn.disabled = true;
   els.playerCard.hidden = true;
   resetDetails();
-  showLoading(els.matchList, 'Looking up player...');
+  showLoading(els.matchList, `Looking up player on ${PROVIDER_LABELS[current] ?? current}...`);
 
   try {
-    const account = await api('/api/account', { riotId, routing: els.routing.value });
-    state.account = account;
+    const account = await api('/api/account', {
+      riotId,
+      provider: current,
+      routing: els.routing.value,
+    });
 
-    els.playerName.textContent = `${account.gameName}#${account.tagLine}`;
-    els.playerPuuid.textContent = account.puuid;
+    state.account = account;
+    state.handle = account.handle ?? `${account.gameName}#${account.tagLine}`;
+
+    // HenrikDev's account response carries the player's affinity - trust it
+    // over whatever the dropdown happened to be set to.
+    if (current === 'henrik' && account.region) {
+      const option = [...els.affinity.options].find((o) => o.value === account.region);
+      if (option) els.affinity.value = account.region;
+    }
+
+    els.playerName.textContent = state.handle;
+    els.playerPuuid.textContent = account.puuid ?? '';
+    els.playerPuuidRow.hidden = !account.puuid;
     els.playerCard.hidden = false;
 
     showLoading(els.matchList, 'Loading match history...');
-    const [matchlist] = await Promise.all([
-      api('/api/matches', { puuid: account.puuid, region }),
-      ensureContent(region),
-    ]);
+    const result = await api('/api/matches', {
+      provider: current,
+      puuid: account.puuid,
+      handle: state.handle,
+      region: els.region.value,
+      affinity: els.affinity.value,
+      platform: els.platform.value,
+      type: els.matchType.value,
+    });
 
-    state.matches = matchlist.history ?? [];
+    state.matches = result.matches ?? [];
     renderMatchList();
   } catch (error) {
     showError(els.matchList, error);
@@ -253,7 +280,10 @@ els.form.addEventListener('submit', async (event) => {
 function renderMatchList() {
   if (!state.matches.length) {
     els.matchCount.hidden = true;
-    els.matchList.replaceChildren(el('p', { class: 'empty', text: 'No matches returned for this player.' }));
+    const note = els.typeField.hidden
+      ? 'No matches returned for this player.'
+      : `No ${els.matchType.value} matches returned for this player.`;
+    els.matchList.replaceChildren(el('p', { class: 'empty', text: note }));
     return;
   }
 
@@ -262,35 +292,53 @@ function renderMatchList() {
 
   els.matchList.replaceChildren(
     ...state.matches.map((match) => {
-      const button = el('button', { type: 'button', class: 'match-item', 'data-match-id': match.matchId }, [
-        el('span', { class: 'match-queue', text: formatQueue(match.queueId) }),
-        el('span', { class: 'match-date', text: formatDateTime(match.gameStartTimeMillis) }),
-        el('span', { class: 'match-id', text: match.matchId }),
+      const heading = [match.queue, match.map].filter(Boolean).join(' - ');
+
+      const button = el('button', { type: 'button', class: 'match-item', 'data-match-id': match.id }, [
+        el('span', { class: 'match-queue', text: heading || 'Match' }),
+        el('span', { class: 'match-date', text: formatDateTime(match.startedAt) }),
       ]);
-      button.addEventListener('click', () => selectMatch(match.matchId));
+
+      if (match.score) {
+        const result = el('span', {
+          class: `match-score${match.won === true ? ' win' : match.won === false ? ' loss' : ''}`,
+          text: match.score,
+        });
+        button.append(result);
+      }
+
+      button.append(el('span', { class: 'match-id', text: match.id ?? '' }));
+      button.addEventListener('click', () => selectMatch(match.id));
       return button;
     }),
   );
 }
 
-// --------------------------------------------- step 3: match details ---
+// ---------------------------------------------- step 3: match details ---
 
 async function selectMatch(matchId) {
   state.selectedMatchId = matchId;
 
   for (const item of els.matchList.querySelectorAll('.match-item')) {
-    item.setAttribute('aria-current', String(item.dataset.matchId === matchId));
+    item.setAttribute('aria-current', String(item.dataset.matchId === String(matchId)));
   }
 
   resetDetails();
   showLoading(els.details, 'Pulling match details...');
 
   try {
-    const region = els.region.value;
-    await ensureContent(region);
-    const match = await api('/api/match', { matchId, region });
+    const match = await api('/api/match', {
+      provider: state.provider,
+      matchId,
+      handle: state.handle,
+      region: els.region.value,
+      affinity: els.affinity.value,
+      platform: els.platform.value,
+      type: els.matchType.value,
+    });
 
     if (state.selectedMatchId !== matchId) return; // a newer selection won
+
     state.selectedMatch = match;
     renderMatchDetails(match);
     els.copyJson.hidden = false;
@@ -307,64 +355,38 @@ function resetDetails() {
   els.details.replaceChildren(el('p', { class: 'empty', text: 'Select a match to pull its full detail payload.' }));
 }
 
-/** Per-player damage/headshot totals, summed across every round. */
-function damageTotals(match) {
-  const totals = new Map();
-
-  for (const round of match.roundResults ?? []) {
-    for (const entry of round.playerStats ?? []) {
-      const current = totals.get(entry.puuid) ?? { damage: 0, head: 0, body: 0, leg: 0 };
-      for (const hit of entry.damage ?? []) {
-        current.damage += hit.damage ?? 0;
-        current.head += hit.headshots ?? 0;
-        current.body += hit.bodyshots ?? 0;
-        current.leg += hit.legshots ?? 0;
-      }
-      totals.set(entry.puuid, current);
-    }
-  }
-  return totals;
-}
-
 function renderMatchDetails(match) {
-  const info = match.matchInfo ?? {};
-  const players = match.players ?? [];
-  const teams = match.teams ?? [];
-  const rounds = match.roundResults ?? [];
-  const totals = damageTotals(match);
-  const roundsPlayed = teams[0]?.roundsPlayed ?? rounds.length ?? 0;
-
   const fragment = document.createDocumentFragment();
+  const teams = match.teams ?? [];
+  const players = match.players ?? [];
+  const rounds = match.rounds ?? [];
 
   // --- scoreline ---------------------------------------------------------
-  const red = teams.find((t) => String(t.teamId).toLowerCase() === 'red');
-  const blue = teams.find((t) => String(t.teamId).toLowerCase() === 'blue');
-
-  if (red && blue) {
+  if (teams.length === 2) {
     fragment.append(
       el('div', { class: 'scoreline' }, [
-        teamScoreBlock('red', red),
+        teamScoreBlock(teams[0]),
         el('div', { class: 'scoreline-meta' }, [
-          el('div', { class: 'map', text: mapName(info.mapId) }),
-          el('div', { class: 'sub', text: formatQueue(info.queueId) }),
-          el('div', { class: 'sub', text: formatDuration(info.gameLengthMillis) }),
+          el('div', { class: 'map', text: match.map ?? 'Unknown map' }),
+          el('div', { class: 'sub', text: match.mode ?? '' }),
+          el('div', { class: 'sub', text: formatDuration(match.durationMs) }),
         ]),
-        teamScoreBlock('blue', blue),
+        teamScoreBlock(teams[1]),
       ]),
     );
   }
 
   // --- metadata grid -----------------------------------------------------
   const meta = [
-    ['Map', mapName(info.mapId)],
-    ['Mode', formatQueue(info.queueId)],
-    ['Started', formatDateTime(info.gameStartMillis)],
-    ['Duration', formatDuration(info.gameLengthMillis)],
-    ['Rounds', roundsPlayed || '-'],
-    ['Ranked', info.isRanked ? 'Yes' : 'No'],
-    ['Completed', info.isCompleted ? 'Yes' : 'No'],
-    ['Season', info.seasonId ?? '-'],
-    ['Match ID', info.matchId ?? state.selectedMatchId ?? '-'],
+    ['Source', PROVIDER_LABELS[match.provider] ?? match.provider],
+    ['Map', match.map ?? '-'],
+    ['Mode', match.mode ?? '-'],
+    ['Started', formatDateTime(match.startedAt)],
+    ['Duration', formatDuration(match.durationMs)],
+    ['Rounds', teams[0]?.roundsPlayed || rounds.length || '-'],
+    ['Ranked', match.isRanked === null ? '-' : match.isRanked ? 'Yes' : 'No'],
+    ['Season', match.season ?? '-'],
+    ['Match ID', match.matchId ?? '-'],
   ];
 
   fragment.append(
@@ -383,36 +405,37 @@ function renderMatchDetails(match) {
   // --- scoreboards -------------------------------------------------------
   const byTeam = new Map();
   for (const player of players) {
-    const key = String(player.teamId ?? 'unknown');
+    const key = String(player.teamId ?? 'Players');
     if (!byTeam.has(key)) byTeam.set(key, []);
     byTeam.get(key).push(player);
   }
 
-  const isFreeForAll = byTeam.size > 2; // deathmatch: one "team" per player
-  if (isFreeForAll) {
-    fragment.append(scoreboard('Players', players, totals, null));
+  if (!players.length) {
+    fragment.append(
+      el('p', {
+        class: 'empty',
+        text: 'This source returned no per-player stats for the match. The raw payload below still has everything it sent.',
+      }),
+    );
+  } else if (byTeam.size > 2) {
+    // Free-for-all (deathmatch): one "team" per player.
+    fragment.append(scoreboard('Players', players, null));
   } else {
-    for (const teamId of ['Red', 'Blue']) {
-      const roster = byTeam.get(teamId) ?? [];
-      if (!roster.length) continue;
-      const team = teams.find((t) => String(t.teamId).toLowerCase() === teamId.toLowerCase());
-      fragment.append(scoreboard(teamId, roster, totals, team));
-    }
     for (const [teamId, roster] of byTeam) {
-      if (teamId !== 'Red' && teamId !== 'Blue') fragment.append(scoreboard(teamId, roster, totals, null));
+      const team = teams.find((t) => String(t.id) === teamId);
+      fragment.append(scoreboard(teamId, roster, team));
     }
   }
 
   // --- rounds timeline ---------------------------------------------------
-  if (rounds.length && !isFreeForAll) {
+  if (rounds.length) {
     const strip = el('div', { class: 'rounds-strip' });
     for (const round of rounds) {
-      const side = String(round.winningTeam ?? '').toLowerCase();
       strip.append(
         el('div', {
-          class: `round-chip ${side === 'red' || side === 'blue' ? side : ''}`.trim(),
-          title: `Round ${(round.roundNum ?? 0) + 1} - ${round.winningTeam ?? '?'} - ${round.roundResult ?? 'Unknown'}`,
-          text: String((round.roundNum ?? 0) + 1),
+          class: `round-chip ${sideClass(round.winningTeam)}`.trim(),
+          title: `Round ${round.num} - ${round.winningTeam ?? '?'} - ${round.result ?? 'Unknown'}`,
+          text: String(round.num),
         }),
       );
     }
@@ -422,60 +445,56 @@ function renderMatchDetails(match) {
   // --- raw payload -------------------------------------------------------
   fragment.append(
     el('details', {}, [
-      el('summary', { text: 'Raw match JSON' }),
-      el('pre', { text: JSON.stringify(match, null, 2) }),
+      el('summary', { text: `Raw ${PROVIDER_LABELS[match.provider] ?? match.provider} JSON` }),
+      el('pre', { text: JSON.stringify(match.raw ?? match, null, 2) }),
     ]),
   );
 
   els.details.replaceChildren(fragment);
 }
 
-function teamScoreBlock(side, team) {
-  return el('div', { class: `scoreline-team ${side}` }, [
-    el('div', { class: 'label', text: side }),
+function teamScoreBlock(team) {
+  return el('div', { class: `scoreline-team ${sideClass(team.id)}`.trim() }, [
+    el('div', { class: 'label', text: String(team.id ?? 'Team') }),
     el('div', { class: 'score', text: String(team.roundsWon ?? 0) }),
-    el('div', { class: `result${team.won ? ' win' : ''}`, text: team.won ? 'Winner' : 'Loss' }),
+    el('div', {
+      class: `result${team.won ? ' win' : ''}`,
+      text: team.won === null ? '' : team.won ? 'Winner' : 'Loss',
+    }),
   ]);
 }
 
-function scoreboard(title, roster, totals, team) {
-  const sorted = [...roster].sort((a, b) => (b.stats?.score ?? 0) - (a.stats?.score ?? 0));
-  const side = title.toLowerCase() === 'red' || title.toLowerCase() === 'blue' ? title.toLowerCase() : '';
+function scoreboard(title, roster, team) {
+  const sorted = [...roster].sort((a, b) => (b.acs ?? b.score ?? 0) - (a.acs ?? a.score ?? 0));
 
-  const head = el('div', { class: `team-head ${side}`.trim() }, [el('span', { text: title })]);
+  const head = el('div', { class: `team-head ${sideClass(title)}`.trim() }, [el('span', { text: String(title) })]);
   if (team) {
     head.append(el('span', { class: 'rounds', text: `${team.roundsWon ?? 0} / ${team.roundsPlayed ?? 0} rounds` }));
   }
 
   const columns = ['Agent', 'Player', 'Rank', 'ACS', 'K', 'D', 'A', '+/-', 'ADR', 'HS%', 'Score'];
-  const table = el('table', {}, [
-    el('thead', {}, [el('tr', {}, columns.map((label) => el('th', { text: label })))]),
-  ]);
+  const table = el('table', {}, [el('thead', {}, [el('tr', {}, columns.map((label) => el('th', { text: label })))])]);
 
   const body = el('tbody');
   for (const player of sorted) {
-    const stats = player.stats ?? {};
-    const played = stats.roundsPlayed || 0;
-    const damage = totals.get(player.puuid) ?? { damage: 0, head: 0, body: 0, leg: 0 };
-    const shots = damage.head + damage.body + damage.leg;
-    const diff = (stats.kills ?? 0) - (stats.deaths ?? 0);
+    const diff = (player.kills ?? 0) - (player.deaths ?? 0);
 
-    const nameCell = el('td', { class: 'player' }, [document.createTextNode(player.gameName ?? 'Unknown')]);
-    nameCell.append(el('span', { class: 'tag', text: `#${player.tagLine ?? '???'}` }));
+    const nameCell = el('td', { class: 'player' }, [document.createTextNode(player.name ?? 'Unknown')]);
+    if (player.tag) nameCell.append(el('span', { class: 'tag', text: `#${player.tag}` }));
 
     body.append(
       el('tr', {}, [
-        el('td', { class: 'agent', text: agentName(player.characterId) }),
+        el('td', { class: 'agent', text: player.agent ?? '-' }),
         nameCell,
-        el('td', { class: 'rank', text: rankName(player.competitiveTier) }),
-        el('td', { text: played ? Math.round((stats.score ?? 0) / played) : '-' }),
-        el('td', { text: String(stats.kills ?? 0) }),
-        el('td', { text: String(stats.deaths ?? 0) }),
-        el('td', { text: String(stats.assists ?? 0) }),
+        el('td', { class: 'rank', text: player.rank ?? '-' }),
+        el('td', { text: player.acs ?? '-' }),
+        el('td', { text: String(player.kills ?? 0) }),
+        el('td', { text: String(player.deaths ?? 0) }),
+        el('td', { text: String(player.assists ?? 0) }),
         el('td', { text: diff > 0 ? `+${diff}` : String(diff) }),
-        el('td', { text: played ? Math.round(damage.damage / played) : '-' }),
-        el('td', { text: shots ? `${Math.round((damage.head / shots) * 100)}%` : '-' }),
-        el('td', { text: String(stats.score ?? 0) }),
+        el('td', { text: player.adr ?? '-' }),
+        el('td', { text: player.hsPct === null || player.hsPct === undefined ? '-' : `${player.hsPct}%` }),
+        el('td', { text: String(player.score ?? 0) }),
       ]),
     );
   }
@@ -500,8 +519,7 @@ els.downloadJson.addEventListener('click', () => {
   if (!state.selectedMatch) return;
   const blob = new Blob([JSON.stringify(state.selectedMatch, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-  const anchor = el('a', { href: url, download: `${state.selectedMatchId ?? 'match'}.json` });
-  anchor.click();
+  el('a', { href: url, download: `${state.selectedMatchId ?? 'match'}.json` }).click();
   URL.revokeObjectURL(url);
 });
 
@@ -514,12 +532,6 @@ document.addEventListener('click', async (event) => {
   } catch {
     toast('Clipboard blocked by the browser');
   }
-});
-
-// Changing the match region invalidates cached agent/map names.
-els.region.addEventListener('change', () => {
-  state.content = null;
-  state.contentRegion = null;
 });
 
 loadConfig();

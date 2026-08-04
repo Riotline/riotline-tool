@@ -1,13 +1,16 @@
 /**
  * VALORANT Broadcast Production Tool - local server.
  *
- * Serves the static UI from ./public and proxies the official Riot Games API.
- * The proxy exists for two reasons: the Riot API blocks browser CORS requests,
- * and the API key must never be shipped to the client.
+ * Serves the static UI from ./public and proxies two data providers:
+ *
+ *   riot     - official Riot Games API      (needs RIOT_API_KEY)
+ *   tracker  - tracker.gg website via Playwright (needs TRACKER_ENABLED, no API key)
+ *
+ * Both are normalised in providers.js so the UI renders them identically.
+ * The proxy exists because neither source allows cross-origin browser calls,
+ * and API keys must never reach the client.
  *
  * Zero npm dependencies - Node 18+ built-ins only.
- *
- *   node server.js
  */
 
 import { createServer } from 'node:http';
@@ -16,6 +19,23 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import {
+  HENRIK_AFFINITIES,
+  HENRIK_MODES,
+  HENRIK_PLATFORMS,
+  ProviderError,
+  TRACKER_MATCH_TYPES,
+  henrikAccount,
+  henrikMatchDetail,
+  henrikMatchList,
+  makeRiotClient,
+  riotMatchDetail,
+  riotMatchList,
+  trackerMatchDetail,
+  trackerMatchList,
+} from './providers.js';
+import { makeTrackerBrowser } from './browser.js';
+
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 
@@ -23,8 +43,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const PLATFORM_HOSTS = ['ap', 'br', 'esports', 'eu', 'kr', 'latam', 'na'];
 /** Riot regional routing hosts - account-v1. */
 const ROUTING_HOSTS = ['americas', 'asia', 'esports', 'europe'];
-
-const CONTENT_TTL_MS = 6 * 60 * 60 * 1000;
+const PROVIDERS = ['henrik', 'riot', 'tracker'];
 
 // ---------------------------------------------------------------- config ---
 
@@ -48,141 +67,97 @@ function loadDotEnv() {
 
 loadDotEnv();
 
-const API_KEY = (process.env.RIOT_API_KEY ?? '').trim();
-const PORT = Number(process.env.PORT ?? 8080);
-const DEFAULT_REGION = pick(process.env.RIOT_REGION, PLATFORM_HOSTS, 'na');
-const DEFAULT_ROUTING = pick(process.env.RIOT_ROUTING, ROUTING_HOSTS, 'americas');
-
 function pick(value, allowed, fallback) {
   const candidate = (value ?? '').trim().toLowerCase();
   return allowed.includes(candidate) ? candidate : fallback;
 }
 
-// ------------------------------------------------------------- riot layer ---
+const RIOT_API_KEY = (process.env.RIOT_API_KEY ?? '').trim();
+const HENRIK_API_KEY = (process.env.HENRIK_API_KEY ?? '').trim();
 
-class RiotError extends Error {
-  constructor(status, message, hint = '') {
-    super(message);
-    this.status = status;
-    this.hint = hint;
-  }
-}
+// tracker.gg is driven from the public website - no API key. It needs a real
+// browser: the site is Cloudflare-protected and loads matches by XHR.
+const TRACKER_ENABLED = /^(1|true|yes)$/i.test((process.env.TRACKER_ENABLED ?? '').trim());
+const TRACKER_HEADLESS = !/^(0|false|no)$/i.test((process.env.TRACKER_HEADLESS ?? 'true').trim());
+const TRACKER_CHANNEL = (process.env.TRACKER_BROWSER_CHANNEL ?? 'auto').trim() || 'auto';
+const browser = TRACKER_ENABLED
+  ? makeTrackerBrowser({
+      headless: TRACKER_HEADLESS,
+      timeoutMs: Number(process.env.TRACKER_TIMEOUT_MS ?? 45_000),
+      channel: TRACKER_CHANNEL,
+    })
+  : null;
+const TRACKER_CONFIG = { browser };
+const PORT = Number(process.env.PORT ?? 8080);
+const DEFAULT_REGION = pick(process.env.RIOT_REGION, PLATFORM_HOSTS, 'na');
+const DEFAULT_ROUTING = pick(process.env.RIOT_ROUTING, ROUTING_HOSTS, 'americas');
+const DEFAULT_PROVIDER = pick(process.env.DEFAULT_PROVIDER, PROVIDERS, 'henrik');
+const DEFAULT_AFFINITY = pick(process.env.HENRIK_AFFINITY, HENRIK_AFFINITIES, 'ap');
+const DEFAULT_PLATFORM = pick(process.env.HENRIK_PLATFORM, HENRIK_PLATFORMS, 'pc');
 
-function hintFor(status) {
-  if (status === 401 || status === 403) {
-    return (
-      'Riot rejected the key. Either RIOT_API_KEY is missing/expired, or the key lacks ' +
-      'access to val-match-v1 - the VALORANT match endpoints require an approved Riot ' +
-      'production key, development keys typically return 403.'
-    );
-  }
-  if (status === 404) return 'Not found. Check the Riot ID spelling and tagline, and that the routing region is correct.';
-  if (status === 429) return 'Rate limited by Riot. Wait a few seconds and try again.';
-  if (status >= 500) return "Riot's API returned a server error - this one is on their side. Retry shortly.";
-  return '';
-}
+const riotGet = makeRiotClient(RIOT_API_KEY);
 
-function messageFromBody(status, body) {
-  try {
-    const parsed = JSON.parse(body);
-    if (parsed?.status?.message) return `Riot API ${status}: ${parsed.status.message}`;
-  } catch {
-    /* body was not JSON - fall through */
-  }
-  return `Riot API returned HTTP ${status}.`;
-}
-
-async function riotGet(host, endpoint, searchParams) {
-  if (!API_KEY) {
-    throw new RiotError(
-      500,
-      'No Riot API key configured.',
-      'Copy .env.example to .env, set RIOT_API_KEY, then restart the server.',
-    );
-  }
-
-  const url = new URL(`https://${host}.api.riotgames.com${endpoint}`);
-  for (const [key, value] of Object.entries(searchParams ?? {})) {
-    url.searchParams.set(key, value);
-  }
-
-  let response;
-  try {
-    response = await fetch(url, {
-      headers: {
-        'X-Riot-Token': API_KEY,
-        Accept: 'application/json',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'User-Agent': 'val-broadcast-tool/1.0',
-      },
-      signal: AbortSignal.timeout(20_000),
-    });
-  } catch (error) {
-    const reason = error.name === 'TimeoutError' ? 'the request timed out' : error.message;
-    throw new RiotError(502, `Could not reach the Riot API: ${reason}`, 'Check network/proxy access.');
-  }
-
-  const body = await response.text();
-
-  if (!response.ok) {
-    throw new RiotError(response.status, messageFromBody(response.status, body), hintFor(response.status));
-  }
-
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new RiotError(502, 'Riot API returned a response that was not valid JSON.');
-  }
-}
-
-/** VAL-CONTENT-V1 lookup tables (agents, maps, ranks), cached per region. */
-const contentCache = new Map();
-
-async function getContent(region) {
-  const cached = contentCache.get(region);
-  if (cached && Date.now() - cached.at < CONTENT_TTL_MS) return cached.data;
-
-  const raw = await riotGet(region, '/val/content/v1/contents', { locale: 'en-US' });
-  const data = {
-    version: raw.version,
-    characters: (raw.characters ?? []).map(({ id, name, assetName }) => ({ id, name, assetName })),
-    maps: (raw.maps ?? []).map(({ id, name, assetPath, assetName }) => ({ id, name, assetPath, assetName })),
-    competitiveTiers: raw.competitiveTiers ?? [],
-  };
-
-  contentCache.set(region, { at: Date.now(), data });
-  return data;
-}
+// ----------------------------------------------------------------- riot ---
 
 function splitRiotId(riotId) {
   const value = (riotId ?? '').trim();
   if (!value.includes('#')) {
-    throw new RiotError(400, 'Riot ID must include a tagline.', 'Use the full form, for example: TenZ#SEN');
+    throw new ProviderError(400, 'Riot ID must include a tagline.', 'Use the full form, for example: TenZ#SEN');
   }
 
   const splitAt = value.lastIndexOf('#');
   const gameName = value.slice(0, splitAt).trim();
   const tagLine = value.slice(splitAt + 1).trim();
 
-  if (!gameName || !tagLine) throw new RiotError(400, 'Riot ID must look like Name#TAG.', 'Example: TenZ#SEN');
+  if (!gameName || !tagLine) throw new ProviderError(400, 'Riot ID must look like Name#TAG.', 'Example: TenZ#SEN');
   return { gameName, tagLine };
 }
 
-// ----------------------------------------------------------------- routes ---
+// --------------------------------------------------------------- routes ---
 
 async function handleApi(pathname, params) {
+  const provider = pick(params.get('provider'), PROVIDERS, DEFAULT_PROVIDER);
+  const region = pick(params.get('region'), PLATFORM_HOSTS, DEFAULT_REGION);
+  const affinity = pick(params.get('affinity'), HENRIK_AFFINITIES, DEFAULT_AFFINITY);
+  const platform = pick(params.get('platform'), HENRIK_PLATFORMS, DEFAULT_PLATFORM);
+
+  const requestedType = params.get('type') ?? '';
+  const allowedTypes = provider === 'henrik' ? HENRIK_MODES : TRACKER_MATCH_TYPES;
+  const type = allowedTypes.includes(requestedType) ? requestedType : 'custom';
+
   switch (pathname) {
     case '/api/config':
       return {
-        hasKey: Boolean(API_KEY),
+        providers: PROVIDERS,
+        provider: DEFAULT_PROVIDER,
+        hasRiotKey: Boolean(RIOT_API_KEY),
+        hasTrackerKey: Boolean(browser),
+        hasHenrikKey: Boolean(HENRIK_API_KEY),
         region: DEFAULT_REGION,
         routing: DEFAULT_ROUTING,
         regions: PLATFORM_HOSTS,
         routings: ROUTING_HOSTS,
+        matchTypes: TRACKER_MATCH_TYPES,
+        affinity: DEFAULT_AFFINITY,
+        affinities: HENRIK_AFFINITIES,
+        platform: DEFAULT_PLATFORM,
+        platforms: HENRIK_PLATFORMS,
+        henrikModes: HENRIK_MODES,
       };
 
     case '/api/account': {
       const { gameName, tagLine } = splitRiotId(params.get('riotId'));
+
+      if (provider === 'henrik') {
+        return henrikAccount(HENRIK_API_KEY, { gameName, tagLine });
+      }
+
+      // tracker.gg is keyed on the Riot ID itself - no puuid lookup needed,
+      // so this pathway works without a Riot key at all.
+      if (provider === 'tracker') {
+        return { gameName, tagLine, puuid: null, handle: `${gameName}#${tagLine}` };
+      }
+
       const routing = pick(params.get('routing'), ROUTING_HOSTS, DEFAULT_ROUTING);
       return riotGet(
         routing,
@@ -191,26 +166,52 @@ async function handleApi(pathname, params) {
     }
 
     case '/api/matches': {
+      if (provider === 'henrik') {
+        const { gameName, tagLine } = splitRiotId(params.get('handle'));
+        return henrikMatchList(HENRIK_API_KEY, {
+          gameName,
+          tagLine,
+          affinity,
+          platform,
+          mode: type,
+          puuid: (params.get('puuid') ?? '').trim() || null,
+        });
+      }
+
+      if (provider === 'tracker') {
+        const handle = (params.get('handle') ?? '').trim();
+        if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
+        return trackerMatchList(TRACKER_CONFIG, { handle, type });
+      }
+
       const puuid = (params.get('puuid') ?? '').trim();
-      if (!puuid) throw new RiotError(400, 'Missing puuid.');
-      const region = pick(params.get('region'), PLATFORM_HOSTS, DEFAULT_REGION);
-      return riotGet(region, `/val/match/v1/matchlists/by-puuid/${encodeURIComponent(puuid)}`);
+      if (!puuid) throw new ProviderError(400, 'Missing puuid.');
+      return riotMatchList(riotGet, { puuid, region });
     }
 
     case '/api/match': {
       const matchId = (params.get('matchId') ?? '').trim();
-      if (!matchId) throw new RiotError(400, 'Missing matchId.');
-      const region = pick(params.get('region'), PLATFORM_HOSTS, DEFAULT_REGION);
-      return riotGet(region, `/val/match/v1/matches/${encodeURIComponent(matchId)}`);
+      if (!matchId) throw new ProviderError(400, 'Missing matchId.');
+
+      if (provider === 'henrik') {
+        return henrikMatchDetail(HENRIK_API_KEY, { matchId, affinity });
+      }
+
+      if (provider === 'tracker') {
+        const handle = (params.get('handle') ?? '').trim();
+        if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
+        return trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type });
+      }
+
+      return riotMatchDetail(riotGet, { matchId, region });
     }
 
-    case '/api/content':
-      return getContent(pick(params.get('region'), PLATFORM_HOSTS, DEFAULT_REGION));
-
     default:
-      throw new RiotError(404, `No such API route: ${pathname}`);
+      throw new ProviderError(404, `No such API route: ${pathname}`);
   }
 }
+
+// --------------------------------------------------------------- static ---
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -270,21 +271,33 @@ const server = createServer(async (req, res) => {
   try {
     sendJson(res, 200, await handleApi(url.pathname, url.searchParams));
   } catch (error) {
-    const status = error instanceof RiotError && error.status >= 400 && error.status <= 599 ? error.status : 500;
-    const message = error instanceof RiotError ? error.message : `Unexpected server error: ${error.message}`;
+    const status = error instanceof ProviderError && error.status >= 400 && error.status <= 599 ? error.status : 500;
+    const message = error instanceof ProviderError ? error.message : `Unexpected server error: ${error.message}`;
     sendJson(res, status, { error: { status, message, hint: error.hint ?? '' } });
   }
 });
 
+// Don't leave a headless Chromium behind on Ctrl+C.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    void browser?.close().finally(() => process.exit(0));
+    if (!browser) process.exit(0);
+  });
+}
+
 server.listen(PORT, '127.0.0.1', () => {
-  const line = '='.repeat(62);
+  const line = '='.repeat(64);
   console.log(line);
-  console.log('  VALORANT Broadcast Production Tool');
+  console.log('  Riotline Tool');
   console.log(line);
-  console.log(`  UI          http://127.0.0.1:${PORT}`);
-  console.log(`  Region      ${DEFAULT_REGION}  (match + content routing)`);
-  console.log(`  Routing     ${DEFAULT_ROUTING}  (account lookup)`);
-  console.log(`  API key     ${API_KEY ? 'loaded' : 'MISSING - set RIOT_API_KEY in .env'}`);
+  console.log(`  UI              http://127.0.0.1:${PORT}`);
+  console.log(`  Default source  ${DEFAULT_PROVIDER}`);
+  console.log(`  Riot region     ${DEFAULT_REGION} / routing ${DEFAULT_ROUTING}`);
+  console.log(`  HenrikDev       ${HENRIK_API_KEY ? 'key loaded' : 'missing (HENRIK_API_KEY)'} | ${DEFAULT_AFFINITY}/${DEFAULT_PLATFORM}`);
+  console.log(`  Riot key        ${RIOT_API_KEY ? 'loaded' : 'missing (RIOT_API_KEY)'}`);
+  console.log(
+    `  tracker.gg      ${browser ? `browser ready (${TRACKER_HEADLESS ? 'headless' : 'headed'})` : 'disabled (set TRACKER_ENABLED=true)'}`,
+  );
   console.log('  Ctrl+C to stop');
   console.log(line);
 });

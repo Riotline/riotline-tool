@@ -2,3 +2,5 @@
 node_modules/
 *.log
 *.hidden
+.playwright-profile/
+tools/probe-output/

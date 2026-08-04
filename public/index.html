@@ -20,7 +20,18 @@
         </div>
       </div>
 
-      <div class="routing">
+      <div class="routing" id="henrik-routing">
+        <label>
+          <span>Region</span>
+          <select id="affinity"></select>
+        </label>
+        <label>
+          <span>Platform</span>
+          <select id="platform"></select>
+        </label>
+      </div>
+
+      <div class="routing" id="riot-routing">
         <label>
           <span>Account routing</span>
           <select id="routing"></select>
@@ -32,10 +43,7 @@
       </div>
     </header>
 
-    <div id="key-warning" class="banner banner-warn" hidden>
-      <strong>No API key loaded.</strong> Copy <code>.env.example</code> to <code>.env</code>, set
-      <code>RIOT_API_KEY</code>, then restart the server.
-    </div>
+    <div id="key-warning" class="banner banner-warn" hidden></div>
 
     <main class="layout">
       <!-- ---------------------------------------------- step 1: search --- -->
@@ -43,6 +51,24 @@
         <h2 class="panel-title"><span class="step">1</span> Player</h2>
 
         <form id="search-form" autocomplete="off">
+          <fieldset class="source-toggle">
+            <legend>Data source</legend>
+            <div class="segmented" role="radiogroup" aria-label="Data source">
+              <label>
+                <input type="radio" name="provider" value="henrik" checked />
+                <span>HenrikDev</span>
+              </label>
+              <label>
+                <input type="radio" name="provider" value="riot" />
+                <span>Riot API</span>
+              </label>
+              <label>
+                <input type="radio" name="provider" value="tracker" />
+                <span>tracker.gg</span>
+              </label>
+            </div>
+          </fieldset>
+
           <label class="field">
             <span>Riot ID</span>
             <input
@@ -55,12 +81,18 @@
             />
           </label>
           <p id="riot-id-help" class="field-help">Include the tagline, e.g. <code>TenZ#SEN</code></p>
+
+          <label class="field" id="type-field" hidden>
+            <span>Match type</span>
+            <select id="match-type"></select>
+          </label>
+
           <button id="search-btn" type="submit" class="btn btn-primary">Get recent matches</button>
         </form>
 
         <div id="player-card" class="player-card" hidden>
           <div class="player-name" id="player-name"></div>
-          <div class="player-puuid">
+          <div class="player-puuid" id="player-puuid-row">
             <span id="player-puuid"></span>
             <button type="button" class="btn-copy" data-copy-target="player-puuid" title="Copy PUUID">Copy</button>
           </div>
