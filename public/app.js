@@ -571,13 +571,23 @@ function scoreboard(title, roster, team) {
  * the pause after it. At that pace a ten-account round takes ten minutes, which
  * is the honest reason this feature wants HenrikDev.
  *
- * HenrikDev's published limit is around 30 requests a minute, so 2s between
- * requests keeps a full roster comfortably inside it.
+ * HenrikDev's published limit is around 30 requests a minute. Pacing at 2.5s
+ * sits just inside that at 24/min, leaving headroom for the detail fetch a hit
+ * costs, and puts a ten-account round at 25s.
+ *
+ * Both sources run with no gap between rounds. Once every request is paced, a
+ * pause after the round is a second rate limit stacked on the first, and it
+ * lands squarely on the number that matters: the wait between an account
+ * getting the game and this asking it again. Rounds therefore run continuously,
+ * and worst-case detection is one round.
  */
 const WATCH_TUNING = {
-  henrik: { concurrency: 5, gapMs: 25_000, minRequestGapMs: 2_000 },
+  henrik: { concurrency: 5, gapMs: 0, minRequestGapMs: 2_500 },
   tracker: { concurrency: 1, gapMs: 0, minRequestGapMs: 60_000 },
 };
+
+/** Worst case between an account having the match and the watch asking it. */
+const detectionMs = (tuning, accounts) => accounts * (tuning.minRequestGapMs ?? 0) + tuning.gapMs;
 
 // A tracker.gg check drives a real browser, so it fails in ways a JSON call does
 // not: a navigation that times out, a challenge that needed a profile reset, a
@@ -868,13 +878,17 @@ async function startWatch() {
       `${Math.round(tuning.gapMs / 1000)}s between rounds, up to ${RETRY_ATTEMPTS} attempts per request`,
   );
 
-  // The pacing is measured, not chosen, so the cost of a big roster is worth
-  // stating up front rather than leaving the operator to infer it from the log.
-  const roundMs = handles.length * (tuning.minRequestGapMs ?? 0);
-  if (roundMs >= 120_000) {
-    const minutes = Math.round(roundMs / 60_000);
-    logWatch(`at this pace one round over ${handles.length} account(s) takes about ${minutes} minutes`);
-    toast(`${PROVIDER_LABELS[current]} allows one lookup a minute - a full round takes ~${minutes} min`);
+  // The pacing is measured, not chosen, so what it costs in detection time is
+  // stated up front rather than left for the operator to infer from the log.
+  const expected = detectionMs(tuning, handles.length);
+  logWatch(
+    `worst case, a new game is picked up ${Math.round(expected / 1000)}s after it reaches an account ` +
+      `(${handles.length} account(s) at one every ${Math.round((tuning.minRequestGapMs ?? 0) / 1000)}s)`,
+  );
+
+  if (expected > 60_000) {
+    const minutes = Math.round(expected / 60_000);
+    toast(`${PROVIDER_LABELS[current]} pacing means up to ~${minutes} min to spot a game - see the debug log`);
   }
 
   els.watchBtn.textContent = 'Stop watching';
