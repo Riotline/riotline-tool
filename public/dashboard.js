@@ -13,6 +13,7 @@
 
 import { onLookupMatch } from './store.js';
 import { STATS, STAT_FIELDS, STAT_SLOTS, statDef } from './stats.js';
+import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
 import {
   FONT_CHOICES,
   PRESET_FIELDS,
@@ -46,7 +47,19 @@ const els = {
   checker: $('g-checker'),
   frame: $('preview-frame'),
   preview: $('preview'),
-  editors: { match: $('ed-match'), left: $('ed-left'), right: $('ed-right'), style: $('ed-style') },
+  showBtn: $('g-show'),
+  hideBtn: $('g-hide'),
+  replayBtn: $('g-replay'),
+  air: $('g-air'),
+  airLabel: $('g-air-label'),
+  cueHint: $('g-cue-hint'),
+  editors: {
+    match: $('ed-match'),
+    left: $('ed-left'),
+    right: $('ed-right'),
+    anim: $('ed-anim'),
+    style: $('ed-style'),
+  },
 };
 
 // ----------------------------------------------------------------- tabs ---
@@ -101,11 +114,20 @@ function setStatus(kind, label) {
 
 function queueSave() {
   setStatus('saving', 'Saving...');
-  // Any edit can drift the styling away from the preset it came from, so the
-  // badge is refreshed here rather than at each of the seventeen controls.
+  // Any edit can drift the styling away from the preset it came from, and any
+  // timing edit changes what the cue bar reports, so both are refreshed here
+  // rather than at each of the thirty-odd controls.
   markModified();
+  syncCueUi();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
+}
+
+/** For cues, where a debounce would mean the graphic moves late on air. */
+function saveNow() {
+  clearTimeout(saveTimer);
+  setStatus('saving', 'Saving...');
+  return save();
 }
 
 async function save() {
@@ -159,6 +181,22 @@ function numberField(label, path, { min = 0, max = 999 } = {}) {
     queueSave();
   });
   return field(label, input);
+}
+
+/**
+ * A select over {key, label} options. Unlike selectField there is no blank
+ * entry: these fields always hold one of the listed values.
+ */
+function choiceField(label, path, options) {
+  const select = el('select');
+  for (const option of options) select.append(el('option', null, { value: option.key }, option.label));
+  select.value = String(readPath(state, path) ?? '');
+
+  select.addEventListener('change', () => {
+    writePath(state, path, select.value);
+    queueSave();
+  });
+  return field(label, select);
 }
 
 function selectField(label, path, options, { allowUnknown = true } = {}) {
@@ -353,6 +391,112 @@ function buildSideEditor(side) {
     ...Array.from({ length: SLOTS }, (_, index) => playerRow(side, index)),
   );
 }
+
+// ---------------------------------------------------- editor: animation ---
+
+/** One editor control per schema field, chosen by its declared type. */
+function animField(field) {
+  const path = `anim.${field.key}`;
+  switch (field.type) {
+    case 'choice':
+      return choiceField(field.label, path, field.options);
+    case 'bool':
+      return checkField(field.label, path);
+    default:
+      return numberField(field.label, path, { min: field.min, max: field.max });
+  }
+}
+
+function buildAnimEditor() {
+  const host = els.editors.anim;
+  const groups = [];
+
+  for (const group of ANIM_GROUPS) {
+    const fields = ANIM_FIELDS.filter((entry) => entry.group === group);
+    const columns = fields.every((entry) => entry.type === 'bool') ? null : 2;
+    groups.push(subhead(group), grid(columns, fields.map(animField)));
+  }
+
+  host.replaceChildren(
+    title('Animation'),
+    el(
+      'p',
+      'field-help',
+      {},
+      `The scoreboard reveals in ${ANIM_TIER_COUNT} tiers - headers, MVP panels, map and team art, then one per ` +
+        'roster row. Both sides of a tier move together; each tier waits one stagger step. Use Show, Hide and ' +
+        'Replay above the preview to try it.',
+    ),
+    ...groups,
+  );
+}
+
+// ----------------------------------------------------------------- cueing ---
+
+// Matches the wrap in graphics.js: the output page only compares cues for
+// inequality, so wrapping is safe and keeps the number a sane length.
+const CUE_WRAP = 1_000_000;
+
+/**
+ * Show, Hide and Replay all bump the cue. That counter is the only thing that
+ * distinguishes "the operator asked for this" from the constant stream of state
+ * pushes that ordinary typing produces, and it is what lets Replay re-run the
+ * entry while the graphic is already up.
+ */
+function cue(kind) {
+  state.anim.visible = kind !== 'hide';
+  state.anim.cue = ((state.anim.cue ?? 0) + 1) % CUE_WRAP;
+  syncCueUi();
+  return saveNow();
+}
+
+/** Reflects visibility and reports what the current timings add up to. */
+function syncCueUi() {
+  const anim = state?.anim;
+  if (!anim) return;
+
+  const visible = Boolean(anim.visible);
+  els.air.classList.toggle('is-live', visible);
+  els.airLabel.textContent = visible ? 'On air' : 'Hidden';
+  // Doubles as the state readout: whichever button is available is the one that
+  // would change something.
+  els.showBtn.disabled = visible;
+  els.hideBtn.disabled = !visible;
+  // Explains an empty preview rather than leaving it looking broken.
+  els.frame.classList.toggle('is-hidden', !visible);
+
+  const outTotal = anim.outDurationMs + (ANIM_TIER_COUNT - 1) * anim.staggerMs;
+  // Keeps the "Hidden" note off the screen until the exit has actually played.
+  els.frame.style.setProperty('--hide-note-delay', `${outTotal + 120}ms`);
+
+  const summary = [`in ${inDurationMs(anim, ANIM_TIER_COUNT)} ms`, `out ${outTotal} ms`];
+  if (anim.holdMs) summary.push(`auto-hide ${(anim.holdMs / 1000).toFixed(1).replace(/\.0$/, '')}s after entry`);
+  els.cueHint.textContent = summary.join('  ·  ');
+}
+
+els.showBtn.addEventListener('click', () => cue('show'));
+els.hideBtn.addEventListener('click', () => cue('hide'));
+els.replayBtn.addEventListener('click', () => cue('replay'));
+
+/**
+ * Auto-hide happens on the server, so the graphic can come down without the
+ * dashboard having asked. Only visibility is taken from the stream - adopting
+ * the whole state would overwrite whatever is being typed.
+ */
+const graphicStream = new EventSource('/api/graphic/events');
+
+graphicStream.addEventListener('graphic', (event) => {
+  if (!state) return;
+  try {
+    const anim = JSON.parse(event.data)?.state?.anim;
+    if (!anim) return;
+    state.anim.visible = anim.visible;
+    state.anim.cue = anim.cue;
+    syncCueUi();
+  } catch {
+    // A malformed frame is not worth breaking the dashboard over.
+  }
+});
 
 // -------------------------------------------------------- editor: style ---
 
@@ -579,7 +723,9 @@ function buildStyleEditor() {
 function buildAll() {
   buildMatchEditor();
   for (const side of SIDES) buildSideEditor(side);
+  buildAnimEditor();
   buildStyleEditor();
+  syncCueUi();
 }
 
 // -------------------------------------------------------------- actions ---

@@ -40,9 +40,11 @@ import {
 } from './providers.js';
 import { makeTrackerBrowser } from './browser.js';
 import {
+  ANIM_TIER_COUNT,
   FONT_CHOICES,
   PLAYERS_PER_SIDE,
   STAT_SLOTS,
+  inDurationMs,
   makeAssetCache,
   makeGraphicStore,
   makePresetStore,
@@ -117,6 +119,43 @@ const presets = makePresetStore(path.join(STATE_DIR, 'presets.json'));
 const assets = makeAssetCache(path.join(STATE_DIR, 'valorant-assets.json'));
 const restoredGraphic = await graphics.load();
 await presets.load();
+
+/**
+ * Auto-hide.
+ *
+ * Timed here rather than in the output page so that every browser source and the
+ * dashboard agree the graphic came down - a page that hid itself would leave the
+ * dashboard's Show button claiming it was still on air.
+ *
+ * The trigger is the cue counter, not `visible`: an operator adjusting the
+ * roster during the hold should not keep resetting the clock. The boot value is
+ * seeded here so restoring a visible graphic from disk does not count as a cue
+ * and immediately hide it.
+ */
+let autoHideTimer = null;
+let lastSeenCue = graphics.state.anim.cue;
+
+graphics.subscribe(({ state }) => {
+  const { cue, visible, holdMs } = state.anim;
+  if (cue === lastSeenCue) return;
+  lastSeenCue = cue;
+
+  clearTimeout(autoHideTimer);
+  autoHideTimer = null;
+  if (!visible || !holdMs) return;
+
+  // Measured from the last tier settling, so "hold for 8s" is eight seconds of
+  // the graphic fully on screen rather than eight from the button press.
+  autoHideTimer = setTimeout(() => {
+    autoHideTimer = null;
+    const anim = graphics.state.anim;
+    if (!anim.visible) return; // hidden by hand in the meantime
+    graphics.patch({ anim: { ...anim, visible: false, cue: anim.cue + 1 } });
+  }, inDurationMs(state.anim, ANIM_TIER_COUNT) + holdMs);
+
+  // A pending auto-hide must not be the reason the process stays alive.
+  autoHideTimer.unref?.();
+});
 
 // ----------------------------------------------------------------- riot ---
 

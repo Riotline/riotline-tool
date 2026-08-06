@@ -24,7 +24,9 @@
   -->
   <body>
     <div id="stage-wrap">
-      <div class="stage" id="stage">
+      <!-- Starts hidden and unready: the first state push decides whether to
+           animate in or snap to the resting position. -->
+      <div class="stage" id="stage" data-visible="false" data-anim-style="slide">
         <!-- ------------------------------------------------- left side --- -->
         <div class="col col-side col-left">
           <div class="head">

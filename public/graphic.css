@@ -69,6 +69,13 @@ body {
   text-transform: uppercase;
 }
 
+/* Nothing goes to air until the first state arrives. Without this, a browser
+   source that has parsed the HTML but not yet run the module paints an empty
+   skeleton in the resting position - a visible flash on every OBS restart. */
+.stage:not([data-ready]) {
+  visibility: hidden;
+}
+
 /* Ratios taken from the reference layout: 42.7 / 11.3 / 42.7. */
 .col {
   padding: 20px;
@@ -358,9 +365,12 @@ body {
 
 /* 32/68 is what the reference's 50%/75% widths collapse to once the roster's
    68% min-width stops it shrinking any further. */
+/* Stacked above the roster so a sliding row emerges from behind the artwork
+   rather than travelling across it. Costs nothing when nothing is moving. */
 .map,
 .team-art {
   position: relative;
+  z-index: 1;
   width: 32%;
   flex: none;
   overflow: hidden;
@@ -399,6 +409,8 @@ body {
 }
 
 .rows {
+  position: relative;
+  z-index: 0;
   width: 68%;
   flex: none;
   display: flex;
@@ -614,4 +626,95 @@ body {
 img[hidden],
 [hidden] {
   display: none !important;
+}
+
+/* ------------------------------------------------------------ animation --- */
+
+/*
+ * The graphic animates as bands, not as one block: each band carries its own
+ * delay so the reveal cascades. Bands are the elements that paint something -
+ * the header, the MVP panel, the map, each roster row, the centre panels - which
+ * is what makes "hidden" mean fully transparent rather than merely empty.
+ *
+ * Only ancestors are animated. The team and MVP names carry their own scaleX
+ * squeeze from output.js, and a transform written here would fight it; nested
+ * transforms compose, so animating the band around them does not.
+ *
+ * CSS transitions rather than the animation API, because a transition
+ * interrupted halfway reverses from wherever it currently is. An operator who
+ * hits Show during an exit gets the graphic back smoothly instead of a jump.
+ */
+
+.stage {
+  --anim-dur: 520ms;
+  --anim-out-dur: 340ms;
+  --anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --anim-dist: 110px;
+}
+
+/* Which way a band travels or wipes is a property of the column it lives in, so
+   no band needs to know which side of the scoreboard it is on. */
+.col-left [data-anim] {
+  --ax: -1;
+  --ay: 0;
+  --clip-hidden: inset(0 100% 0 0);
+}
+
+.col-right [data-anim] {
+  --ax: 1;
+  --ay: 0;
+  --clip-hidden: inset(0 0 0 100%);
+}
+
+/* The centre strip has no outer edge to come from, so it drops in from above. */
+.col-mid [data-anim] {
+  --ax: 0;
+  --ay: -1;
+  --clip-hidden: inset(0 0 100% 0);
+}
+
+[data-anim] {
+  transition-property: opacity, transform, clip-path;
+  transition-duration: var(--anim-dur);
+  transition-timing-function: var(--anim-ease);
+  transition-delay: var(--in-delay, 0ms);
+}
+
+/* Exit timing lives on the hidden rule and entry timing on the base rule, so
+   each direction picks up its own duration and delay simply by being the state
+   being transitioned *to*. */
+.stage[data-visible="false"] [data-anim] {
+  opacity: 0;
+  transition-duration: var(--anim-out-dur);
+  transition-delay: var(--out-delay, 0ms);
+}
+
+.stage[data-anim-style="slide"][data-visible="false"] [data-anim] {
+  transform: translate3d(calc(var(--ax) * var(--anim-dist)), calc(var(--ay) * var(--anim-dist)), 0);
+}
+
+.stage[data-anim-style="rise"][data-visible="false"] [data-anim] {
+  transform: translate3d(0, var(--anim-dist), 0);
+}
+
+.stage[data-anim-style="scale"][data-visible="false"] [data-anim] {
+  transform: scale(0.86);
+}
+
+/* A wipe that also fades reads as mush, so this is the one style that stays
+   fully opaque and reveals purely by clipping. */
+.stage[data-anim-style="wipe"] [data-anim] {
+  clip-path: inset(0 0 0 0);
+}
+
+.stage[data-anim-style="wipe"][data-visible="false"] [data-anim] {
+  opacity: 1;
+  clip-path: var(--clip-hidden);
+}
+
+/* Jump to a state without playing it: used for the resting position on load and
+   to rewind before a replay. */
+.stage.anim-off [data-anim] {
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
 }

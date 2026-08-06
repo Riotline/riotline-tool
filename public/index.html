@@ -157,6 +157,22 @@
         <em>Match lookup</em> tab, then come back and press Import.
       </p>
 
+      <!-- The live controls, kept next to the preview because that is where an
+           operator is looking when they cue the graphic. -->
+      <div class="cue-bar">
+        <span class="cue-state" id="g-air">
+          <span class="cue-dot" aria-hidden="true"></span>
+          <span id="g-air-label">On air</span>
+        </span>
+        <button type="button" id="g-show" class="btn btn-cue">Show</button>
+        <button type="button" id="g-hide" class="btn btn-cue">Hide</button>
+        <button type="button" id="g-replay" class="btn btn-ghost" title="Play the entry again from the start">
+          Replay
+        </button>
+        <span class="toolbar-gap"></span>
+        <span class="cue-hint" id="g-cue-hint"></span>
+      </div>
+
       <section class="panel preview-panel">
         <h2 class="panel-title">
           Live preview
@@ -177,6 +193,7 @@
         <section class="panel" id="ed-match"></section>
         <section class="panel" id="ed-left"></section>
         <section class="panel" id="ed-right"></section>
+        <section class="panel" id="ed-anim"></section>
         <section class="panel" id="ed-style"></section>
       </div>
     </main>

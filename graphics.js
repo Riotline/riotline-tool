@@ -20,8 +20,16 @@ import path from 'node:path';
 // one of what a preset is.
 import { STAT_FIELDS, STAT_KEYS, STAT_SLOTS } from './public/stats.js';
 import { BUILT_IN_IDS, BUILT_IN_PRESETS, FONT_CHOICES, PRESET_FIELDS } from './public/preset-schema.js';
+import {
+  ANIM_EASING_KEYS,
+  ANIM_FIELDS,
+  ANIM_STYLE_KEYS,
+  ANIM_TIER_COUNT,
+  DEFAULT_ANIM,
+  inDurationMs,
+} from './public/animation.js';
 
-export { STAT_FIELDS, STAT_KEYS, STAT_SLOTS, FONT_CHOICES, BUILT_IN_PRESETS };
+export { STAT_FIELDS, STAT_KEYS, STAT_SLOTS, FONT_CHOICES, BUILT_IN_PRESETS, ANIM_TIER_COUNT, inDurationMs };
 
 export const PLAYERS_PER_SIDE = 5;
 
@@ -62,6 +70,8 @@ export const DEFAULT_STATE = {
   // preset block below is the truth, so an edit after applying is never lost.
   presetId: BUILT_IN_PRESETS[0].id,
   preset: clone(BUILT_IN_PRESETS[0].preset),
+  // Whether the scoreboard is on air, and how it gets there.
+  anim: clone(DEFAULT_ANIM),
 };
 
 
@@ -178,7 +188,50 @@ export function sanitiseState(input, base = DEFAULT_STATE) {
     right: sanitiseSide(source.right, fallback.right),
     presetId: text(source.presetId, fallback.presetId, 48),
     preset: sanitisePreset(source.preset, fallback.preset),
+    anim: sanitiseAnim(source.anim, fallback.anim),
   };
+}
+
+/**
+ * Driven by ANIM_FIELDS, for the same reason sanitisePreset is driven by
+ * PRESET_FIELDS. `visible` and `cue` are handled by hand because they are the
+ * command channel rather than configuration.
+ */
+const CUE_WRAP = 1_000_000;
+
+export function sanitiseAnim(input, fallback = DEFAULT_ANIM) {
+  const source = input ?? {};
+  const base = fallback ?? DEFAULT_ANIM;
+
+  const clean = {
+    visible: bool(source.visible, base.visible),
+    // Wrapped rather than clamped: the output page only compares it for
+    // inequality, so wrapping keeps working where a ceiling would silently stop
+    // registering cues once it was reached.
+    cue: int(source.cue, base.cue, 0, Number.MAX_SAFE_INTEGER) % CUE_WRAP,
+  };
+
+  for (const field of ANIM_FIELDS) {
+    const value = source[field.key];
+    const previous = base[field.key];
+
+    switch (field.type) {
+      case 'choice': {
+        const allowed = field.key === 'style' ? ANIM_STYLE_KEYS : ANIM_EASING_KEYS;
+        clean[field.key] = allowed.includes(String(value)) ? String(value) : previous;
+        break;
+      }
+      case 'bool':
+        clean[field.key] = bool(value, previous);
+        break;
+      default:
+        // A zero-length transition would make "animate" a lie, so durations have
+        // a floor rather than clamping to 0 - the field's own min carries it.
+        clean[field.key] = int(value, previous, field.min, field.max);
+    }
+  }
+
+  return clean;
 }
 
 /**

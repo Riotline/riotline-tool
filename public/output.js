@@ -14,6 +14,7 @@
  */
 
 import { STAT_SLOTS, statDef } from './stats.js';
+import { ANIM_TIER_COUNT, easingCurve } from './animation.js';
 
 const STAGE_W = 1920;
 const STAGE_H = 1080;
@@ -74,6 +75,123 @@ for (let index = 0; index < ROWS_PER_SIDE; index += 1) {
     block.append(el('div', null, { 'data-bind': `labels.s${slot}` }));
   }
   midRows.append(block);
+}
+
+// ------------------------------------------------------------ animation ---
+
+/**
+ * Reveal tiers. Everything in a tier moves at once and each tier is one stagger
+ * step behind the last, so the entry reads as a designed sequence instead of
+ * twenty elements racing each other.
+ *
+ * Both halves of a tier are deliberately simultaneous: on a symmetrical
+ * scoreboard, cascading left-then-right looks like a bug.
+ *
+ * A band has to be something that paints. Panels that carry a background are in
+ * here as whole bands rather than having their contents animated, because fading
+ * the contents of a dark panel leaves the panel behind on air.
+ */
+function collectTiers() {
+  const one = (selector) => stage.querySelector(selector);
+  const rows = (side) => [...stage.querySelectorAll(`.col-${side} .row`)];
+
+  const tiers = [
+    [one('.col-left .head'), one('.col-right .head'), one('.mid-logo')],
+    [one('.col-left .mvp'), one('.col-right .mvp'), one('.mid-labels')],
+    [one('.map'), one('.team-art'), one('.mid-rows')],
+  ];
+
+  const left = rows('left');
+  const right = rows('right');
+  for (let index = 0; index < ROWS_PER_SIDE; index += 1) tiers.push([left[index], right[index]]);
+
+  return tiers.map((tier) => tier.filter(Boolean));
+}
+
+const animTiers = collectTiers();
+for (const tier of animTiers) for (const node of tier) node.setAttribute('data-anim', '');
+
+// The server times auto-hide from a tier count it cannot measure without a
+// browser. If this layout ever gains or loses a tier, that estimate goes stale.
+if (animTiers.length !== ANIM_TIER_COUNT) {
+  console.warn(`layout has ${animTiers.length} animation tiers but ANIM_TIER_COUNT says ${ANIM_TIER_COUNT}`);
+}
+
+/** Config -> CSS custom properties. Cheap enough to redo on every state push. */
+function applyAnimConfig(anim) {
+  stage.dataset.animStyle = anim.style;
+  stage.style.setProperty('--anim-dur', `${anim.durationMs}ms`);
+  stage.style.setProperty('--anim-out-dur', `${anim.outDurationMs}ms`);
+  stage.style.setProperty('--anim-ease', easingCurve(anim.easing));
+  stage.style.setProperty('--anim-dist', `${anim.distance}px`);
+
+  const last = animTiers.length - 1;
+
+  animTiers.forEach((tier, index) => {
+    const inDelay = anim.delayMs + index * anim.staggerMs;
+    // No lead-in on the way out: when an operator hits Hide, it goes.
+    const outDelay = (anim.reverseOut ? last - index : index) * anim.staggerMs;
+    for (const node of tier) {
+      node.style.setProperty('--in-delay', `${inDelay}ms`);
+      node.style.setProperty('--out-delay', `${outDelay}ms`);
+    }
+  });
+}
+
+/**
+ * Reading offsetHeight forces the pending style change to be committed. Without
+ * it the browser coalesces "hidden" and "shown" into a single recalculation and
+ * nothing animates at all.
+ */
+const commitStyles = () => void stage.offsetHeight;
+
+function setVisible(visible, { instant = false } = {}) {
+  if (!instant) {
+    stage.dataset.visible = String(visible);
+    return;
+  }
+  stage.classList.add('anim-off');
+  stage.dataset.visible = String(visible);
+  commitStyles();
+  stage.classList.remove('anim-off');
+}
+
+/** Rewind to hidden without playing it, then run the entry again. */
+function replayIn() {
+  setVisible(false, { instant: true });
+  commitStyles(); // transitions are live again, and we are still hidden
+  stage.dataset.visible = 'true';
+}
+
+// null until the first state arrives, which is what distinguishes "the page just
+// loaded" from "the operator cued something".
+let lastCue = null;
+let lastVisible = null;
+
+function applyAnim(anim) {
+  applyAnimConfig(anim);
+
+  if (lastCue === null) {
+    lastCue = anim.cue;
+    lastVisible = anim.visible;
+    // A source starting mid-broadcast can either play the entry or simply be
+    // there. Playing it is the default because OBS commonly loads the page at
+    // the moment the scene goes live.
+    if (anim.visible && anim.animateOnLoad) replayIn();
+    else setVisible(anim.visible, { instant: true });
+    return;
+  }
+
+  // Config edits and roster typing push state constantly; only a cue bump or an
+  // actual visibility change is allowed to move anything on air.
+  if (anim.cue === lastCue && anim.visible === lastVisible) return;
+
+  const replay = anim.visible && lastVisible && anim.cue !== lastCue;
+  lastCue = anim.cue;
+  lastVisible = anim.visible;
+
+  if (replay) replayIn();
+  else setVisible(anim.visible);
 }
 
 // Collected once - the skeleton never changes shape after this point.
@@ -255,6 +373,10 @@ function fitText(node) {
 
 function render(state) {
   applyPreset(state.preset);
+  // Safe to reveal the stage: the bands are already in their resting state, so
+  // "ready" only lifts the paint block, it does not put anything on air.
+  stage.dataset.ready = '';
+
   const view = buildView(state);
 
   for (const node of textTargets) {
@@ -284,6 +406,9 @@ function render(state) {
     }
     node.hidden = !url;
   }
+
+  // Last, so the entry animation never plays over half-written text.
+  applyAnim(state.anim);
 
   // Layout has to have settled before anything can be measured.
   requestAnimationFrame(refit);
