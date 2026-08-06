@@ -909,7 +909,9 @@ pre {
 .obs-url-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .obs-url code {
@@ -946,6 +948,7 @@ pre {
 .cue-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -1002,6 +1005,8 @@ pre {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------------ preview --- */
@@ -1013,6 +1018,12 @@ pre {
 .preview-frame {
   position: relative;
   width: 100%;
+  /* On a wide monitor a full-bleed 16:9 preview is tall enough to push every
+     editor below the fold, so it stops growing once it is comfortably legible.
+     dashboard.js scales the iframe off this element's width, so the cap needs
+     nothing on the JS side. */
+  max-width: 1180px;
+  margin-inline: auto;
   /* The stage is a fixed 1920x1080; the frame just reserves the same ratio. */
   aspect-ratio: 16 / 9;
   border: 1px solid var(--border-strong);
@@ -1074,11 +1085,63 @@ pre {
 
 /* ------------------------------------------------------------ editors --- */
 
+/**
+ * Three tiles of very different heights: a short settings column and two tall
+ * rosters. An equal-width auto-fit grid tiled them by width alone, which left a
+ * column-high hole under the shortest panel and an empty cell on the second row.
+ *
+ * So the pairing is stated instead of inferred: the rosters are what must sit
+ * side by side, and the rest share a column that packs itself. Below the
+ * breakpoint the settings column spans the full width and re-tiles horizontally,
+ * which is the one place the old behaviour was right.
+ */
 .editor-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: minmax(280px, 0.85fr) minmax(330px, 1fr) minmax(330px, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+/* Multi-column rather than a grid, because these three panels are wildly
+   different heights and multicol is the one layout mode that balances by height
+   instead of leaving a hole under the short one. It also picks its own column
+   count from the width it is given, so it needs no breakpoint of its own: one
+   stack as a sidebar, two or three once it spans the grid. */
+.editor-side {
+  columns: 270px;
+  column-gap: 16px;
+  min-width: 0;
+}
+
+.editor-side > .panel {
+  /* A panel split across a column break would put half a form in each. */
+  break-inside: avoid;
+  margin-bottom: 16px;
+}
+
+/* On a broadcast monitor the settings column is the tall one, so give it enough
+   width for its own auto-fit to go two across rather than running on past the
+   bottom of the rosters. */
+@media (min-width: 1800px) {
+  .editor-grid {
+    grid-template-columns: minmax(560px, 1.15fr) minmax(330px, 1fr) minmax(330px, 1fr);
+  }
+}
+
+@media (max-width: 1400px) {
+  .editor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .editor-side {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .field-grid {
@@ -1092,6 +1155,26 @@ pre {
 
 .field-grid.cols-4 {
   grid-template-columns: repeat(4, 1fr);
+}
+
+/* The stat rows have to answer to the panel they are in, not the window: a
+   roster panel is narrow on a 1440px screen and roomy on a 4K one, and a
+   viewport breakpoint gets both of those wrong. */
+.editor-grid .panel {
+  container-type: inline-size;
+}
+
+@container (max-width: 430px) {
+  .field-grid.cols-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@container (max-width: 250px) {
+  .field-grid.cols-2,
+  .field-grid.cols-4 {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .g-field {
@@ -1240,11 +1323,6 @@ pre {
   flex: none;
 }
 
-@media (max-width: 900px) {
-  .field-grid.cols-4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
 
 /* The topbar routing selects and key warnings belong to the lookup flow. A
    body class, not [hidden], so app.js's own show/hide logic is not fought. */
