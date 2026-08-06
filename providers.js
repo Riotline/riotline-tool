@@ -542,16 +542,43 @@ export async function trackerPage(browser, url, options = {}) {
   }
 
   const arrays = [];
+  let emptyList = false;
+
   for (const capture of result.captured ?? []) {
     const matches = findMatchesArray(capture.body);
-    if (matches) arrays.push({ matches, via: `XHR ${new URL(capture.url).pathname}` });
+    if (matches) {
+      arrays.push({ matches, via: `XHR ${new URL(capture.url).pathname}` });
+    } else if (TRACKER_XHR_PATTERN.test(capture.url) && isEmptyMatchList(capture.body)) {
+      emptyList = true;
+    }
   }
   for (const blob of extractEmbeddedJson(html)) {
     const matches = findMatchesArray(blob);
     if (matches) arrays.push({ matches, via: 'embedded JSON' });
   }
 
-  return { arrays, html, status: result.status ?? null, capturedCount: (result.captured ?? []).length, url };
+  return { arrays, emptyList, html, status: result.status ?? null, capturedCount: (result.captured ?? []).length, url };
+}
+
+/**
+ * Did the site answer with a match list that happens to be empty?
+ *
+ * This has to be told apart from "no list arrived at all", because the two look
+ * identical to findMatchesArray - it only recognises a non-empty array - and
+ * they mean opposite things. An account with no games of this type is a normal,
+ * quiet answer; nothing arriving means the page never served its data, which
+ * measured against tracker.gg is usually throttling. Reporting the first as an
+ * error puts a permanent red row in the watch for a player who simply has not
+ * played a custom yet.
+ *
+ * Deliberately narrow: only the site's own match payload shapes count, since
+ * plenty of unrelated endpoints on the page answer with an empty `data` array.
+ */
+export function isEmptyMatchList(body) {
+  const data = body?.data;
+  if (Array.isArray(data?.matches)) return data.matches.length === 0;
+  if (Array.isArray(data)) return data.length === 0;
+  return false;
 }
 
 /** Match mode as tracker labels it, tolerant of casing and separators. */
@@ -592,11 +619,16 @@ async function trackerMatchesRaw(config, handle, type) {
   // mode here would throw the whole list away.
   if (best) return onCustomsTab ? best.matches : matchesOfType(best.matches, type);
 
+  // The site answered, this account just has nothing of that kind. Not an error.
+  if (page.emptyList) return [];
+
   throw new ProviderError(
     502,
     `The ${onCustomsTab ? 'customs' : 'matches'} page loaded, but no match data could be found.`,
     `HTTP ${page.status ?? '?'}, ${page.html.length} bytes, ${page.capturedCount} matching XHR response(s), ` +
-      'none containing a recognisable match array. Run "npm run tracker:probe <Name#TAG>" to see every ' +
+      'none containing a match array and none saying the list is empty. Measured against tracker.gg, the ' +
+      'usual cause is throttling: over its limit the site serves a normal-looking page with the match ' +
+      'request simply missing, and only time fixes it. Run "npm run tracker:probe <Name#TAG>" to see every ' +
       'request the page made and what it returned.',
   );
 }

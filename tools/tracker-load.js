@@ -31,7 +31,10 @@ function parseArgs(argv) {
     base: 'http://127.0.0.1:8080',
     provider: 'tracker',
     type: 'custom',
+    mode: 'concurrency',
     levels: '1,2,3,4',
+    spacings: '30,60,120',
+    perSpacing: 6,
     rounds: 2,
     maxRequests: 160,
     timeoutMs: 180_000,
@@ -45,12 +48,18 @@ function parseArgs(argv) {
   }
 
   args.rounds = Number(args.rounds);
+  args.perSpacing = Number(args.perSpacing);
   args.maxRequests = Number(args.maxRequests);
   args.timeoutMs = Number(args.timeoutMs);
-  args.levels = String(args.levels)
-    .split(',')
-    .map((value) => Number(value.trim()))
-    .filter((value) => Number.isFinite(value) && value > 0);
+
+  const numbers = (value) =>
+    String(value)
+      .split(',')
+      .map((entry) => Number(entry.trim()))
+      .filter((entry) => Number.isFinite(entry) && entry > 0);
+
+  args.levels = numbers(args.levels);
+  args.spacings = numbers(args.spacings);
 
   if (!args.handles) throw new Error('Pass --handles <file>, one Riot ID per line.');
   return args;
@@ -160,6 +169,72 @@ if (qualified.length < 2) {
 console.log(`\n  Sweeping with ${qualified.length} of ${handles.length} accounts.\n`);
 handles.length = 0;
 handles.push(...qualified);
+
+/**
+ * Spacing mode: how *often* can a single lookup be made before the site stops
+ * serving data?
+ *
+ * Measured, tracker.gg does not answer that with a 429 - it answers with a
+ * normal-looking page that has no match data in it, and it degrades with
+ * cumulative use rather than snapping at a threshold. So this walks from the
+ * widest spacing inward, which is the safe direction: if a slow cadence already
+ * fails, a faster one tells you nothing except that you have dug the hole
+ * deeper. Intervals are measured start to start, because a throttled request
+ * takes forty-five seconds to fail and would otherwise pace the test itself.
+ */
+if (args.mode === 'spacing') {
+  console.log('  Widest spacing first - a failure at a slow cadence invalidates every faster one.\n');
+  const rows = [];
+
+  for (const spacing of [...args.spacings].sort((a, b) => b - a)) {
+    const results = [];
+
+    for (let i = 0; i < args.perSpacing; i += 1) {
+      const startedAt = Date.now();
+      const result = await check(args, handles[i % handles.length]);
+      results.push(result);
+
+      const ok = results.filter((entry) => entry.ok).length;
+      console.log(
+        `  ${String(spacing).padStart(3)}s gap  ${String(i + 1).padStart(2)}/${args.perSpacing}  ` +
+          `${seconds(result.ms).padStart(7)}  ${result.ok ? `ok (${result.matches})` : `FAILED ${result.status}`}  ` +
+          `[${ok}/${results.length} clean]`,
+      );
+
+      if (i < args.perSpacing - 1) {
+        const wait = Math.max(0, spacing * 1000 - (Date.now() - startedAt));
+        if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+
+    const failed = results.filter((entry) => !entry.ok).length;
+    rows.push({ spacing, requests: results.length, failed, p50: percentile(results.map((e) => e.ms), 50) });
+    console.log(`  -> ${spacing}s: ${results.length - failed}/${results.length} clean\n`);
+
+    if (failed) {
+      console.log('  Failures at this cadence, and anything faster is worse. Stopping.\n');
+      break;
+    }
+  }
+
+  console.log('='.repeat(76));
+  console.log('  gap    requests  failed  median');
+  for (const row of rows) {
+    console.log(
+      `  ${String(row.spacing).padStart(3)}s  ${String(row.requests).padStart(8)}  ${String(row.failed).padStart(6)}  ${seconds(row.p50)}`,
+    );
+  }
+  const clean = rows.filter((row) => row.failed === 0).sort((a, b) => a.spacing - b.spacing)[0];
+  console.log('='.repeat(76));
+  console.log(
+    clean
+      ? `  Fastest clean cadence: one lookup every ${clean.spacing}s.\n` +
+          `  For ${handles.length} accounts that is a full round every ${seconds(clean.spacing * handles.length * 1000)}.`
+      : '  No cadence tested was clean. The site is still throttling - leave it longer and retry.',
+  );
+  console.log('='.repeat(76));
+  process.exit(0);
+}
 
 let spent = 0;
 const summary = [];
