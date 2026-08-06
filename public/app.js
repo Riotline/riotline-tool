@@ -50,6 +50,7 @@ const els = {
   watchLogBox: $('watch-log-box'),
   watchLogCount: $('watch-log-count'),
   watchLogCopy: $('watch-log-copy'),
+  watchNow: $('watch-now'),
 };
 
 const state = {
@@ -602,6 +603,8 @@ const watch = {
   provider: null,
   /** Earliest moment the next request may start, so the whole watch stays in budget. */
   nextSlotAt: 0,
+  /** A one-shot burst is in flight. Retries stay live for it; the loop is not running. */
+  busy: false,
   /** @type {Map<string, Set<string>|null>} ids already seen; null until a baseline lands */
   seen: new Map(),
   /** @type {Map<string, {text: string, tone: string}>} */
@@ -702,10 +705,12 @@ async function takeSlot(handle) {
   await sleep(wait);
 }
 
-async function withRetry(label, handle, run) {
+async function withRetry(label, handle, run, paced = true) {
   for (let attempt = 1; ; attempt += 1) {
-    await takeSlot(handle);
-    if (!watch.running) throw { status: 0, message: 'watch stopped' };
+    if (paced) {
+      await takeSlot(handle);
+      if (!watch.running) throw { status: 0, message: 'watch stopped' };
+    }
 
     const startedAt = performance.now();
     try {
@@ -718,14 +723,14 @@ async function withRetry(label, handle, run) {
       const status = error.status ?? 0;
       logWatch(`${label} failed in ${took}ms - ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
 
-      const canRetry = RETRYABLE_STATUS.has(status) && attempt < RETRY_ATTEMPTS && watch.running;
+      const canRetry = RETRYABLE_STATUS.has(status) && attempt < RETRY_ATTEMPTS && (watch.running || watch.busy);
       if (!canRetry) throw error;
 
       const backoff = RETRY_BACKOFF_MS * 2 ** (attempt - 1);
       logWatch(`retrying in ${backoff}ms (attempt ${attempt + 1} of ${RETRY_ATTEMPTS})`, handle);
       setStatus(handle, `retrying after ${status || 'network'} error`, 'wait');
       await sleep(backoff);
-      if (!watch.running) throw error;
+      if (!watch.running && !watch.busy) throw error;
     }
   }
 }
@@ -839,6 +844,26 @@ async function runWatch(handles) {
   return null;
 }
 
+/**
+ * Take the winning account over, so the rest of the tab behaves as though it
+ * had been searched by hand, and show the payload we already hold rather than
+ * fetching it a second time.
+ */
+function adoptHit(hit) {
+  setStatus(hit.handle, `taken - ${hit.players} players`, 'hit');
+
+  state.provider = watch.provider;
+  state.handle = hit.handle;
+  state.matches = hit.matches;
+  els.playerName.textContent = hit.handle;
+  els.playerPuuidRow.hidden = true;
+  els.playerCard.hidden = false;
+
+  renderMatchList();
+  markSelected(hit.matchId);
+  showMatch(hit.match, hit.matchId);
+}
+
 function stopWatch(label = '') {
   if (watch.running) logWatch(`watch stopped${label ? ` - ${label}` : ''}`);
   watch.running = false;
@@ -898,20 +923,7 @@ async function startWatch() {
     if (!hit) return;
 
     stopWatch(`found on ${hit.handle}`);
-    setStatus(hit.handle, `taken - ${hit.players} players`, 'hit');
-
-    // Adopt the winning account so the rest of the tab behaves as though it had
-    // been searched by hand, then show the payload we already have.
-    state.provider = watch.provider;
-    state.handle = hit.handle;
-    state.matches = hit.matches;
-    els.playerName.textContent = hit.handle;
-    els.playerPuuidRow.hidden = true;
-    els.playerCard.hidden = false;
-
-    renderMatchList();
-    markSelected(hit.matchId);
-    showMatch(hit.match, hit.matchId);
+    adoptHit(hit);
     toast(`New ${els.matchType.value} found on ${hit.handle}`);
   } catch (error) {
     stopWatch('stopped');
@@ -919,10 +931,129 @@ async function startWatch() {
   }
 }
 
+/**
+ * Ask every account at once, right now.
+ *
+ * The paced watch trades latency for staying inside a rate limit, which is the
+ * right trade while it sits there for twenty minutes waiting. This is the other
+ * case: the operator knows the game has just ended and wants it now, once. A
+ * single unpaced burst spends the budget deliberately instead of rationing it.
+ *
+ * No baseline is involved. Pressing the button is the operator saying "the game
+ * that just finished is the one I want", so this takes the newest match anyone
+ * has rather than the newest one nobody had before - which also means it works
+ * without having started a watch first.
+ */
+const BURST_DETAIL_TRIES = 4;
+
+async function checkNow() {
+  const handles = parseHandles(els.watchIds.value, WATCH_MAX);
+  if (!handles.length) {
+    toast('Add at least one Riot ID in the form Name#TAG');
+    return;
+  }
+
+  const current = provider();
+  if (current === 'riot') {
+    toast('Watching needs HenrikDev or tracker.gg - the Riot matchlist has no mode filter.');
+    return;
+  }
+
+  localStorage.setItem('watch-ids', els.watchIds.value);
+  watch.busy = true;
+  watch.provider = current;
+  els.watchNow.disabled = true;
+  setWatchState('checking all');
+
+  const startedAt = performance.now();
+  logWatch(`check all now - ${handles.length} account(s) at once, unpaced, source ${current}`);
+  if (current === 'tracker') {
+    logWatch('tracker.gg is measured at one lookup a minute, so most of these will be refused');
+  }
+
+  try {
+    const lists = await mapLimit(handles, handles.length, async (handle) => {
+      setStatus(handle, 'asking');
+      try {
+        const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), false);
+        const matches = result.matches ?? [];
+        setStatus(handle, matches.length ? `${matches.length} match(es)` : 'no matches');
+        return { handle, matches };
+      } catch (error) {
+        logWatch(`burst failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
+        setStatus(handle, `error ${error.status ?? ''}`.trim(), 'err');
+        return { handle, matches: [] };
+      }
+    });
+
+    // One match, several accounts: dedupe by id but remember who can serve it,
+    // because on tracker.gg the detail lookup is per handle and one account's
+    // copy can be complete while another's is still filling in.
+    const candidates = [];
+    for (const { handle, matches } of lists) {
+      for (const match of matches.slice(0, 3)) {
+        if (!match?.id) continue;
+        const seen = candidates.find((entry) => String(entry.id) === String(match.id));
+        if (seen) seen.sources.push({ handle, matches });
+        else candidates.push({ id: match.id, startedAt: match.startedAt ?? 0, sources: [{ handle, matches }] });
+      }
+    }
+    candidates.sort((a, b) => b.startedAt - a.startedAt);
+
+    if (!candidates.length) {
+      logWatch(`check all now finished in ${Math.round(performance.now() - startedAt) / 1000}s - nothing returned`);
+      setWatchState('nothing found');
+      toast('No matches came back from any account');
+      return;
+    }
+
+    logWatch(`${candidates.length} distinct match(es); newest is ${candidates[0].id}`);
+
+    let tries = 0;
+    for (const candidate of candidates) {
+      for (const source of candidate.sources) {
+        if (tries >= BURST_DETAIL_TRIES) break;
+        tries += 1;
+
+        try {
+          const match = await withRetry(
+            'detail',
+            source.handle,
+            () => api('/api/match', watchParams({ matchId: candidate.id, handle: source.handle })),
+            false,
+          );
+          const { ok, players } = scoreboardReady(match);
+          if (!ok) {
+            logWatch(`${candidate.id} incomplete here (${players} player(s)) - trying another account`, source.handle);
+            continue;
+          }
+
+          logWatch(`check all now took ${Math.round(performance.now() - startedAt) / 1000}s - ${candidate.id}`);
+          setWatchState(`found on ${source.handle}`);
+          adoptHit({ handle: source.handle, match, matchId: candidate.id, matches: source.matches, players });
+          toast(`Loaded ${candidate.id} from ${source.handle}`);
+          return;
+        } catch (error) {
+          logWatch(`detail failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), source.handle);
+        }
+      }
+      if (tries >= BURST_DETAIL_TRIES) break;
+    }
+
+    setWatchState('no full scoreboard');
+    toast('Found matches, but none with a full scoreboard yet');
+  } finally {
+    watch.busy = false;
+    els.watchNow.disabled = false;
+  }
+}
+
 els.watchBtn.addEventListener('click', () => {
   if (watch.running) stopWatch('stopped');
   else void startWatch();
 });
+
+els.watchNow.addEventListener('click', () => void checkNow());
 
 els.watchIds.value = localStorage.getItem('watch-ids') ?? '';
 

@@ -379,7 +379,13 @@ button:focus-visible {
   color: var(--text-dim);
 }
 
-.watch #watch-btn {
+.watch-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.watch-actions .btn {
   width: 100%;
 }
 
