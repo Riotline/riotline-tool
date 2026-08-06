@@ -214,12 +214,30 @@ if (args.mode === 'spacing') {
       }
     }
 
-    const failed = results.filter((entry) => !entry.ok).length;
-    rows.push({ spacing, requests: results.length, failed, p50: percentile(results.map((e) => e.ms), 50) });
-    console.log(`  -> ${spacing}s: ${results.length - failed}/${results.length} clean\n`);
+    // Failures before the first success are the cold start, not the cadence.
+    // The browser needs a navigation or three before the site serves data, and
+    // charging that to the interval under test condemns a cadence whose every
+    // measured request was clean - which is exactly what a 120s run did.
+    const firstOk = results.findIndex((entry) => entry.ok);
+    const warmUpCost = firstOk === -1 ? results.length : firstOk;
+    const measured = firstOk === -1 ? [] : results.slice(firstOk);
+    const failed = measured.filter((entry) => !entry.ok).length;
 
-    if (failed) {
-      console.log('  Failures at this cadence, and anything faster is worse. Stopping.\n');
+    rows.push({
+      spacing,
+      requests: measured.length,
+      failed,
+      warmUpCost,
+      p50: percentile(measured.map((e) => e.ms), 50),
+    });
+
+    console.log(
+      `  -> ${spacing}s: ${measured.length - failed}/${measured.length} clean` +
+        `${warmUpCost ? ` (first ${warmUpCost} discarded as warm-up)` : ''}\n`,
+    );
+
+    if (failed || !measured.length) {
+      console.log('  Failures at this cadence once warm, and anything faster is worse. Stopping.\n');
       break;
     }
   }

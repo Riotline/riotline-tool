@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 
-import { freshMatch, mapLimit, parseHandles, scoreboardReady } from '../public/watch-core.js';
+import { freshMatch, mapLimit, parseHandles, reserveSlot, scoreboardReady } from '../public/watch-core.js';
 
 // --- parseHandles ----------------------------------------------------------
 
@@ -53,6 +53,35 @@ assert.equal(
   'a player who only died still played',
 );
 assert.equal(scoreboardReady({ players: [player(), player()] }).players, 2, 'reports the count for the status line');
+
+// --- reserveSlot -----------------------------------------------------------
+// tracker.gg limits how often it is asked, so the watch paces every request.
+
+{
+  // An idle watch goes immediately and books the next slot a gap ahead.
+  const first = reserveSlot(1_000, 0, 60_000);
+  assert.deepEqual(first, { startAt: 1_000, nextAt: 61_000 }, 'the first request does not wait');
+
+  // A second caller in the same tick queues behind it rather than sharing it.
+  const second = reserveSlot(1_000, first.nextAt, 60_000);
+  assert.deepEqual(second, { startAt: 61_000, nextAt: 121_000 }, 'concurrent callers must not share a slot');
+
+  // Ten accounts at a minute each is a ten-minute round - the measured cost.
+  let cursor = 0;
+  let last = 0;
+  for (let i = 0; i < 10; i += 1) {
+    const slot = reserveSlot(1_000, cursor, 60_000);
+    cursor = slot.nextAt;
+    last = slot.startAt;
+  }
+  assert.equal(last - 1_000, 9 * 60_000, 'a round of ten spans nine gaps');
+
+  // A cursor already in the past must not drag a request backwards.
+  assert.deepEqual(reserveSlot(500_000, 1_000, 60_000), { startAt: 500_000, nextAt: 560_000 }, 'a stale cursor is ignored');
+
+  // No pacing configured (HenrikDev before its own limit matters) is a no-op.
+  assert.deepEqual(reserveSlot(1_000, 99_000, 0), { startAt: 1_000, nextAt: 99_000 }, 'zero gap never waits');
+}
 
 // --- mapLimit --------------------------------------------------------------
 

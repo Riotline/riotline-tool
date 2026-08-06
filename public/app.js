@@ -13,7 +13,7 @@
  */
 
 import { setLookupMatch } from './store.js';
-import { WATCH_MAX, freshMatch, mapLimit, parseHandles, scoreboardReady } from './watch-core.js';
+import { WATCH_MAX, freshMatch, mapLimit, parseHandles, reserveSlot, scoreboardReady } from './watch-core.js';
 
 // ------------------------------------------------------------ elements ---
 
@@ -558,12 +558,25 @@ function scoreboard(title, roster, team) {
  *               another account's fuller copy can win instead.
  */
 
-// tracker.gg drives a real browser per check, so it gets a small fan-out and
-// leans on its own latency for spacing. HenrikDev is a plain JSON call, but the
-// free tier is roughly 30 requests a minute and ten accounts burn that fast.
+/**
+ * Measured against tracker.gg (tools/tracker-load.js, 2026-08-07):
+ *
+ *   one lookup every 60s   6/6 clean, ~4.5s each
+ *   one lookup every 30s   2/6 clean, failures burning 47.6s each
+ *
+ * The limit is on how often the site is asked, not how many at once - a sweep
+ * never got a clean round even at one account at a time, so concurrency was
+ * never the lever. Hence minRequestGapMs, which paces every request the watch
+ * makes: a round of ten fired back to back blows the budget no matter how long
+ * the pause after it. At that pace a ten-account round takes ten minutes, which
+ * is the honest reason this feature wants HenrikDev.
+ *
+ * HenrikDev's published limit is around 30 requests a minute, so 2s between
+ * requests keeps a full roster comfortably inside it.
+ */
 const WATCH_TUNING = {
-  henrik: { concurrency: 5, gapMs: 25_000 },
-  tracker: { concurrency: 2, gapMs: 10_000 },
+  henrik: { concurrency: 5, gapMs: 25_000, minRequestGapMs: 2_000 },
+  tracker: { concurrency: 1, gapMs: 0, minRequestGapMs: 60_000 },
 };
 
 // A tracker.gg check drives a real browser, so it fails in ways a JSON call does
@@ -577,6 +590,8 @@ const RETRY_BACKOFF_MS = 4_000;
 const watch = {
   running: false,
   provider: null,
+  /** Earliest moment the next request may start, so the whole watch stays in budget. */
+  nextSlotAt: 0,
   /** @type {Map<string, Set<string>|null>} ids already seen; null until a baseline lands */
   seen: new Map(),
   /** @type {Map<string, {text: string, tone: string}>} */
@@ -656,8 +671,32 @@ function wakeSleepers() {
  * Only the transient statuses are retried, and only while the watch is still
  * running - a stop during a backoff should end the round, not serve it out.
  */
+/**
+ * Hold every request back to the source's measured pace.
+ *
+ * The cursor moves before anything is awaited, so two concurrent callers cannot
+ * be handed the same slot. Retries queue for a slot of their own - a failing
+ * account must not be allowed to jump the budget ahead of the nine that are
+ * behaving.
+ */
+async function takeSlot(handle) {
+  const minGapMs = (WATCH_TUNING[watch.provider] ?? WATCH_TUNING.henrik).minRequestGapMs ?? 0;
+  const { startAt, nextAt } = reserveSlot(Date.now(), watch.nextSlotAt, minGapMs);
+  watch.nextSlotAt = nextAt;
+
+  const wait = startAt - Date.now();
+  if (wait <= 0) return;
+
+  logWatch(`waiting ${Math.round(wait / 1000)}s for its turn (pacing ${Math.round(minGapMs / 1000)}s)`, handle);
+  setStatus(handle, `queued - ${Math.round(wait / 1000)}s`, 'wait');
+  await sleep(wait);
+}
+
 async function withRetry(label, handle, run) {
   for (let attempt = 1; ; attempt += 1) {
+    await takeSlot(handle);
+    if (!watch.running) throw { status: 0, message: 'watch stopped' };
+
     const startedAt = performance.now();
     try {
       const value = await run();
@@ -761,6 +800,10 @@ async function runWatch(handles) {
       try {
         return await checkAccount(handle);
       } catch (error) {
+        // Stopping cancels whatever was queued for a slot. That is not a
+        // failure, and painting it red would misreport a clean shutdown.
+        if (!watch.running) return null;
+
         // One bad account must not end the watch - the other nine are the point.
         failed += 1;
         const rateLimited = error.status === 429;
@@ -813,6 +856,7 @@ async function startWatch() {
 
   watch.running = true;
   watch.provider = current;
+  watch.nextSlotAt = 0;
   watch.seen = new Map(handles.map((handle) => [handle, null]));
   watch.status.clear();
   for (const handle of handles) setStatus(handle, 'waiting for baseline');
@@ -820,9 +864,18 @@ async function startWatch() {
   const tuning = WATCH_TUNING[current] ?? WATCH_TUNING.henrik;
   logWatch(
     `watch started - source ${current}, type ${els.matchType.value}, ${handles.length} account(s), ` +
-      `${tuning.concurrency} at a time, ${Math.round(tuning.gapMs / 1000)}s between rounds, ` +
-      `up to ${RETRY_ATTEMPTS} attempts per request`,
+      `${tuning.concurrency} at a time, ${Math.round((tuning.minRequestGapMs ?? 0) / 1000)}s between requests, ` +
+      `${Math.round(tuning.gapMs / 1000)}s between rounds, up to ${RETRY_ATTEMPTS} attempts per request`,
   );
+
+  // The pacing is measured, not chosen, so the cost of a big roster is worth
+  // stating up front rather than leaving the operator to infer it from the log.
+  const roundMs = handles.length * (tuning.minRequestGapMs ?? 0);
+  if (roundMs >= 120_000) {
+    const minutes = Math.round(roundMs / 60_000);
+    logWatch(`at this pace one round over ${handles.length} account(s) takes about ${minutes} minutes`);
+    toast(`${PROVIDER_LABELS[current]} allows one lookup a minute - a full round takes ~${minutes} min`);
+  }
 
   els.watchBtn.textContent = 'Stop watching';
 

@@ -55,6 +55,27 @@ export function scoreboardReady(match, minimumPlayers = 2) {
 }
 
 /**
+ * Reserve the next moment a request is allowed to start.
+ *
+ * Measured, tracker.gg limits how often it is asked, not how many at once: one
+ * lookup every 60s ran clean indefinitely, 30s failed on the second request.
+ * That is a property of the whole watch rather than of any one account, so the
+ * pacing cannot live in the per-round gap - a round of ten fires ten requests
+ * back to back and blows the budget however long the pause after it is.
+ *
+ * Returns the reserved start time and the new cursor. Keeping it pure means the
+ * caller does the waiting, and the reservation itself cannot interleave: the
+ * cursor moves before anything is awaited, so two callers never take one slot.
+ *
+ * @returns {{startAt: number, nextAt: number}}
+ */
+export function reserveSlot(now, cursor, minGapMs) {
+  if (!minGapMs) return { startAt: now, nextAt: cursor };
+  const startAt = Math.max(now, cursor);
+  return { startAt, nextAt: startAt + minGapMs };
+}
+
+/**
  * Run `fn` over `items` with at most `limit` in flight, preserving order.
  *
  * Bounded because the tracker.gg source opens a real browser tab per check -
