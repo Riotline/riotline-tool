@@ -434,29 +434,77 @@ fitStage();
 
 let latestState = null;
 
-// Subscribe first so the first frame is not held up by the catalogue fetch;
-// names and numbers paint immediately and the art fills in a moment later.
-const stream = new EventSource('/api/graphic/events');
+const RECONNECT_MIN_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+let reconnectMs = RECONNECT_MIN_MS;
 
-stream.addEventListener('graphic', (event) => {
-  try {
-    latestState = JSON.parse(event.data).state;
-    render(latestState);
-  } catch (error) {
-    console.warn(`ignored a malformed graphic update: ${error.message}`);
-  }
-});
+/**
+ * Subscribe, and keep subscribing.
+ *
+ * EventSource retries a dropped connection on its own, but only a *dropped* one:
+ * a non-200 or a wrong content type is a fatal error by the spec, and it closes
+ * the stream for good. An OBS browser source that happens to load while the
+ * server is restarting would therefore sit there for the whole broadcast showing
+ * a graphic that never updates again, with nothing on screen to say so. So a
+ * closed stream is rebuilt here, backing off to half a minute in case the server
+ * is properly down rather than merely restarting.
+ *
+ * Subscribed before the catalogue fetch so the first frame is not held up by it;
+ * names and numbers paint immediately and the art fills in a moment later.
+ */
+function connect() {
+  const stream = new EventSource('/api/graphic/events');
 
-// EventSource reconnects on its own; nothing here should tear the page down.
-stream.addEventListener('error', () => console.warn('graphic stream dropped - reconnecting'));
+  stream.addEventListener('open', () => {
+    reconnectMs = RECONNECT_MIN_MS;
+  });
 
-(async () => {
+  stream.addEventListener('graphic', (event) => {
+    try {
+      latestState = JSON.parse(event.data).state;
+      render(latestState);
+    } catch (error) {
+      console.warn(`ignored a malformed graphic update: ${error.message}`);
+    }
+  });
+
+  stream.addEventListener('error', () => {
+    // Still CONNECTING means EventSource is handling it itself - leave it alone,
+    // or two reconnect loops end up racing for the same stream.
+    if (stream.readyState !== EventSource.CLOSED) {
+      console.warn('graphic stream dropped - EventSource is reconnecting');
+      return;
+    }
+
+    console.warn(`graphic stream closed - reconnecting in ${reconnectMs}ms`);
+    stream.close();
+    setTimeout(connect, reconnectMs);
+    reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
+  });
+}
+
+connect();
+
+/**
+ * The agent and map art, retried on the same principle: a source that started
+ * before the server had the catalogue would otherwise render every match of the
+ * broadcast without portraits. Names and numbers go to air regardless, so this
+ * never blocks a render - it just upgrades one when it lands.
+ */
+async function loadCatalogue(attempt = 1) {
   try {
     const response = await fetch('/api/valorant-assets');
-    if (response.ok) indexCatalogue(await response.json());
-  } catch {
-    // Agent art is decoration; names and numbers still go to air without it.
-    console.warn('valorant-api catalogue unavailable - rendering without agent art');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    indexCatalogue(await response.json());
+    if (latestState) render(latestState);
+    return;
+  } catch (error) {
+    console.warn(`valorant-api catalogue unavailable (${error.message}) - rendering without agent art`);
   }
+
   if (latestState) render(latestState);
-})();
+  if (attempt >= 6) return;
+  setTimeout(() => loadCatalogue(attempt + 1), Math.min(RECONNECT_MIN_MS * 2 ** attempt, RECONNECT_MAX_MS));
+}
+
+loadCatalogue();

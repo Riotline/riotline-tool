@@ -428,6 +428,43 @@ button:focus-visible {
   color: var(--warn);
 }
 
+.watch-log-box {
+  margin-top: 12px;
+}
+
+.watch-log-box summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.watch-log {
+  /* Tall enough to show a round at a glance, capped so it cannot push the
+     controls above it off the screen. */
+  max-height: 260px;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.watch-log-box .btn {
+  width: 100%;
+}
+
 .player-card {
   margin-top: 16px;
   padding: 12px;

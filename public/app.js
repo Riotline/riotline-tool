@@ -46,6 +46,10 @@ const els = {
   watchBtn: $('watch-btn'),
   watchStatus: $('watch-status'),
   watchState: $('watch-state'),
+  watchLog: $('watch-log'),
+  watchLogBox: $('watch-log-box'),
+  watchLogCount: $('watch-log-count'),
+  watchLogCopy: $('watch-log-copy'),
 };
 
 const state = {
@@ -562,21 +566,120 @@ const WATCH_TUNING = {
   tracker: { concurrency: 2, gapMs: 10_000 },
 };
 
+// A tracker.gg check drives a real browser, so it fails in ways a JSON call does
+// not: a navigation that times out, a challenge that needed a profile reset, a
+// tab that lost the context. Those are worth another go; a 404 for a profile
+// that does not exist is not, and retrying it just burns a slot in the round.
+const RETRYABLE_STATUS = new Set([0, 408, 425, 429, 500, 502, 503, 504]);
+const RETRY_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 4_000;
+
 const watch = {
   running: false,
   provider: null,
-  timer: null,
   /** @type {Map<string, Set<string>|null>} ids already seen; null until a baseline lands */
   seen: new Map(),
   /** @type {Map<string, {text: string, tone: string}>} */
   status: new Map(),
 };
 
-/** Interruptible: stopping the watch clears this so it does not sit out the gap. */
+// -------------------------------------------------------- the debug log ---
+
+/**
+ * Every request the watch makes, timed and stamped.
+ *
+ * A watch can sit there for twenty minutes finding nothing, and "nothing
+ * happened" has several very different causes - the account really has no new
+ * game, the request is failing and being retried, or tracker is handing back a
+ * match whose scoreboard has not filled in. The status line only has room for
+ * the latest of those, so the reasoning is written out in full here instead.
+ */
+const LOG_MAX = 500;
+const watchLog = [];
+
+function logWatch(message, handle = '') {
+  const at = new Date();
+  const stamp = `${at.toTimeString().slice(0, 8)}.${String(at.getMilliseconds()).padStart(3, '0')}`;
+  const line = `${stamp}  ${handle ? `${handle}  ` : ''}${message}`;
+
+  watchLog.push(line);
+  if (watchLog.length > LOG_MAX) watchLog.shift();
+
+  // Mirrored so a log that outlives the panel is still in the devtools console.
+  console.debug(`[watch] ${line}`);
+
+  els.watchLogCount.textContent = String(watchLog.length);
+  els.watchLogCount.hidden = false;
+  els.watchLog.textContent = watchLog.join('\n');
+  // Only chase the tail when the operator has not scrolled up to read something.
+  if (els.watchLogBox.open) els.watchLog.scrollTop = els.watchLog.scrollHeight;
+}
+
+els.watchLogCopy.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(watchLog.join('\n'));
+    toast('Watch log copied');
+  } catch {
+    toast('Clipboard blocked by the browser');
+  }
+});
+
+/**
+ * Interruptible sleeps. Several can be in flight at once - a round gap plus a
+ * retry backoff per account - so they are tracked as a set and woken rather than
+ * cancelled: a cleared timer whose promise never settles would strand the loop
+ * that was waiting on it, which is a worse failure than sitting out the gap.
+ */
+const sleepers = new Set();
+
 const sleep = (ms) =>
   new Promise((resolve) => {
-    watch.timer = setTimeout(resolve, ms);
+    const sleeper = { resolve };
+    sleeper.id = setTimeout(() => {
+      sleepers.delete(sleeper);
+      resolve();
+    }, ms);
+    sleepers.add(sleeper);
   });
+
+function wakeSleepers() {
+  for (const sleeper of sleepers) {
+    clearTimeout(sleeper.id);
+    sleeper.resolve();
+  }
+  sleepers.clear();
+}
+
+/**
+ * Run a request, and give a browser-driven failure another chance.
+ *
+ * Only the transient statuses are retried, and only while the watch is still
+ * running - a stop during a backoff should end the round, not serve it out.
+ */
+async function withRetry(label, handle, run) {
+  for (let attempt = 1; ; attempt += 1) {
+    const startedAt = performance.now();
+    try {
+      const value = await run();
+      const took = Math.round(performance.now() - startedAt);
+      logWatch(`${label} ok in ${took}ms${attempt > 1 ? ` (attempt ${attempt})` : ''}`, handle);
+      return value;
+    } catch (error) {
+      const took = Math.round(performance.now() - startedAt);
+      const status = error.status ?? 0;
+      logWatch(`${label} failed in ${took}ms - ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
+
+      const canRetry = RETRYABLE_STATUS.has(status) && attempt < RETRY_ATTEMPTS && watch.running;
+      if (!canRetry) throw error;
+
+      const backoff = RETRY_BACKOFF_MS * 2 ** (attempt - 1);
+      logWatch(`retrying in ${backoff}ms (attempt ${attempt + 1} of ${RETRY_ATTEMPTS})`, handle);
+      setStatus(handle, `retrying after ${status || 'network'} error`, 'wait');
+      await sleep(backoff);
+      if (!watch.running) throw error;
+    }
+  }
+}
 
 function setWatchState(text) {
   els.watchState.textContent = text;
@@ -607,32 +710,37 @@ const watchParams = (extra = {}) => ({
  * One account, one round. Returns the match only if it is new *and* complete.
  */
 async function checkAccount(handle) {
-  const result = await api('/api/matches', watchParams({ handle }));
+  const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })));
   const matches = result.matches ?? [];
   const ids = matches.map((match) => String(match.id)).filter(Boolean);
 
   const baseline = watch.seen.get(handle);
   if (!baseline) {
     watch.seen.set(handle, new Set(ids));
+    logWatch(`baseline ${ids.length} id(s)${ids.length ? `, newest ${ids[0]}` : ''}`, handle);
     setStatus(handle, ids.length ? `baseline set (${ids.length})` : 'baseline set (no matches yet)');
     return null;
   }
 
   const fresh = freshMatch(matches, baseline);
   if (!fresh) {
+    logWatch(`no new id among ${ids.length}`, handle);
     setStatus(handle, 'no new game');
     return null;
   }
 
+  logWatch(`new id ${fresh.id} (${[fresh.queue, fresh.map].filter(Boolean).join(' ') || 'no label'}) - pulling detail`, handle);
   setStatus(handle, 'new game - checking stats', 'hit');
-  const match = await api('/api/match', watchParams({ matchId: fresh.id, handle }));
+  const match = await withRetry('detail', handle, () => api('/api/match', watchParams({ matchId: fresh.id, handle })));
 
   const { ok, players } = scoreboardReady(match);
   if (!ok) {
+    logWatch(`rejected ${fresh.id}: ${players} player(s) with stats - not baselined, will retry`, handle);
     setStatus(handle, `new game, stats not ready yet (${players} player${players === 1 ? '' : 's'})`, 'wait');
     return null;
   }
 
+  logWatch(`accepted ${fresh.id} with ${players} players`, handle);
   return { handle, match, matchId: fresh.id, matches, players };
 }
 
@@ -644,19 +752,30 @@ async function runWatch(handles) {
     round += 1;
     setWatchState(`round ${round}`);
 
+    const startedAt = performance.now();
+    logWatch(`round ${round} start - ${handles.length} account(s), ${concurrency} at a time`);
+
+    let failed = 0;
     const hits = await mapLimit(handles, concurrency, async (handle) => {
       if (!watch.running) return null;
       try {
         return await checkAccount(handle);
       } catch (error) {
         // One bad account must not end the watch - the other nine are the point.
+        failed += 1;
         const rateLimited = error.status === 429;
+        logWatch(`gave up this round: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
         setStatus(handle, rateLimited ? 'rate limited - will retry' : `error ${error.status ?? ''}`.trim(), 'err');
         return null;
       }
     });
 
     const hit = hits.find(Boolean);
+    logWatch(
+      `round ${round} done in ${Math.round((performance.now() - startedAt) / 100) / 10}s - ` +
+        `${failed} failed, ${hit ? `hit on ${hit.handle}` : 'no hit'}`,
+    );
+
     if (hit) return hit;
     if (!watch.running) return null;
 
@@ -668,8 +787,9 @@ async function runWatch(handles) {
 }
 
 function stopWatch(label = '') {
+  if (watch.running) logWatch(`watch stopped${label ? ` - ${label}` : ''}`);
   watch.running = false;
-  clearTimeout(watch.timer);
+  wakeSleepers();
   els.watchBtn.textContent = 'Start watching';
   setWatchState(label);
 }
@@ -696,6 +816,13 @@ async function startWatch() {
   watch.seen = new Map(handles.map((handle) => [handle, null]));
   watch.status.clear();
   for (const handle of handles) setStatus(handle, 'waiting for baseline');
+
+  const tuning = WATCH_TUNING[current] ?? WATCH_TUNING.henrik;
+  logWatch(
+    `watch started - source ${current}, type ${els.matchType.value}, ${handles.length} account(s), ` +
+      `${tuning.concurrency} at a time, ${Math.round(tuning.gapMs / 1000)}s between rounds, ` +
+      `up to ${RETRY_ATTEMPTS} attempts per request`,
+  );
 
   els.watchBtn.textContent = 'Stop watching';
 
