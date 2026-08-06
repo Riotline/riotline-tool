@@ -13,7 +13,15 @@
  */
 
 import { setLookupMatch } from './store.js';
-import { WATCH_MAX, freshMatch, mapLimit, parseHandles, reserveSlot, scoreboardReady } from './watch-core.js';
+import {
+  WATCH_MAX,
+  freshMatch,
+  isPermanentFailure,
+  mapLimit,
+  parseHandles,
+  reserveSlot,
+  scoreboardReady,
+} from './watch-core.js';
 
 // ------------------------------------------------------------ elements ---
 
@@ -605,6 +613,8 @@ const watch = {
   nextSlotAt: 0,
   /** A one-shot burst is in flight. Retries stay live for it; the loop is not running. */
   busy: false,
+  /** Accounts that cannot answer at all - private, missing - dropped for this run. */
+  skip: new Set(),
   /** @type {Map<string, Set<string>|null>} ids already seen; null until a baseline lands */
   seen: new Map(),
   /** @type {Map<string, {text: string, tone: string}>} */
@@ -806,11 +816,21 @@ async function runWatch(handles) {
     round += 1;
     setWatchState(`round ${round}`);
 
+    const live = handles.filter((handle) => !watch.skip.has(handle));
+    if (!live.length) {
+      logWatch('every account is private or missing - nothing left to watch');
+      stopWatch('no usable accounts');
+      return null;
+    }
+
     const startedAt = performance.now();
-    logWatch(`round ${round} start - ${handles.length} account(s), ${concurrency} at a time`);
+    logWatch(
+      `round ${round} start - ${live.length} account(s), ${concurrency} at a time` +
+        (watch.skip.size ? `, ${watch.skip.size} skipped` : ''),
+    );
 
     let failed = 0;
-    const hits = await mapLimit(handles, concurrency, async (handle) => {
+    const hits = await mapLimit(live, concurrency, async (handle) => {
       if (!watch.running) return null;
       try {
         return await checkAccount(handle);
@@ -818,6 +838,16 @@ async function runWatch(handles) {
         // Stopping cancels whatever was queued for a slot. That is not a
         // failure, and painting it red would misreport a clean shutdown.
         if (!watch.running) return null;
+
+        // Nothing about a private or missing profile changes by next round, and
+        // at one lookup a minute its slot is better spent on an account that
+        // can answer.
+        if (isPermanentFailure(error.status)) {
+          watch.skip.add(handle);
+          logWatch(`dropped for this run: ${error.status} ${error.message ?? ''}`.trim(), handle);
+          setStatus(handle, error.status === 403 ? 'private - skipped' : `${error.status} - skipped`, 'err');
+          return null;
+        }
 
         // One bad account must not end the watch - the other nine are the point.
         failed += 1;
@@ -892,6 +922,7 @@ async function startWatch() {
   watch.running = true;
   watch.provider = current;
   watch.nextSlotAt = 0;
+  watch.skip = new Set();
   watch.seen = new Map(handles.map((handle) => [handle, null]));
   watch.status.clear();
   for (const handle of handles) setStatus(handle, 'waiting for baseline');
@@ -981,7 +1012,8 @@ async function checkNow() {
         return { handle, matches };
       } catch (error) {
         logWatch(`burst failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
-        setStatus(handle, `error ${error.status ?? ''}`.trim(), 'err');
+        setStatus(handle, error.status === 403 ? 'private' : `error ${error.status ?? ''}`.trim(), 'err');
+        if (isPermanentFailure(error.status)) watch.skip.add(handle);
         return { handle, matches: [] };
       }
     });

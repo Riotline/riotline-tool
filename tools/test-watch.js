@@ -10,7 +10,14 @@
 
 import assert from 'node:assert/strict';
 
-import { freshMatch, mapLimit, parseHandles, reserveSlot, scoreboardReady } from '../public/watch-core.js';
+import {
+  freshMatch,
+  isPermanentFailure,
+  mapLimit,
+  parseHandles,
+  reserveSlot,
+  scoreboardReady,
+} from '../public/watch-core.js';
 
 // --- parseHandles ----------------------------------------------------------
 
@@ -53,6 +60,18 @@ assert.equal(
   'a player who only died still played',
 );
 assert.equal(scoreboardReady({ players: [player(), player()] }).players, 2, 'reports the count for the status line');
+
+// --- isPermanentFailure ----------------------------------------------------
+// A dropped account frees a slot; a wrongly dropped one loses an account for
+// the rest of the show, so only the statuses that cannot recover count.
+
+assert.equal(isPermanentFailure(403), true, 'private profile');
+assert.equal(isPermanentFailure(404), true, 'no such Riot ID');
+assert.equal(isPermanentFailure(400), true, 'malformed request');
+assert.equal(isPermanentFailure(429), false, 'rate limiting passes');
+assert.equal(isPermanentFailure(502), false, 'a browser failure is retryable');
+assert.equal(isPermanentFailure(0), false, 'a network blip is retryable');
+assert.equal(isPermanentFailure(undefined), false);
 
 // --- reserveSlot -----------------------------------------------------------
 // tracker.gg limits how often it is asked, so the watch paces every request.

@@ -543,21 +543,33 @@ export async function trackerPage(browser, url, options = {}) {
 
   const arrays = [];
   let emptyList = false;
+  let privateProfile = false;
 
   for (const capture of result.captured ?? []) {
     const matches = findMatchesArray(capture.body);
     if (matches) {
       arrays.push({ matches, via: `XHR ${new URL(capture.url).pathname}` });
-    } else if (TRACKER_XHR_PATTERN.test(capture.url) && isEmptyMatchList(capture.body)) {
-      emptyList = true;
+      continue;
     }
+    if (isPrivateProfile(capture.body)) privateProfile = true;
+    else if (TRACKER_XHR_PATTERN.test(capture.url) && isEmptyMatchList(capture.body)) emptyList = true;
   }
+
+  if (!privateProfile && isPrivateProfile(null, html)) privateProfile = true;
   for (const blob of extractEmbeddedJson(html)) {
     const matches = findMatchesArray(blob);
     if (matches) arrays.push({ matches, via: 'embedded JSON' });
   }
 
-  return { arrays, emptyList, html, status: result.status ?? null, capturedCount: (result.captured ?? []).length, url };
+  return {
+    arrays,
+    emptyList,
+    privateProfile,
+    html,
+    status: result.status ?? null,
+    capturedCount: (result.captured ?? []).length,
+    url,
+  };
 }
 
 /**
@@ -579,6 +591,29 @@ export function isEmptyMatchList(body) {
   if (Array.isArray(data?.matches)) return data.matches.length === 0;
   if (Array.isArray(data)) return data.length === 0;
   return false;
+}
+
+/**
+ * Has the player hidden their tracker.gg profile?
+ *
+ * Worth separating from every other empty answer because it is the one that
+ * never resolves on its own: throttling clears with time and an un-played mode
+ * fills in after a game, but a private profile stays private until its owner
+ * changes a setting. The watch uses that to drop the account rather than spend
+ * a slot on it every round, which on a source measured at one lookup a minute
+ * is the difference between watching nine accounts and watching eight.
+ *
+ * The site's own API is the signal; it answers with an error entry rather than
+ * data. The page text is only a fallback, and is matched tightly - "Privacy
+ * Policy" appears in the footer of every page on the site, so a loose match on
+ * the word alone would report every throttled lookup as private.
+ */
+export function isPrivateProfile(body, html = '') {
+  for (const error of body?.errors ?? []) {
+    if (/private/i.test(`${error?.code ?? ''} ${error?.message ?? ''}`)) return true;
+  }
+
+  return /\bprofile\b[^<>]{0,40}\bis private\b|\bprivate\b[^<>]{0,20}\bprofile\b/i.test(String(html));
 }
 
 /** Match mode as tracker labels it, tolerant of casing and separators. */
@@ -621,6 +656,17 @@ async function trackerMatchesRaw(config, handle, type) {
 
   // The site answered, this account just has nothing of that kind. Not an error.
   if (page.emptyList) return [];
+
+  // Private is permanent until its owner changes it, so it gets a status of its
+  // own: the watch drops the account instead of retrying it every round.
+  if (page.privateProfile) {
+    throw new ProviderError(
+      403,
+      'That tracker.gg profile is private.',
+      'The player has hidden their profile, so no source can read it. Ask them to make it public in their ' +
+        'tracker.gg privacy settings, or drop them from the roster.',
+    );
+  }
 
   throw new ProviderError(
     502,

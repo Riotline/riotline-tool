@@ -55,6 +55,19 @@ export function scoreboardReady(match, minimumPlayers = 2) {
 }
 
 /**
+ * Failures that will still be failures next round.
+ *
+ * A private profile, a Riot ID that does not exist, a malformed request - none
+ * of these resolve by asking again, and on a source paced at one lookup a
+ * minute an account that can never answer is a slot stolen from one that can.
+ * The watch drops these for the rest of its run; everything else is transient
+ * and gets retried.
+ */
+const PERMANENT_STATUS = new Set([400, 403, 404]);
+
+export const isPermanentFailure = (status) => PERMANENT_STATUS.has(Number(status));
+
+/**
  * Reserve the next moment a request is allowed to start.
  *
  * Measured, tracker.gg limits how often it is asked, not how many at once: one
