@@ -142,31 +142,38 @@ console.log(
 /**
  * Qualify the roster before measuring it.
  *
- * Some profiles never serve a list at all - not indexed by tracker, no games of
- * this type, or simply private - and they fail identically at every level, which
- * is indistinguishable from a load failure in the totals and drags the whole
- * sweep past its abort threshold on the first round. Since the question is what
- * load the site tolerates, the roster has to be handles the site actually
- * answers for. One request each, at one at a time, so qualifying costs nothing
- * it is trying to measure.
+ * Some profiles do not serve a list at a given moment - not indexed by tracker,
+ * no games of this type, or the site simply refusing - and they fail identically
+ * at every level, which is indistinguishable from a load failure in the totals
+ * and drags the whole sweep past its abort threshold on the first round. Since
+ * the question is what load the site tolerates, the roster has to be handles the
+ * site actually answers for. One request each, at one at a time, so qualifying
+ * costs nothing it is trying to measure.
+ *
+ * Concurrency mode only. Spacing mode is measuring a budget rather than a
+ * parallelism limit, and a ten-request qualifying pass would spend the very
+ * thing it is about to measure - so that mode takes the roster as given.
  */
-const qualified = [];
-console.log('  qualifying:');
-for (const handle of handles) {
-  const result = await check(args, handle);
-  console.log(
-    `    ${result.ok && result.matches ? 'keep ' : 'drop '} ${handle.padEnd(24)} ${seconds(result.ms).padStart(7)}  ` +
-      `${result.ok ? `${result.matches} match(es)` : `${result.status} ${result.message.slice(0, 70)}`}`,
-  );
-  if (result.ok && result.matches) qualified.push(handle);
+const qualified = args.mode === 'spacing' ? [...handles] : [];
+if (args.mode !== 'spacing') {
+  console.log('  qualifying:');
+  for (const handle of handles) {
+    const result = await check(args, handle);
+    console.log(
+      `    ${result.ok && result.matches ? 'keep ' : 'drop '} ${handle.padEnd(24)} ${seconds(result.ms).padStart(7)}  ` +
+        `${result.ok ? `${result.matches} match(es)` : `${result.status} ${result.message.slice(0, 70)}`}`,
+    );
+    if (result.ok && result.matches) qualified.push(handle);
+  }
+
+  if (qualified.length < 2) {
+    console.log('\n  Too few accounts serve data to measure anything. Nothing swept.');
+    process.exit(1);
+  }
+
+  console.log(`\n  Sweeping with ${qualified.length} of ${handles.length} accounts.\n`);
 }
 
-if (qualified.length < 2) {
-  console.log('\n  Too few accounts serve data to measure anything. Nothing swept.');
-  process.exit(1);
-}
-
-console.log(`\n  Sweeping with ${qualified.length} of ${handles.length} accounts.\n`);
 handles.length = 0;
 handles.push(...qualified);
 
