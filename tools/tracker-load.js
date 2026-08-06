@@ -120,6 +120,47 @@ console.log(`  tracker load sweep - ${handles.length} accounts, source ${args.pr
 console.log(`  levels ${args.levels.join(', ')} | ${args.rounds} round(s) each | cap ${args.maxRequests} requests`);
 console.log('='.repeat(76));
 
+// A cold server has not launched its browser yet, and the first request pays for
+// the launch plus the user-agent relaunch that follows it. Measured, that window
+// returns pages with no match data at all - so it is warmed and discarded here
+// rather than being charged to level 1 as a failure.
+const warmStart = Date.now();
+const warm = await check(args, handles[0]);
+console.log(
+  `  warm-up  ${seconds(Date.now() - warmStart)}  ${warm.ok ? 'ok' : `FAILED ${warm.status} ${warm.message.slice(0, 80)}`} (not counted)\n`,
+);
+
+/**
+ * Qualify the roster before measuring it.
+ *
+ * Some profiles never serve a list at all - not indexed by tracker, no games of
+ * this type, or simply private - and they fail identically at every level, which
+ * is indistinguishable from a load failure in the totals and drags the whole
+ * sweep past its abort threshold on the first round. Since the question is what
+ * load the site tolerates, the roster has to be handles the site actually
+ * answers for. One request each, at one at a time, so qualifying costs nothing
+ * it is trying to measure.
+ */
+const qualified = [];
+console.log('  qualifying:');
+for (const handle of handles) {
+  const result = await check(args, handle);
+  console.log(
+    `    ${result.ok && result.matches ? 'keep ' : 'drop '} ${handle.padEnd(24)} ${seconds(result.ms).padStart(7)}  ` +
+      `${result.ok ? `${result.matches} match(es)` : `${result.status} ${result.message.slice(0, 70)}`}`,
+  );
+  if (result.ok && result.matches) qualified.push(handle);
+}
+
+if (qualified.length < 2) {
+  console.log('\n  Too few accounts serve data to measure anything. Nothing swept.');
+  process.exit(1);
+}
+
+console.log(`\n  Sweeping with ${qualified.length} of ${handles.length} accounts.\n`);
+handles.length = 0;
+handles.push(...qualified);
+
 let spent = 0;
 const summary = [];
 let stopped = null;
