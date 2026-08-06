@@ -102,6 +102,26 @@
             <button type="button" class="btn-copy" data-copy-target="player-puuid" title="Copy PUUID">Copy</button>
           </div>
         </div>
+
+        <!-- Watch several rosters at once and take whichever updates first. -->
+        <section class="watch">
+          <h3 class="watch-title">
+            Watch for a custom
+            <span id="watch-state" class="pill" hidden></span>
+          </h3>
+
+          <label class="field">
+            <span>Riot IDs - one per line, up to 10</span>
+            <textarea id="watch-ids" rows="6" spellcheck="false" placeholder="Name#TAG&#10;Name#TAG"></textarea>
+          </label>
+          <p class="field-help">
+            Polls every account on the match type above and takes the first new game that comes back with a full
+            scoreboard.
+          </p>
+
+          <button id="watch-btn" type="button" class="btn btn-primary">Start watching</button>
+          <ul id="watch-status" class="watch-list"></ul>
+        </section>
       </section>
 
       <!-- ------------------------------------------ step 2: match list --- -->

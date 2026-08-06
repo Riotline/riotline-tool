@@ -102,6 +102,7 @@ body {
 }
 
 select,
+textarea,
 input[type="text"] {
   background: var(--bg-input);
   border: 1px solid var(--border-strong);
@@ -112,7 +113,13 @@ input[type="text"] {
   font-size: 13px;
 }
 
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
 select:focus-visible,
+textarea:focus-visible,
 input[type="text"]:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
@@ -352,6 +359,74 @@ button:focus-visible {
 }
 
 /* -------------------------------------------------------- player card --- */
+
+/* ------------------------------------------------------------- watch --- */
+
+.watch {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.watch-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.watch #watch-btn {
+  width: 100%;
+}
+
+.watch-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.watch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--bg-input);
+  font-size: 11px;
+}
+
+.watch-handle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.watch-note {
+  color: var(--text-faint);
+  text-align: right;
+}
+
+.watch-row.hit {
+  border-left: 2px solid var(--team-blue);
+}
+
+.watch-row.hit .watch-note {
+  color: var(--team-blue);
+}
+
+.watch-row.wait .watch-note,
+.watch-row.err .watch-note {
+  color: var(--warn);
+}
 
 .player-card {
   margin-top: 16px;
