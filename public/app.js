@@ -665,6 +665,16 @@ function setWatchState(text) {
   els.watchState.hidden = !text;
 }
 
+/**
+ * Start the list again. A new baseline is a new set of accounts, so rows left
+ * over from the last one - replaced, dropped, or simply not drawn this time -
+ * would be read as the current state and are not.
+ */
+function resetStatuses() {
+  watch.status.clear();
+  els.watchStatus.replaceChildren();
+}
+
 function setStatus(handle, text, tone = '') {
   watch.status.set(handle, { text, tone });
   els.watchStatus.replaceChildren(
@@ -850,6 +860,7 @@ async function runBurst(mode) {
 }
 
 async function takeBaseline(all, current, took) {
+  resetStatuses();
   setWatchState('baselining');
   logWatch(`baseline - up to ${BURST_MAX} account(s), ${BURST_CONCURRENCY} at a time, source ${current}`);
   if (current === 'tracker') {
@@ -900,6 +911,12 @@ async function takeBaseline(all, current, took) {
       );
       if (ids.length > 1) logWatch(`  ids: ${ids.slice(0, 6).join(', ')}${ids.length > 6 ? ` +${ids.length - 6} more` : ''}`, handle);
     }
+  }
+
+  // Anyone listed but never drawn is on the bench, and says so rather than
+  // silently missing from the list.
+  for (const handle of all) {
+    if (!watch.status.has(handle)) setStatus(handle, 'reserve - not used');
   }
 
   // Every account that kept its place answered, so the count is the set size.
