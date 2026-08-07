@@ -204,16 +204,26 @@ const fitTargets = [...stage.querySelectorAll('[data-fit]')];
  * A logo URL that 404s would otherwise draw the browser's broken-image icon,
  * which is far worse on air than showing nothing.
  *
- * The failed URLs are remembered because `error` only fires when the src is
+ * The failure is remembered because `error` only fires when the src is
  * assigned: a later repaint that re-shows the same element would otherwise
  * un-hide the broken image with nothing left to fire and hide it again.
+ *
+ * Remembered per element and per save, though, not forever. A permanent
+ * blacklist means an operator who pastes a URL that failed once - a typo since
+ * corrected, a CDN that was briefly down, a link that arrived truncated - can
+ * never get it on screen again without restarting the browser source, and the
+ * graphic simply ignores them with no way to tell why. Every save is a fresh
+ * attempt; repaints within the same save still trust the last result.
  */
-const failedImages = new Set();
+/** Bumped by the server on every save; a new one means "try that URL again". */
+let revision = 0;
+
+const failures = new WeakMap();
 
 for (const node of imageTargets) {
   node.addEventListener('error', () => {
     const src = node.getAttribute('src');
-    if (src) failedImages.add(src);
+    if (src) failures.set(node, { src, revision });
     node.hidden = true;
   });
 }
@@ -387,11 +397,23 @@ function render(state) {
 
   for (const node of imageTargets) {
     const url = read(view, node.dataset.img) || '';
-    // Only touch src when it actually changed: reassigning the same URL is
-    // usually a no-op, but "usually" is not good enough on air.
-    if (url && node.getAttribute('src') !== url) node.setAttribute('src', url);
+
+    // A failure only still counts for the same URL in the same save. A new URL,
+    // or the same one after another save, gets another go.
+    const failure = failures.get(node);
+    const stillFailed = Boolean(failure && failure.src === url && failure.revision === revision);
+    if (failure && !stillFailed) failures.delete(node);
+
+    // Reassigning the same URL is usually a no-op, but "usually" is not good
+    // enough on air - so src is only touched when it actually changed, except
+    // when retrying a URL that failed under an older save.
+    const retrying = Boolean(failure && failure.src === url && !stillFailed);
+    if (url && (node.getAttribute('src') !== url || retrying)) {
+      if (retrying) node.removeAttribute('src');
+      node.setAttribute('src', url);
+    }
     if (!url) node.removeAttribute('src');
-    node.hidden = !url || failedImages.has(url);
+    node.hidden = !url || stillFailed;
   }
 
   for (const node of maskTargets) {
@@ -461,7 +483,9 @@ function connect() {
 
   stream.addEventListener('graphic', (event) => {
     try {
-      latestState = JSON.parse(event.data).state;
+      const payload = JSON.parse(event.data);
+      latestState = payload.state;
+      revision = payload.revision ?? revision + 1;
       render(latestState);
     } catch (error) {
       console.warn(`ignored a malformed graphic update: ${error.message}`);
