@@ -49,7 +49,8 @@ const els = {
   watchLogBox: $('watch-log-box'),
   watchLogCount: $('watch-log-count'),
   watchLogCopy: $('watch-log-copy'),
-  watchNow: $('watch-now'),
+  watchBaseline: $('watch-baseline'),
+  watchCheck: $('watch-check'),
 };
 
 const state = {
@@ -228,7 +229,7 @@ for (const radio of document.querySelectorAll('input[name="provider"]')) {
       watch.burst = null;
       logWatch('baseline discarded - the data source changed');
       setWatchState('');
-      syncBurstButton();
+      syncBurstButtons();
     }
     state.matches = [];
     els.matchCount.hidden = true;
@@ -735,45 +736,67 @@ const BURST_DETAIL_TRIES = 4;
  * would have answered in five seconds. Failing fast and moving on is strictly
  * better whenever there is someone else to ask.
  */
-async function burstList(handles) {
+async function burstList(handles, { replacing = false } = {}) {
   return mapLimit(handles, BURST_CONCURRENCY, async (handle) => {
     setStatus(handle, 'asking');
     try {
-      const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), false, 1);
+      const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), 1);
       const matches = result.matches ?? [];
       setStatus(handle, matches.length ? `${matches.length} match(es)` : 'no matches');
       return { handle, matches, ok: true };
     } catch (error) {
       const status = error.status ?? 0;
-      logWatch(`burst failed: ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
-      setStatus(handle, status === 403 ? 'private' : `error ${status || 'network'} - replaced`, 'err');
+      logWatch(`list failed: ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
 
-      // Private and missing are gone for the session; a 502 is usually tracker
-      // throttling, which clears - so it loses its place in this set but stays
-      // eligible for the next baseline.
-      if (isPermanentFailure(status)) watch.skip.add(handle);
+      // Only the baseline can replace an account - by the time a check runs, the
+      // set is fixed, so saying "replaced" there would be a lie. A private one
+      // is dropped whenever it is found; a 502 is usually tracker throttling, so
+      // it only costs a place while the set is still being chosen.
+      const permanent = isPermanentFailure(status);
+      if (permanent) watch.skip.add(handle);
+
+      const label = permanent
+        ? status === 403
+          ? 'private - dropped'
+          : `${status} - dropped`
+        : replacing
+          ? `error ${status || 'network'} - replaced`
+          : `error ${status || 'network'} - no answer`;
+      setStatus(handle, label, 'err');
+
       return { handle, matches: [], ok: false };
     }
   });
 }
 
 /** The button says which half of the job it will do next. */
-function syncBurstButton() {
+/** Checking means nothing without a baseline, so it stays disabled until there is one. */
+function syncBurstButtons() {
   // Compared against the raw list, not the five actually used: skipping a
   // private account changes the five, and that must not throw away a baseline
   // taken moments before the game ended.
   const listed = parseHandles(els.watchIds.value, WATCH_MAX);
-  const stale = watch.burst && String(watch.burst.listed) !== String(listed);
-  if (stale) watch.burst = null;
+  if (watch.burst && String(watch.burst.listed) !== String(listed)) {
+    watch.burst = null;
+    logWatch('baseline discarded - the account list changed');
+  }
 
-  els.watchNow.textContent = watch.burst ? 'Check for new game' : 'Set baseline';
-  els.watchNow.title = watch.burst
-    ? 'Ask every account again and take whatever is new since the baseline'
-    : 'Record what every account already has, so the next click can spot the new game';
+  els.watchBaseline.disabled = watch.busy;
+  els.watchCheck.disabled = watch.busy || !watch.burst;
+  els.watchBaseline.textContent = watch.burst ? '1. Re-set baseline' : '1. Set baseline';
+  els.watchCheck.title = watch.burst
+    ? 'Ask the same accounts again and take whatever is new since the baseline'
+    : 'Set a baseline first - without one there is nothing to compare against';
 }
 
-async function runBurst() {
+async function runBurst(mode) {
   const all = parseHandles(els.watchIds.value, WATCH_MAX);
+  const checking = mode === 'check';
+
+  if (checking && !watch.burst) {
+    toast('Set a baseline first - there is nothing to compare against');
+    return;
+  }
 
   // The baseline picks the set; every check afterwards reuses exactly that set.
   // Nothing is ever drafted in later, because a late arrival has no record of
@@ -781,14 +804,14 @@ async function runBurst() {
   // an old one - it would take a slot and contribute nothing. Accounts only ever
   // leave: a private one is gone for good, while a 502 keeps its place because
   // throttling passes.
-  const handles = watch.burst
+  const handles = checking
     ? watch.burst.handles.filter((handle) => !watch.skip.has(handle))
     : all.filter((handle) => !watch.skip.has(handle)).slice(0, BURST_MAX);
 
   if (!handles.length) {
     toast(
-      watch.burst
-        ? 'Every account in the baseline turned out to be private - edit the list to start again'
+      checking
+        ? 'Every account in the baseline turned out to be private - set a new baseline'
         : 'Add at least one Riot ID in the form Name#TAG',
     );
     return;
@@ -801,24 +824,28 @@ async function runBurst() {
   }
 
   localStorage.setItem('watch-ids', els.watchIds.value);
-  if (all.length > handles.length) {
-    logWatch(`using the first ${handles.length} of ${all.length} account(s) - the burst is capped at ${BURST_MAX}`);
+  if (!checking && all.length > handles.length) {
+    logWatch(`drawing from ${all.length} listed account(s) - the set is capped at ${BURST_MAX}`);
   }
 
   watch.busy = true;
   watch.provider = current;
-  els.watchNow.disabled = true;
+  syncBurstButtons();
 
   const startedAt = performance.now();
   const took = () => `${Math.round(performance.now() - startedAt) / 1000}s`;
 
   try {
-    if (!watch.burst) return await takeBaseline(all, current, took);
+    // Re-baselining starts clean rather than merging into the old one, which
+    // would keep ids from a set of accounts that may no longer be in play.
+    if (!checking) {
+      watch.burst = null;
+      return await takeBaseline(all, current, took);
+    }
     return await findNewGame(handles, took);
   } finally {
     watch.busy = false;
-    els.watchNow.disabled = false;
-    syncBurstButton();
+    syncBurstButtons();
   }
 }
 
@@ -841,7 +868,7 @@ async function takeBaseline(all, current, took) {
     const batch = pool.slice(0, BURST_MAX - used.length);
     pool = pool.slice(batch.length);
 
-    for (const { handle, matches, ok } of await burstList(batch)) {
+    for (const { handle, matches, ok } of await burstList(batch, { replacing: true })) {
       // Any account that did not answer loses its place, whatever the reason.
       // An account with no baseline cannot tell a new game from an old one, so
       // keeping it would spend one of five slots on a seat that can only watch -
@@ -985,11 +1012,12 @@ async function findNewGame(handles, took) {
   toast('Found a new game, but no full scoreboard yet - press again shortly');
 }
 
-els.watchNow.addEventListener('click', () => void runBurst());
-els.watchIds.addEventListener('input', syncBurstButton);
+els.watchBaseline.addEventListener('click', () => void runBurst('baseline'));
+els.watchCheck.addEventListener('click', () => void runBurst('check'));
+els.watchIds.addEventListener('input', syncBurstButtons);
 
 els.watchIds.value = localStorage.getItem('watch-ids') ?? '';
-syncBurstButton();
+syncBurstButtons();
 
 // ------------------------------------------------------------ exports ---
 
