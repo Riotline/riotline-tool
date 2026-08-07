@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VALORANT Winner - Output</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Gabarito:wght@400;500;600;700;800;900&family=Oswald:wght@400;500;600;700&family=Poppins:wght@300;400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/winner.css" />
+  </head>
+
+  <!--
+    OBS browser source: 1920 x 1080, "Shutdown source when not visible" off.
+
+    This is the end-of-map sequence: a full-frame overlay that wipes on, plays
+    three scenes - the map that was played, the winning team, the series score -
+    and wipes off. It is a second source alongside the scoreboard rather than
+    part of it, so a director can put them in different scenes and cut between
+    them without one deciding what the other is doing.
+
+    Like the scoreboard, the markup is a fixed skeleton: updates only rewrite
+    text and image URLs, so a repaint mid-sequence cannot flash a logo that is
+    already on screen.
+  -->
+  <body>
+    <div id="stage-wrap">
+      <!-- Starts off air and unready. The first state push decides whether to
+           play the sequence from the top or simply not be there. -->
+      <div
+        class="stage"
+        id="stage"
+        data-active="false"
+        data-stage="map"
+        data-transition="push"
+        data-opening="shards"
+      >
+        <!-- The backdrop is built from slats rather than being one filled panel,
+             because two of the openings arrive in pieces and a single div cannot.
+             They tile the frame edge to edge and together *are* the backdrop;
+             the openings that do not need pieces simply move all of them at
+             once. Filled in by winner.js so the count comes from the schema. -->
+        <div class="backdrop" id="backdrop"></div>
+
+        <!-- The facet grid: angled shards that sweep in and lock together into
+             the backdrop. A separate layer from the slats because the geometry
+             is different, and only painted for its own opening. -->
+        <div class="facets" id="facets" aria-hidden="true"></div>
+
+        <!-- The prism lattice: outlined diamonds, lit in the accent colour,
+             spinning up in rings from the middle of the frame until they tile
+             it solid. Also filled in by winner.js - the geometry is arithmetic
+             the schema owns, not markup. -->
+        <div class="prism" id="prism" aria-hidden="true"></div>
+
+        <!-- Opening furniture. Both are inert unless their style is playing. -->
+        <div class="opening-flash" aria-hidden="true"></div>
+        <div class="opening-streak" aria-hidden="true"></div>
+
+        <!-- The map plate lives behind the whole sequence, not inside the first
+             scene: it arrives with the overlay, sits sharp under the map card,
+             then goes soft and dark behind the score line and the winner.
+             Two copies rather than an animated blur() - crossfading a
+             pre-blurred layer is far cheaper than re-blurring 1080p every
+             frame, and looks identical. -->
+        <div class="plate" id="plate">
+          <div class="plate-layer plate-sharp"><img data-img="map.image" alt="" /></div>
+          <div class="plate-layer plate-soft"><img data-img="map.image" alt="" /></div>
+          <div class="plate-scrim"></div>
+        </div>
+
+        <!-- The corner mark: one ident above every scene, outside the sequence,
+             so it does not re-animate on each scene change. It still arrives and
+             leaves with the overlay - inside the stage rather than over it -
+             because this graphic has no life of its own between cues. Shown only
+             when the placement is "corner"; otherwise the in-scene slots below
+             carry it instead, as a band of the scenes they belong to. -->
+        <div class="event-logo" id="event-logo"><img data-img="eventLogo" alt="" /></div>
+
+        <!-- ------------------------------------------------- scene: map --- -->
+        <section class="scene scene-map" data-scene="map">
+          <div class="scene-body">
+            <div class="event-mark" data-band data-mark="map"><img data-img="eventLogo" alt="" /></div>
+            <div class="map-title" data-band>
+              <p class="kicker" data-bind="mapKicker"></p>
+              <h1 class="map-name" data-bind="map.name" data-fit="1"></h1>
+            </div>
+            <p class="map-headline" data-band data-bind="mapHeadline"></p>
+          </div>
+        </section>
+
+        <!-- ---------------------------------------------- scene: winner --- -->
+        <section class="scene scene-winner" data-scene="winner">
+          <div class="winner-glow"></div>
+          <div class="scene-body">
+            <div class="event-mark" data-band data-mark="winner"><img data-img="eventLogo" alt="" /></div>
+            <p class="winner-kicker" data-band data-bind="winnerHeadline"></p>
+            <div class="winner-logo" data-band><img data-img="winner.logo" alt="" /></div>
+            <!-- The band is the wrapper, not the heading: fitText writes a
+                 scaleX onto the heading to squeeze a long org name, and an
+                 animation transform on the same element would fight it. -->
+            <div class="winner-name-band" data-band>
+              <h1 class="winner-name" data-bind="winner.name" data-short-bind="winner.shortName" data-fit="1"></h1>
+            </div>
+            <p class="winner-sub" data-band data-bind="winnerSubtitle"></p>
+          </div>
+        </section>
+
+        <!-- ----------------------------------------------- scene: score --- -->
+        <section class="scene scene-score" data-scene="score">
+          <div class="scene-body">
+            <div class="event-mark" data-band data-mark="score"><img data-img="eventLogo" alt="" /></div>
+            <p class="score-headline" data-band data-bind="scoreHeadline"></p>
+
+            <div class="score-teams" data-band>
+              <div class="score-team score-team-left">
+                <div class="score-logo"><img data-img="left.logo" alt="" /></div>
+                <div class="score-id">
+                  <div class="score-name" data-bind="left.name" data-short-bind="left.shortName" data-fit="1"></div>
+                  <div class="score-region" data-bind="left.region"></div>
+                </div>
+              </div>
+
+              <div class="score-line">
+                <span class="score-num" id="score-left" data-bind="left.score"></span>
+                <span class="score-dash">&ndash;</span>
+                <span class="score-num" id="score-right" data-bind="right.score"></span>
+              </div>
+
+              <div class="score-team score-team-right">
+                <div class="score-id">
+                  <div class="score-name" data-bind="right.name" data-short-bind="right.shortName" data-fit="1"></div>
+                  <div class="score-region" data-bind="right.region"></div>
+                </div>
+                <div class="score-logo"><img data-img="right.logo" alt="" /></div>
+              </div>
+            </div>
+
+            <!-- One row per map played. Built in winner.js so the count lives in
+                 one place; blank rows are hidden rather than removed. -->
+            <div class="score-maps" id="score-maps"></div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <!--
+      The music bed. Kept out of the stage so nothing about the layout can
+      affect it, and deliberately not `autoplay`: it is started by the sequence,
+      at a volume the sequence decides.
+
+      It stays silent inside the dashboard's preview iframe - see winner.js.
+      An operator monitoring OBS does not also want the browser tab shouting the
+      sting at them a frame out of sync.
+    -->
+    <audio id="bed" preload="auto"></audio>
+
+    <script src="/winner.js" type="module"></script>
+  </body>
+</html>

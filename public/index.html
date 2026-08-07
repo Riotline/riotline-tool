@@ -23,6 +23,7 @@
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button type="button" class="tab" role="tab" data-tab="lookup" aria-selected="true">Match lookup</button>
         <button type="button" class="tab" role="tab" data-tab="graphic" aria-selected="false">Graphics dashboard</button>
+        <button type="button" class="tab" role="tab" data-tab="winner" aria-selected="false">Winner graphic</button>
       </nav>
 
       <div class="routing" id="henrik-routing">
@@ -198,9 +199,85 @@
       </div>
     </main>
 
+    <!-- ================================================== winner graphic === -->
+    <main class="graphic-tab" id="tab-winner" role="tabpanel" hidden>
+      <div class="graphic-toolbar">
+        <button type="button" id="w-reset" class="btn btn-ghost">Reset graphic</button>
+
+        <span class="toolbar-gap"></span>
+
+        <label class="obs-url">
+          <span>OBS browser source</span>
+          <span class="obs-url-row">
+            <code id="w-obs-url">/winner.html</code>
+            <button type="button" class="btn-copy" data-copy-target="w-obs-url" title="Copy URL">Copy</button>
+            <a class="btn btn-ghost" id="w-open" href="/winner.html" target="_blank" rel="noopener">Open</a>
+          </span>
+        </label>
+
+        <span id="w-status" class="save-status">Saved</span>
+      </div>
+
+      <!-- The transport. Five buttons because a sequence has a position as well
+           as an on/off, and the pips below double as a way to cut straight to a
+           scene when a caster gets ahead of the graphic. -->
+      <div class="cue-bar cue-bar-seq">
+        <span class="cue-state" id="w-air">
+          <span class="cue-dot" aria-hidden="true"></span>
+          <span id="w-air-label">Off air</span>
+        </span>
+
+        <button type="button" id="w-activate" class="btn btn-cue">Activate</button>
+        <button type="button" id="w-back" class="btn btn-ghost" title="Back one scene">&#9664; Back</button>
+        <button type="button" id="w-next" class="btn btn-cue" title="Advance one scene">Next &#9654;</button>
+        <button type="button" id="w-replay" class="btn btn-ghost" title="Play the sequence again from the start">
+          Replay
+        </button>
+        <button type="button" id="w-stop" class="btn btn-ghost">Stop</button>
+
+        <!-- Only appears once a track is loaded. Both directions on one button:
+             cue the music early while you finish setting the graphic up, and
+             fade it out afterwards without disturbing what is on air. -->
+        <span class="cue-state cue-music" id="w-music-state" hidden>
+          <span class="cue-dot" aria-hidden="true"></span>
+        </span>
+        <button type="button" id="w-music" class="btn btn-ghost" hidden>Cue music</button>
+
+        <span class="toolbar-gap"></span>
+        <span class="cue-hint" id="w-cue-hint"></span>
+      </div>
+
+      <div class="stage-pips" id="w-stages"></div>
+
+      <section class="panel preview-panel">
+        <h2 class="panel-title">
+          Live preview
+          <span class="pill">1920 &times; 1080</span>
+          <span class="detail-actions">
+            <label class="checkline">
+              <input type="checkbox" id="w-checker" checked />
+              <span>Show transparency</span>
+            </label>
+          </span>
+        </h2>
+        <div class="preview-frame checker" id="w-preview-frame">
+          <iframe id="w-preview" src="/winner.html" title="Winner graphic preview" scrolling="no"></iframe>
+        </div>
+      </section>
+
+      <div class="editor-grid">
+        <section class="panel" id="wed-content"></section>
+        <section class="panel" id="wed-teams"></section>
+        <section class="panel" id="wed-seq"></section>
+        <section class="panel" id="wed-audio"></section>
+        <section class="panel" id="wed-style"></section>
+      </div>
+    </main>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="/app.js" type="module"></script>
     <script src="/dashboard.js" type="module"></script>
+    <script src="/winner-dashboard.js" type="module"></script>
   </body>
 </html>

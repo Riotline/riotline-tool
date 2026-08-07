@@ -956,7 +956,7 @@ pre {
   background-position: 0 0, 12px 12px;
 }
 
-#preview {
+.preview-frame iframe {
   position: absolute;
   top: 0;
   left: 0;
@@ -980,7 +980,10 @@ pre {
 }
 
 .preview-frame.is-hidden::after {
-  content: "Hidden - press Show to bring it on air";
+  /* The wording is set by whichever dashboard owns the frame - "Show" and
+     "Activate" are different buttons, and pointing at the wrong one is worse
+     than saying nothing. */
+  content: var(--hide-note, "Hidden - press Show to bring it on air");
   opacity: 0;
   animation: cue-hidden-note 220ms ease var(--hide-note-delay, 700ms) forwards;
   position: absolute;
@@ -1015,8 +1018,18 @@ pre {
   grid-template-columns: 1fr 1fr;
 }
 
+.field-grid.cols-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
 .field-grid.cols-4 {
   grid-template-columns: repeat(4, 1fr);
+}
+
+/* A map and its two round scores. The name needs the room; the numbers are
+   never more than two digits. */
+.field-grid.score-map-row {
+  grid-template-columns: 2fr 1fr 1fr;
 }
 
 .g-field {
@@ -1166,6 +1179,7 @@ pre {
 }
 
 @media (max-width: 900px) {
+  .field-grid.cols-3,
   .field-grid.cols-4 {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1237,4 +1251,251 @@ body.tab-graphic #key-warning {
   border-radius: 50%;
   background: currentColor;
   vertical-align: 1px;
+}
+
+/* =================================================== winner graphic tab === */
+
+/* ---------------------------------------------------------- stage pips --- */
+
+/* The sequence's position, and a way to change it. Pips rather than a readout
+   because an operator who has been overtaken by a caster needs to cut straight
+   to the winner scene, not press Next twice and wait for the transitions. */
+.stage-pips {
+  display: flex;
+  gap: 8px;
+  margin-top: -6px;
+}
+
+.stage-pip {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.stage-pip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+}
+
+.stage-pip-num {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 11px;
+}
+
+/* Already played: dimmer than the current scene but plainly not inert, so the
+   sequence reads left to right at a glance. */
+.stage-pip.is-done {
+  color: var(--text-dim);
+  border-color: var(--border-strong);
+}
+
+.stage-pip.is-current {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.stage-pip.is-current .stage-pip-num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* --------------------------------------------------------------- logos --- */
+
+.logo-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+/* Doubles as the drop target. Checkered so a white logo on transparent is still
+   visible - which is most of them. */
+.logo-preview {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background-color: #22262c;
+  background-image:
+    linear-gradient(45deg, #2c3138 25%, transparent 25%, transparent 75%, #2c3138 75%),
+    linear-gradient(45deg, #2c3138 25%, transparent 25%, transparent 75%, #2c3138 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+  overflow: hidden;
+  transition: border-color 120ms ease;
+}
+
+.logo-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 6px;
+}
+
+.logo-preview.is-over {
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.logo-preview.is-empty::after {
+  content: "drop";
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.logo-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.logo-tools {
+  display: flex;
+  gap: 6px;
+}
+
+/* The real input is driven by the Upload button - a raw file input cannot be
+   styled to match anything else on the page. */
+.logo-file {
+  display: none;
+}
+
+/* -------------------------------------------------------- team library --- */
+
+.team-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.team-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* The team's own colour as a left edge, so the list is scannable by colour when
+   two orgs share the first few letters of their name. */
+.team-card-logo {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  border-left: 3px solid var(--team-colour, var(--accent));
+  background: var(--bg-panel);
+  overflow: hidden;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.team-card-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 4px;
+}
+
+.team-card-who {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.team-card-name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-card-meta {
+  margin-top: 3px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.team-card-meta:empty {
+  display: none;
+}
+
+.team-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* Each of the two teams on the winner graphic, boxed so the left and right
+   halves of the content panel do not read as one long list of fields. */
+.team-block {
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+}
+
+.team-block .subhead {
+  margin-top: 0;
+}
+
+/* Just the dot: the "Fade music" button beside it already says what it is. */
+.cue-music {
+  min-width: 0;
+  margin-left: 4px;
+}
+
+/* An audio file has no thumbnail worth showing, so the box reports state
+   instead of previewing anything. */
+.logo-preview.is-audio::before {
+  content: "♪";
+  font-size: 22px;
+  color: var(--text-dim);
+}
+
+.logo-preview.is-audio.is-empty::before {
+  color: var(--text-faint);
+}
+
+.logo-preview.is-audio.is-empty::after {
+  content: "";
 }

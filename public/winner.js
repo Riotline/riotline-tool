@@ -1,0 +1,908 @@
+/**
+ * Winner sequence - output renderer.
+ *
+ * Point an OBS browser source at /winner.html (1920x1080) and leave it. State
+ * arrives over SSE from the local server, so the dashboard and OBS stay in sync
+ * even though they are separate browser processes.
+ *
+ * Built on the same two rules as the scoreboard renderer:
+ *   - Never recreate an element. A repaint that rebuilt the DOM would flash
+ *     every logo and map splash mid-sequence.
+ *   - Never write markup. All text goes in via textContent, so nothing in the
+ *     graphic state can become executable.
+ *
+ * And one more that only a sequence needs: the position on air is the server's,
+ * not this page's. Nothing here decides to advance - it plays what it is told,
+ * which is why two browser sources and the dashboard preview stay in step.
+ */
+
+import {
+  FACET_COLS,
+  FACET_ROWS,
+  OPENING_SLATS,
+  PEAK_STAGE,
+  PRISM_COLS,
+  PRISM_RINGS,
+  PRISM_ROWS,
+  PRISM_SIZE,
+  WINNER_MAP_ROWS,
+  WINNER_STAGES,
+  WINNER_STAGE_KEYS,
+  bandLeadMs,
+  easingCurve,
+  eventLogoInScene,
+  isOverlayEntry,
+  openingMs,
+  resolveWinner,
+  stageBands,
+} from './winner-schema.js';
+
+const STAGE_W = 1920;
+const STAGE_H = 1080;
+
+const stage = document.getElementById('stage');
+const wrap = document.getElementById('stage-wrap');
+
+// --------------------------------------------------------------- skeleton ---
+
+function el(tag, className, attrs = {}) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  return node;
+}
+
+// The backdrop's slats. Built here rather than in the HTML so the count comes
+// from the schema and the markup cannot drift away from it.
+const backdrop = document.getElementById('backdrop');
+for (let index = 0; index < OPENING_SLATS; index += 1) backdrop.append(el('div', 'slat'));
+const slats = [...backdrop.children];
+
+/*
+ * The facet grid. Each tile overscans its cell so the skew cannot open a wedge
+ * between neighbours, and the whole grid overscans the frame so the lean cannot
+ * expose a corner. `--facet-from` alternates by row, which is what makes them
+ * cross the frame rather than all drift the same way.
+ */
+const FACET_SKEW = -13; // degrees
+
+/*
+ * How far each tile reaches past its cell, as a fraction of one.
+ *
+ * It has to beat the skew, not just cover rounding. A skew about the centre
+ * displaces the top and bottom edges sideways by tan(skew) x half the cell
+ * height - about 42px for these cells - so an overscan smaller than that leaves
+ * a sliver of frame uncovered at the corners, where the lean runs out of tile.
+ * At 0.16 it did, by three pixels, and 35 pixels of game feed showed through the
+ * settled backdrop.
+ */
+const FACET_OVERSCAN = 0.24;
+
+const facetGrid = document.getElementById('facets');
+const cellW = 100 / FACET_COLS;
+const cellH = 100 / FACET_ROWS;
+
+for (let row = 0; row < FACET_ROWS; row += 1) {
+  for (let col = 0; col < FACET_COLS; col += 1) {
+    const facet = el('div', 'facet');
+    facet.style.left = `${col * cellW - cellW * FACET_OVERSCAN}%`;
+    facet.style.top = `${row * cellH - cellH * FACET_OVERSCAN}%`;
+    facet.style.width = `${cellW * (1 + FACET_OVERSCAN * 2)}%`;
+    facet.style.height = `${cellH * (1 + FACET_OVERSCAN * 2)}%`;
+    facet.style.setProperty('--facet-skew', `${FACET_SKEW}deg`);
+    facet.style.setProperty('--facet-from', `${row % 2 ? -160 : 160}%`);
+    facet.dataset.step = String(col + row); // the diagonal cascade
+    facetGrid.append(facet);
+  }
+}
+
+const facets = [...facetGrid.children];
+
+/*
+ * The prism lattice.
+ *
+ * A rotated square grid, which tiles exactly: a diamond whose bounding box is
+ * PRISM_SIZE shares each of its four edges with a neighbour when rows step half
+ * a box down and every other row is offset half a box across. So this is a
+ * genuine backdrop once it lands, not a pattern over one.
+ *
+ * A diamond with a bounding box of d is a square of side d/root-2 turned 45
+ * degrees, which is where the division comes from. The grid starts one row and
+ * one column outside the frame so the offset rows have no gap at the edges.
+ *
+ * Delay comes from a ring index rather than a position, because arriving
+ * symmetrically is the whole idea - every tile the same distance from the middle
+ * has to move at the same moment or it reads as a wipe again. The radius is
+ * normalised against the frame, so the rings are ellipses matching 16:9 and
+ * reach the corners at the same time they reach the sides.
+ */
+const prismGrid = document.getElementById('prism');
+const prismSide = PRISM_SIZE / Math.SQRT2;
+
+const prismRadii = [];
+
+for (let row = -1; row < PRISM_ROWS - 1; row += 1) {
+  for (let col = -1; col < PRISM_COLS - 1; col += 1) {
+    // Alternate rows sit half a box across - the offset is what interlocks them.
+    const odd = Math.abs(row % 2) === 1;
+    const centreX = (col + (odd ? 0.5 : 0)) * PRISM_SIZE;
+    const centreY = row * (PRISM_SIZE / 2);
+
+    const tile = el('div', 'prism-tile');
+    tile.style.left = `${centreX - prismSide / 2}px`;
+    tile.style.top = `${centreY - prismSide / 2}px`;
+    tile.style.width = `${prismSide}px`;
+    tile.style.height = `${prismSide}px`;
+
+    prismRadii.push(Math.hypot((centreX - STAGE_W / 2) / (STAGE_W / 2), (centreY - STAGE_H / 2) / (STAGE_H / 2)));
+    prismGrid.append(tile);
+  }
+}
+
+const prismTiles = [...prismGrid.children];
+
+/*
+ * Rings are spread across the range the lattice actually occupies, not across
+ * 0..1.
+ *
+ * No tile is ever centred exactly on the middle of the frame - with an even
+ * number of columns the four innermost straddle it - so measuring against an
+ * absolute radius leaves ring 0 empty and the whole opening starts a stagger
+ * step after the cue, while claiming in OPENING_STEPS to have used it. That is
+ * a gap at the front of the animation and a server timing the scene change off
+ * a duration nothing spends. Normalising makes the nearest tile ring 0 and the
+ * furthest the last ring, whatever the lattice is sized to.
+ */
+{
+  const near = Math.min(...prismRadii);
+  const span = Math.max(...prismRadii) - near || 1;
+  prismTiles.forEach((tile, index) => {
+    tile.dataset.ring = String(Math.round(((prismRadii[index] - near) / span) * (PRISM_RINGS - 1)));
+  });
+}
+
+// One row per map in the series, same reasoning.
+const scoreMaps = document.getElementById('score-maps');
+for (let index = 0; index < WINNER_MAP_ROWS; index += 1) {
+  const row = el('div', 'score-map', { 'data-band': '', 'data-row': index });
+  row.append(el('div', 'score-map-name', { 'data-bind': `maps.${index}.name` }));
+
+  // The dash is not decoration: without it "13" and "7" sit side by side and
+  // read as one number, and 9-13 and 13-11 are genuinely ambiguous.
+  const score = el('div', 'score-map-score');
+  score.append(
+    el('span', 'score-map-num', { 'data-bind': `maps.${index}.left`, 'data-lead': `maps.${index}.leftAhead` }),
+    el('span', 'score-map-dash', {}),
+    el('span', 'score-map-num', { 'data-bind': `maps.${index}.right`, 'data-lead': `maps.${index}.rightAhead` }),
+  );
+  row.append(score);
+  scoreMaps.append(row);
+}
+
+// ------------------------------------------------------------- collections ---
+
+const scenes = WINNER_STAGE_KEYS.map((key) => stage.querySelector(`[data-scene="${key}"]`));
+const textTargets = [...stage.querySelectorAll('[data-bind]')];
+const imageTargets = [...stage.querySelectorAll('[data-img]')];
+const fitTargets = [...stage.querySelectorAll('[data-fit]')];
+const leadTargets = [...stage.querySelectorAll('[data-lead]')];
+const winnerScene = stage.querySelector('.scene-winner');
+const cornerMark = document.getElementById('event-logo');
+const sceneMarks = [...stage.querySelectorAll('[data-mark]')];
+const plate = document.getElementById('plate');
+const winnerSub = stage.querySelector('.winner-sub');
+const winnerLogo = stage.querySelector('.winner-logo');
+const scoreLogoLeft = stage.querySelector('.score-team-left .score-logo');
+const scoreLogoRight = stage.querySelector('.score-team-right .score-logo');
+
+/**
+ * A logo URL that 404s would otherwise draw the browser's broken-image icon,
+ * which is far worse on air than showing nothing. The failed URLs are remembered
+ * because `error` only fires when the src is assigned.
+ */
+const failedImages = new Set();
+
+for (const node of imageTargets) {
+  node.addEventListener('error', () => {
+    const src = node.getAttribute('src');
+    if (src) failedImages.add(src);
+    node.hidden = true;
+  });
+}
+
+/** The bands of a scene that will actually paint - a hidden one is not a step. */
+const bandsOf = (scene) => [...scene.querySelectorAll('[data-band]')].filter((node) => !node.hidden);
+
+// ------------------------------------------------------------ view model ---
+
+let mapsByName = new Map();
+
+const key = (value) => String(value ?? '').trim().toLowerCase();
+
+const findMap = (name) => mapsByName.get(key(name)) ?? null;
+
+function buildView(state) {
+  const side = resolveWinner(state);
+  const champion = state[side];
+
+  const view = {
+    eventLogo: state.eventLogo,
+    mapKicker: state.mapKicker,
+    mapHeadline: state.mapHeadline,
+    scoreHeadline: state.scoreHeadline,
+    winnerHeadline: state.winnerHeadline,
+    winnerSubtitle: state.winnerSubtitle,
+    map: {
+      name: state.mapName,
+      // The override wins, then the official splash, then nothing - the scene
+      // still works as a title card with no plate behind it.
+      image: state.style.showMapSplash ? state.mapImage || findMap(state.mapName)?.splash || '' : '',
+    },
+    winner: {
+      name: champion.name,
+      // What fitText falls back to when the full name will not fit at a
+      // readable width. Without it here there is nothing to fall back to.
+      shortName: champion.shortName,
+      logo: champion.logo,
+      colour: champion.colour,
+    },
+    maps: {},
+  };
+
+  for (const half of ['left', 'right']) {
+    const team = state[half];
+    view[half] = {
+      name: team.name,
+      shortName: team.shortName,
+      logo: team.logo,
+      region: state.style.showRegion ? team.region : '',
+      score: String(team.score ?? 0),
+    };
+  }
+
+  view.left.ahead = (state.left.score ?? 0) > (state.right.score ?? 0);
+  view.right.ahead = (state.right.score ?? 0) > (state.left.score ?? 0);
+
+  state.maps.forEach((row, index) => {
+    view.maps[index] = {
+      name: row.name,
+      left: String(row.left ?? 0),
+      right: String(row.right ?? 0),
+      leftAhead: (row.left ?? 0) > (row.right ?? 0),
+      rightAhead: (row.right ?? 0) > (row.left ?? 0),
+    };
+  });
+
+  return view;
+}
+
+const read = (source, path) => path.split('.').reduce((value, part) => (value == null ? value : value[part]), source);
+
+// ------------------------------------------------------------- rendering ---
+
+const STYLE_VARS = {
+  bg: '--bg',
+  text: '--text',
+  dimText: '--dim-text',
+  accent: '--accent',
+  panel: '--panel',
+};
+
+function applyStyle(style, view) {
+  const root = document.documentElement.style;
+  for (const [field, variable] of Object.entries(STYLE_VARS)) root.setProperty(variable, style[field]);
+  root.setProperty('--bg-opacity', String(style.bgOpacity));
+  root.setProperty('--scrim', String(style.scrim));
+  root.setProperty('--font', `"${style.font}"`);
+  root.setProperty('--plate-blur', `${style.plateBlur}px`);
+  root.setProperty('--plate-dim', String(style.plateDim));
+
+  stage.classList.toggle('uppercase', style.uppercase);
+  stage.classList.toggle('plate-off', !style.plateBehind);
+
+  // Scoped to the winner scene on purpose. Recolouring the whole overlay from
+  // the champion's palette would mean the map card is already flying their
+  // colours two scenes before the result is revealed.
+  const teamAccent = style.useTeamColour ? view.winner.colour : '';
+  winnerScene.style.setProperty('--accent', teamAccent || style.accent);
+}
+
+/**
+ * The big names are allowed to squeeze horizontally rather than shrink: a
+ * font-size change would move the baseline the design is built around, and an
+ * org name is only ever a little too long, never twice too long.
+ */
+const MIN_SQUEEZE = 0.5;
+
+/**
+ * Below this, condensing stops being a design choice and starts looking like a
+ * fault. A team with a tricode has a better answer than 40%-wide letters, and
+ * the tricode field exists for exactly this - so past this point the graphic
+ * says SEN rather than a squashed "Sentinels Academy".
+ */
+const SWAP_TO_SHORT = 0.72;
+
+function fitText(node) {
+  // The full name is preferred; `data-short` is what it falls back to. Reset
+  // before measuring or a previous swap decides this one.
+  const full = node.dataset.full ?? node.textContent;
+  const short = node.dataset.short ?? '';
+  if (node.textContent !== full) node.textContent = full;
+
+  node.style.transform = 'scale(1)';
+
+  const parent = node.parentElement;
+  if (!parent) return;
+
+  const allowance = Number.parseFloat(node.dataset.fit) || 1;
+  const style = getComputedStyle(parent);
+  const column = parent.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const available = column * allowance;
+  // offsetWidth, not scrollWidth: these are inline-blocks sized to their own
+  // text, so their layout width *is* the width of the glyphs. scrollWidth was
+  // reporting overflow out of a full-width block, which is a different number
+  // from where the text actually ends.
+  const needed = node.offsetWidth;
+
+  if (!(available > 0) || !needed || needed <= available) return;
+
+  let ratio = available / needed;
+
+  // Only worth swapping if the short form actually buys something.
+  if (short && short !== full && ratio < SWAP_TO_SHORT) {
+    node.textContent = short;
+    const shortNeeded = node.offsetWidth;
+    if (shortNeeded <= available) return;
+    ratio = available / shortNeeded;
+  }
+
+  node.style.transform = `scaleX(${Math.max(MIN_SQUEEZE, ratio)})`;
+}
+
+const refit = () => fitTargets.forEach(fitText);
+
+/**
+ * Everything that can change a text measurement after the fact, because getting
+ * this wrong puts a team name underneath a crest on air.
+ *
+ * `fonts.ready` resolves once, and only covers fonts pending at that moment - a
+ * page that loaded with empty names never asked for the display weight, so the
+ * font arrives later and every measurement taken before it is stale.
+ * `loadingdone` fires for each batch instead.
+ */
+document.fonts?.ready.then(refit).catch(() => {});
+document.fonts?.addEventListener?.('loadingdone', refit);
+
+// And a general net: a crest appearing, a region line filling in, anything that
+// resizes the box a name is being fitted into. Transforms do not affect layout,
+// so writing the squeeze back cannot re-trigger this.
+const fitObserver = new ResizeObserver(() => refit());
+for (const node of fitTargets) {
+  if (node.parentElement) fitObserver.observe(node.parentElement);
+}
+
+function render(state) {
+  const view = buildView(state);
+  applyStyle(state.style, view);
+  // Safe to reveal: every scene is in its resting state, so "ready" lifts the
+  // paint block without putting anything on air.
+  stage.dataset.ready = '';
+
+  for (const node of textTargets) {
+    const value = read(view, node.dataset.bind);
+    const next = value === null || value === undefined ? '' : String(value);
+
+    // A fitted node's text is fitText's to decide - it may be showing the
+    // tricode. Compared against the full form it was given, so a swap does not
+    // read as a change and get undone on the next state push.
+    if (node.dataset.fit !== undefined) {
+      if (node.dataset.full !== next) {
+        node.dataset.full = next;
+        node.textContent = next;
+      }
+      const short = node.dataset.shortBind ? String(read(view, node.dataset.shortBind) ?? '') : '';
+      if (node.dataset.short !== short) node.dataset.short = short;
+    } else if (node.textContent !== next) {
+      node.textContent = next;
+    }
+  }
+
+  for (const node of imageTargets) {
+    const url = read(view, node.dataset.img) || '';
+    // Only touch src when it actually changed: reassigning the same URL is
+    // usually a no-op, but "usually" is not good enough on air.
+    if (url && node.getAttribute('src') !== url) node.setAttribute('src', url);
+    if (!url) node.removeAttribute('src');
+    node.hidden = !url || failedImages.has(url);
+  }
+
+  for (const node of leadTargets) {
+    node.classList.toggle('is-ahead', Boolean(read(view, node.dataset.lead)));
+  }
+
+  document.getElementById('score-left').classList.toggle('is-ahead', view.left.ahead);
+  document.getElementById('score-right').classList.toggle('is-ahead', view.right.ahead);
+
+  // Hiding rather than leaving empty is what keeps the band count honest: an
+  // invisible band would still take a stagger step and stretch the scene.
+  for (const row of scoreMaps.children) {
+    row.hidden = !view.maps[Number(row.dataset.row)]?.name;
+  }
+  winnerSub.hidden = !view.winnerSubtitle;
+
+  // Either the corner ident or the scenes the placement names - never both, and
+  // never anything without a logo behind it. Hidden rather than transparent,
+  // because an in-scene mark is a band: an invisible one would still take a
+  // stagger step and stretch the scene it is in.
+  const placement = view.eventLogo ? state.style.eventLogoPlacement : 'hidden';
+  cornerMark.hidden = placement !== 'corner';
+  for (const mark of sceneMarks) mark.hidden = !eventLogoInScene(state, mark.dataset.mark);
+  // No splash means no plate: the scrim alone over a flat backdrop is a vignette
+  // for nothing.
+  plate.hidden = !view.map.image || failedImages.has(view.map.image);
+
+  // Logo slots collapse when empty rather than reserving space. On the winner
+  // scene that also removes a band, which is why stageBands() has to know about
+  // the crest; on the score line the band is the whole row, so it does not.
+  for (const [slot, url] of [
+    [winnerLogo, view.winner.logo],
+    [scoreLogoLeft, view.left.logo],
+    [scoreLogoRight, view.right.logo],
+  ]) {
+    if (slot) slot.hidden = !url || failedImages.has(url);
+  }
+
+  checkBandCounts(state);
+
+  // Last, so a scene never animates in over half-written text.
+  applySeq(state.seq, state.audio);
+
+  // Layout has to have settled before anything can be measured.
+  requestAnimationFrame(refit);
+}
+
+/**
+ * The server times auto-advance from a band count it works out without a
+ * browser. If the layout and the schema ever disagree, scenes start changing
+ * before or after they have finished arriving, so it is worth saying so loudly.
+ */
+let warnedBands = false;
+
+function checkBandCounts(state) {
+  if (warnedBands) return;
+  WINNER_STAGES.forEach((entry, index) => {
+    const actual = bandsOf(scenes[index]).length;
+    const expected = stageBands(state, entry.key);
+    if (actual === expected) return;
+    warnedBands = true;
+    console.warn(`scene "${entry.key}" paints ${actual} bands but stageBands() says ${expected}`);
+  });
+}
+
+// ------------------------------------------------------------- sequence ---
+
+/**
+ * Reading offsetHeight forces the pending style change to be committed. Without
+ * it the browser coalesces "hidden" and "shown" into a single recalculation and
+ * nothing animates at all.
+ */
+const commit = () => void stage.offsetHeight;
+
+/** Apply a change with the transitions switched off, then switch them back on. */
+function instantly(change) {
+  stage.classList.add('anim-off');
+  change();
+  commit();
+  stage.classList.remove('anim-off');
+}
+
+function applySeqConfig(seq) {
+  stage.dataset.transition = seq.transition;
+  stage.dataset.opening = seq.opening;
+  stage.style.setProperty('--in-ms', `${seq.inMs}ms`);
+  stage.style.setProperty('--out-ms', `${seq.outMs}ms`);
+  stage.style.setProperty('--stage-ms', `${seq.stageMs}ms`);
+  stage.style.setProperty('--ease', easingCurve(seq.easing));
+  stage.style.setProperty('--travel', `${seq.travel}px`);
+
+  // A shade ahead of the first band, so the splash is already up when the text
+  // lands on it rather than fading in underneath text that is already there.
+  stage.style.setProperty('--plate-delay', `${Math.round(bandLeadMs(seq, true) * 0.7)}ms`);
+
+  // Slats fan out from the middle rather than running left to right: a sequential
+  // stagger across seven pieces reads as a wipe with extra steps, where an
+  // outward one reads as the frame being pulled apart.
+  const middle = (slats.length - 1) / 2;
+  slats.forEach((slat, index) => {
+    slat.style.setProperty('--slat-delay', `${Math.round(Math.abs(index - middle)) * seq.openStaggerMs}ms`);
+  });
+
+  // Facets cascade along the diagonal, so their step is column plus row.
+  for (const facet of facets) {
+    facet.style.setProperty('--facet-delay', `${Number(facet.dataset.step) * seq.openStaggerMs}ms`);
+  }
+
+  // The prism arrives in rings out from the middle, so its step is the ring.
+  for (const tile of prismTiles) {
+    tile.style.setProperty('--prism-delay', `${Number(tile.dataset.ring) * seq.openStaggerMs}ms`);
+  }
+}
+
+/**
+ * The one-shot flourishes - the impact flash, the streak bolt, the content kick.
+ * They are CSS animations, so the class going on is what plays them and it has
+ * to come off again or a replay would find it already there and do nothing.
+ */
+let openingTimer = null;
+
+function playOpening(seq) {
+  clearTimeout(openingTimer);
+  stage.classList.remove('is-opening');
+  commit(); // so re-adding it below counts as a change
+  stage.classList.add('is-opening');
+  openingTimer = setTimeout(() => stage.classList.remove('is-opening'), openingMs(seq));
+}
+
+/** Stagger the bands of the scene that is about to arrive. */
+function setBandDelays(scene, seq, first) {
+  const lead = bandLeadMs(seq, first);
+  bandsOf(scene).forEach((node, index) => {
+    node.style.setProperty('--band-delay', `${lead + index * seq.staggerMs}ms`);
+  });
+}
+
+/** @type {Map<Element, number>} scenes still playing their exit */
+const leaving = new Map();
+
+function stopLeaving(scene) {
+  clearTimeout(leaving.get(scene));
+  leaving.delete(scene);
+  scene.classList.remove('is-leaving', 'is-gone');
+}
+
+function leave(scene, seq, instant) {
+  if (instant) {
+    instantly(() => {
+      stopLeaving(scene);
+      scene.classList.remove('is-live');
+    });
+    return;
+  }
+
+  scene.classList.remove('is-live');
+  scene.classList.add('is-leaving');
+  commit(); // so the class change below is a transition and not a jump
+  scene.classList.add('is-gone');
+
+  // Held painted for the length of its exit, then dropped back to hidden. If it
+  // is cued again before then, stopLeaving cancels this.
+  clearTimeout(leaving.get(scene));
+  leaving.set(
+    scene,
+    setTimeout(() => stopLeaving(scene), seq.stageMs),
+  );
+}
+
+let liveScene = null;
+
+function playScene(index, seq, { instant = false, first = false } = {}) {
+  const next = scenes[index];
+  if (!next) return;
+
+  // Drives the map plate: sharp under the map card, soft and dark behind the
+  // rest. Set before the scene changes so the two cross over together.
+  stage.dataset.stage = WINNER_STAGE_KEYS[index] ?? WINNER_STAGE_KEYS[0];
+
+  for (const scene of scenes) {
+    if (scene !== next && scene.classList.contains('is-live')) leave(scene, seq, instant);
+  }
+
+  // Replaying the scene that is already up: drop it back to its resting state
+  // first, or there is nothing for the stagger to animate from.
+  if (liveScene === next) instantly(() => next.classList.remove('is-live'));
+  stopLeaving(next);
+
+  setBandDelays(next, seq, first);
+
+  if (instant) instantly(() => next.classList.add('is-live'));
+  else next.classList.add('is-live');
+
+  liveScene = next;
+}
+
+/** Rewind everything to off air without playing it, ready to be cued again. */
+function rewind(seq) {
+  instantly(() => {
+    for (const scene of scenes) {
+      stopLeaving(scene);
+      scene.classList.remove('is-live');
+    }
+    liveScene = null;
+    stage.dataset.active = 'false';
+    // Back to the edge the entry sweeps in from.
+    stage.dataset.park = 'left';
+  });
+  setBandDelays(scenes[seq.stage] ?? scenes[0], seq, true);
+}
+
+function enter(seq) {
+  rewind(seq);
+  commit(); // transitions are live again, and we are still off air
+  stage.dataset.active = 'true';
+  playOpening(seq);
+  playScene(seq.stage, seq, { first: true });
+}
+
+function exit(seq) {
+  // The sweep carries on out the right rather than retreating the way it came.
+  stage.dataset.park = 'right';
+  stage.dataset.active = 'false';
+  liveScene = null;
+  // Left painted for the length of the exit so it fades with the backdrop
+  // instead of vanishing a frame early.
+  setTimeout(() => {
+    if (stage.dataset.active === 'false') rewind(seq);
+  }, seq.outMs);
+}
+
+// null until the first state arrives, which is what distinguishes "the page just
+// loaded" from "the operator cued something".
+let lastCue = null;
+let lastActive = null;
+let lastStage = null;
+
+let lastMusic = null;
+
+function applySeq(seq, audio) {
+  applySeqConfig(seq);
+
+  if (lastCue === null) {
+    lastCue = seq.cue;
+    lastActive = seq.active;
+    lastStage = seq.stage;
+    lastMusic = seq.music;
+
+    // A source starting mid-broadcast can either play the opening or simply be
+    // there. Playing it is the default because OBS commonly loads the page at
+    // the moment the scene goes live. Either way it arrives at the stage the
+    // server says is current, not at the top - restarting the sequence here
+    // would leave this page one scene behind an auto-advance already counted.
+    const opened = seq.active && seq.animateOnLoad;
+
+    if (opened) enter(seq);
+    else if (seq.active) {
+      instantly(() => {
+        stage.dataset.active = 'true';
+        stage.dataset.park = 'left';
+      });
+      playScene(seq.stage, seq, { instant: true });
+    } else {
+      rewind(seq);
+    }
+
+    // A source that joins a sequence already running picks the music up where
+    // it is rather than starting the sting again from the top.
+    applyAudio(audio, seq, opened);
+    return;
+  }
+
+  // Typing in the dashboard pushes state constantly, so nothing here moves
+  // without one of these actually changing.
+  //
+  // The two are kept apart deliberately. Music is a boolean, so it can be
+  // compared directly and needs no cue of its own - and must not borrow the
+  // graphic's, because a cue bump is precisely what tells this page to re-run
+  // the scene it is on. Fading the music down is not a reason to replay a card
+  // that is sitting on air.
+  const graphicMoved = seq.cue !== lastCue || seq.active !== lastActive || seq.stage !== lastStage;
+  const musicChanged = seq.music !== lastMusic;
+  if (!graphicMoved && !musicChanged) return;
+
+  const wasActive = lastActive;
+  lastCue = seq.cue;
+  lastActive = seq.active;
+  lastStage = seq.stage;
+  lastMusic = seq.music;
+
+  if (graphicMoved) {
+    // `restart` is what tells an Activate or a Replay apart from stepping Back
+    // to the first scene, which must not play the opening again.
+    if (!seq.active) {
+      if (wasActive) exit(seq);
+      else rewind(seq);
+    } else if (!wasActive || isOverlayEntry(seq)) {
+      enter(seq);
+    } else {
+      playScene(seq.stage, seq);
+    }
+  }
+
+  applyAudio(audio, seq);
+}
+
+// ----------------------------------------------------------------- music ---
+
+/**
+ * The music bed.
+ *
+ * Three levels rather than one: under the map and score cards, up when the
+ * winner lands, then back to something a caster can talk over. Whether it is
+ * running at all is `seq.music`, which the transport owns - so an operator who
+ * asked for the music to carry on after the graphic leaves gets exactly that,
+ * and Fade music is the thing that ends it.
+ *
+ * Silent inside an iframe on purpose. The dashboard preview is the same page,
+ * and an operator monitoring OBS does not want their browser tab playing the
+ * same sting a frame out of step with it.
+ */
+const bed = document.getElementById('bed');
+const isPreview = window.self !== window.top;
+
+let fadeTimer = null;
+let settleTimer = null;
+let bedLevel = 0;
+
+/** Linear ramp. Short enough and frequent enough that easing would not show. */
+function rampTo(target, ms) {
+  clearInterval(fadeTimer);
+  fadeTimer = null;
+
+  const level = (value) => {
+    bedLevel = value;
+    bed.volume = Math.min(1, Math.max(0, value));
+    // Silence is a stop, not a quiet: a looping track left running at zero would
+    // still be decoding, and would still be mid-bar when the next cue arrives.
+    if (bed.volume === 0) bed.pause();
+  };
+
+  const from = bedLevel;
+  const distance = target - from;
+
+  // Covers a zero-length fade as well as one that has nowhere to go, and both
+  // have to land on the same place as the animated path.
+  if (!ms || !distance) {
+    level(target);
+    return;
+  }
+
+  const started = performance.now();
+  fadeTimer = setInterval(() => {
+    const progress = Math.min(1, (performance.now() - started) / ms);
+    level(from + distance * progress);
+    if (progress >= 1) {
+      clearInterval(fadeTimer);
+      fadeTimer = null;
+    }
+  }, 40);
+}
+
+function stopBed(audio, { instant = false } = {}) {
+  clearTimeout(settleTimer);
+  settleTimer = null;
+  if (bed.paused && bedLevel === 0) return;
+  if (instant) {
+    rampTo(0, 0);
+    bed.pause();
+    return;
+  }
+  rampTo(0, audio.fadeOutMs);
+}
+
+/**
+ * Which level the bed should be sitting at right now.
+ *
+ * An arc rather than a switch: a bed under the build-up, a lift on the winner,
+ * and then out of the way. Keyed on the scene marked `peak` in the schema, not
+ * on the last one - the winner is the moment the music is for, and it is no
+ * longer the scene the sequence ends on.
+ *
+ * Everything past the peak is ambient, and that is the same number as before the
+ * sequence started, deliberately. Both are the sound of a show carrying on
+ * around the music: an operator setting up beforehand, a caster reading a score
+ * line afterwards. Coming back *up* to the bed for the score line would undo the
+ * hand-back the lift just paid for.
+ */
+function levelFor(audio, seq) {
+  if (!seq.active) return audio.ambientVolume;
+  if (seq.stage === PEAK_STAGE) return audio.peakVolume;
+  return seq.stage > PEAK_STAGE ? audio.ambientVolume : audio.bedVolume;
+}
+
+/**
+ * @param {object} audio the audio config
+ * @param {object} seq   the command channel
+ */
+function applyAudio(audio, seq) {
+  // The preview never makes a sound; loading the track there would also mean
+  // downloading the bed twice for no reason.
+  if (isPreview) return;
+
+  bed.loop = audio.loop;
+
+  if (!audio.enabled || !audio.track || !seq.music) {
+    stopBed(audio);
+    return;
+  }
+
+  if (bed.getAttribute('src') !== audio.track) {
+    bed.setAttribute('src', audio.track);
+    bedLevel = 0;
+    bed.volume = 0;
+  }
+
+  const target = levelFor(audio, seq);
+  // Starting from silence is the only thing that rewinds the track. An operator
+  // who cued the music early and then hit Activate wants the bed to lift, not
+  // to jump back to the top of the sting - and a Replay of the graphic is not a
+  // reason to restart the music either.
+  const starting = bed.paused;
+
+  if (starting) {
+    bed.currentTime = 0;
+    bedLevel = 0;
+    bed.volume = 0;
+    // Autoplay is allowed in an OBS browser source but not in an ordinary tab
+    // opened by hand, and a rejected promise here is not an error worth
+    // shouting about - it just means nobody has clicked the page yet.
+    bed.play().catch(() => {});
+  }
+
+  rampTo(target, starting ? audio.fadeInMs : audio.rampMs);
+
+  clearTimeout(settleTimer);
+  settleTimer = null;
+
+  // The retreat to ambient is measured from the winner scene landing, which is
+  // the only place it makes sense: it is the sound of a moment being handed
+  // back to the casters. Advancing to the score line does the same thing on its
+  // own, so this is what covers a sequence left holding on the winner.
+  if (seq.active && seq.stage === PEAK_STAGE) {
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      rampTo(audio.ambientVolume, audio.rampMs);
+    }, audio.settleAfterMs);
+  }
+}
+
+// ----------------------------------------------------------------- scale ---
+
+function fitStage() {
+  const scale = Math.min(wrap.clientWidth / STAGE_W, wrap.clientHeight / STAGE_H);
+  stage.style.transform = `scale(${scale})`;
+}
+
+window.addEventListener('resize', fitStage);
+fitStage();
+
+// ------------------------------------------------------------ connection ---
+
+let latestState = null;
+
+// Subscribe first so the first frame is not held up by the catalogue fetch;
+// names and numbers paint immediately and the map splash fills in after.
+const stream = new EventSource('/api/winner/events');
+
+stream.addEventListener('winner', (event) => {
+  try {
+    latestState = JSON.parse(event.data).state;
+    render(latestState);
+  } catch (error) {
+    console.warn(`ignored a malformed winner update: ${error.message}`);
+  }
+});
+
+stream.addEventListener('error', () => console.warn('winner stream dropped - reconnecting'));
+
+(async () => {
+  try {
+    const response = await fetch('/api/valorant-assets');
+    if (response.ok) {
+      const data = await response.json();
+      mapsByName = new Map(data.maps.map((map) => [key(map.name), map]));
+    }
+  } catch {
+    // The splash is decoration; the map name still goes to air without it.
+    console.warn('valorant-api catalogue unavailable - rendering without the map splash');
+  }
+  if (latestState) render(latestState);
+})();
