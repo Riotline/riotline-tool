@@ -974,11 +974,13 @@ async function startWatch() {
  * lands - which is exactly the moment an operator is pressing it, so the guess
  * is wrong precisely when it matters.
  *
- * Five at a time rather than all ten: measured, tracker.gg refuses most of a
- * ten-wide burst, and a refused account might have been the one holding the
- * complete copy. Five keeps the burst short without spending the whole budget
- * on requests that come back empty.
+ * Five accounts, asked together. Measured, tracker.gg refuses most of a
+ * ten-wide burst, so a shorter one spends the budget on requests that come back
+ * with something. The trade is real and worth knowing: a game that lands first
+ * on account six is not seen until it reaches one of the five, so put the
+ * accounts most likely to update first at the top of the list.
  */
+const BURST_MAX = 5;
 const BURST_CONCURRENCY = 5;
 const BURST_DETAIL_TRIES = 4;
 
@@ -1002,7 +1004,7 @@ async function burstList(handles) {
 
 /** The button says which half of the job it will do next. */
 function syncBurstButton() {
-  const handles = parseHandles(els.watchIds.value, WATCH_MAX);
+  const handles = parseHandles(els.watchIds.value, WATCH_MAX).slice(0, BURST_MAX);
   const stale = watch.burst && String(watch.burst.handles) !== String(handles);
   if (stale) watch.burst = null;
 
@@ -1013,7 +1015,8 @@ function syncBurstButton() {
 }
 
 async function runBurst() {
-  const handles = parseHandles(els.watchIds.value, WATCH_MAX);
+  const all = parseHandles(els.watchIds.value, WATCH_MAX);
+  const handles = all.slice(0, BURST_MAX);
   if (!handles.length) {
     toast('Add at least one Riot ID in the form Name#TAG');
     return;
@@ -1026,6 +1029,10 @@ async function runBurst() {
   }
 
   localStorage.setItem('watch-ids', els.watchIds.value);
+  if (all.length > handles.length) {
+    logWatch(`using the first ${handles.length} of ${all.length} account(s) - the burst is capped at ${BURST_MAX}`);
+  }
+
   watch.busy = true;
   watch.provider = current;
   els.watchNow.disabled = true;
