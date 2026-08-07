@@ -615,6 +615,8 @@ const watch = {
   busy: false,
   /** Accounts that cannot answer at all - private, missing - dropped for this run. */
   skip: new Set(),
+  /** Two-click burst: {handles, baseline: Map<handle, Set<id>|null>} once baselined. */
+  burst: null,
   /** @type {Map<string, Set<string>|null>} ids already seen; null until a baseline lands */
   seen: new Map(),
   /** @type {Map<string, {text: string, tone: string}>} */
@@ -963,21 +965,54 @@ async function startWatch() {
 }
 
 /**
- * Ask every account at once, right now.
+ * Two clicks, because "new" only means anything against what was there before.
  *
- * The paced watch trades latency for staying inside a rate limit, which is the
- * right trade while it sits there for twenty minutes waiting. This is the other
- * case: the operator knows the game has just ended and wants it now, once. A
- * single unpaced burst spends the budget deliberately instead of rationing it.
+ * Click one, before the game ends, records what every account already has.
+ * Click two, after it ends, asks again and takes the match that was not there
+ * the first time. Without a baseline the button can only guess "newest", and
+ * the newest thing on a profile is the previous game right up until the new one
+ * lands - which is exactly the moment an operator is pressing it, so the guess
+ * is wrong precisely when it matters.
  *
- * No baseline is involved. Pressing the button is the operator saying "the game
- * that just finished is the one I want", so this takes the newest match anyone
- * has rather than the newest one nobody had before - which also means it works
- * without having started a watch first.
+ * Five at a time rather than all ten: measured, tracker.gg refuses most of a
+ * ten-wide burst, and a refused account might have been the one holding the
+ * complete copy. Five keeps the burst short without spending the whole budget
+ * on requests that come back empty.
  */
+const BURST_CONCURRENCY = 5;
 const BURST_DETAIL_TRIES = 4;
 
-async function checkNow() {
+/** Ask each account for its list, five at a time. One failure is not fatal. */
+async function burstList(handles) {
+  return mapLimit(handles, BURST_CONCURRENCY, async (handle) => {
+    setStatus(handle, 'asking');
+    try {
+      const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), false);
+      const matches = result.matches ?? [];
+      setStatus(handle, matches.length ? `${matches.length} match(es)` : 'no matches');
+      return { handle, matches, ok: true };
+    } catch (error) {
+      logWatch(`burst failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
+      setStatus(handle, error.status === 403 ? 'private' : `error ${error.status ?? ''}`.trim(), 'err');
+      if (isPermanentFailure(error.status)) watch.skip.add(handle);
+      return { handle, matches: [], ok: false };
+    }
+  });
+}
+
+/** The button says which half of the job it will do next. */
+function syncBurstButton() {
+  const handles = parseHandles(els.watchIds.value, WATCH_MAX);
+  const stale = watch.burst && String(watch.burst.handles) !== String(handles);
+  if (stale) watch.burst = null;
+
+  els.watchNow.textContent = watch.burst ? 'Check for new game' : 'Set baseline';
+  els.watchNow.title = watch.burst
+    ? 'Ask every account again and take whatever is new since the baseline'
+    : 'Record what every account already has, so the next click can spot the new game';
+}
+
+async function runBurst() {
   const handles = parseHandles(els.watchIds.value, WATCH_MAX);
   if (!handles.length) {
     toast('Add at least one Riot ID in the form Name#TAG');
@@ -994,90 +1029,133 @@ async function checkNow() {
   watch.busy = true;
   watch.provider = current;
   els.watchNow.disabled = true;
-  setWatchState('checking all');
 
   const startedAt = performance.now();
-  logWatch(`check all now - ${handles.length} account(s) at once, unpaced, source ${current}`);
-  if (current === 'tracker') {
-    logWatch('tracker.gg is measured at one lookup a minute, so most of these will be refused');
-  }
+  const took = () => `${Math.round(performance.now() - startedAt) / 1000}s`;
 
   try {
-    const lists = await mapLimit(handles, handles.length, async (handle) => {
-      setStatus(handle, 'asking');
-      try {
-        const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), false);
-        const matches = result.matches ?? [];
-        setStatus(handle, matches.length ? `${matches.length} match(es)` : 'no matches');
-        return { handle, matches };
-      } catch (error) {
-        logWatch(`burst failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
-        setStatus(handle, error.status === 403 ? 'private' : `error ${error.status ?? ''}`.trim(), 'err');
-        if (isPermanentFailure(error.status)) watch.skip.add(handle);
-        return { handle, matches: [] };
-      }
-    });
-
-    // One match, several accounts: dedupe by id but remember who can serve it,
-    // because on tracker.gg the detail lookup is per handle and one account's
-    // copy can be complete while another's is still filling in.
-    const candidates = [];
-    for (const { handle, matches } of lists) {
-      for (const match of matches.slice(0, 3)) {
-        if (!match?.id) continue;
-        const seen = candidates.find((entry) => String(entry.id) === String(match.id));
-        if (seen) seen.sources.push({ handle, matches });
-        else candidates.push({ id: match.id, startedAt: match.startedAt ?? 0, sources: [{ handle, matches }] });
-      }
-    }
-    candidates.sort((a, b) => b.startedAt - a.startedAt);
-
-    if (!candidates.length) {
-      logWatch(`check all now finished in ${Math.round(performance.now() - startedAt) / 1000}s - nothing returned`);
-      setWatchState('nothing found');
-      toast('No matches came back from any account');
-      return;
-    }
-
-    logWatch(`${candidates.length} distinct match(es); newest is ${candidates[0].id}`);
-
-    let tries = 0;
-    for (const candidate of candidates) {
-      for (const source of candidate.sources) {
-        if (tries >= BURST_DETAIL_TRIES) break;
-        tries += 1;
-
-        try {
-          const match = await withRetry(
-            'detail',
-            source.handle,
-            () => api('/api/match', watchParams({ matchId: candidate.id, handle: source.handle })),
-            false,
-          );
-          const { ok, players } = scoreboardReady(match);
-          if (!ok) {
-            logWatch(`${candidate.id} incomplete here (${players} player(s)) - trying another account`, source.handle);
-            continue;
-          }
-
-          logWatch(`check all now took ${Math.round(performance.now() - startedAt) / 1000}s - ${candidate.id}`);
-          setWatchState(`found on ${source.handle}`);
-          adoptHit({ handle: source.handle, match, matchId: candidate.id, matches: source.matches, players });
-          toast(`Loaded ${candidate.id} from ${source.handle}`);
-          return;
-        } catch (error) {
-          logWatch(`detail failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), source.handle);
-        }
-      }
-      if (tries >= BURST_DETAIL_TRIES) break;
-    }
-
-    setWatchState('no full scoreboard');
-    toast('Found matches, but none with a full scoreboard yet');
+    if (!watch.burst) return await takeBaseline(handles, current, took);
+    return await findNewGame(handles, took);
   } finally {
     watch.busy = false;
     els.watchNow.disabled = false;
+    syncBurstButton();
   }
+}
+
+async function takeBaseline(handles, current, took) {
+  setWatchState('baselining');
+  logWatch(`baseline - ${handles.length} account(s), ${BURST_CONCURRENCY} at a time, source ${current}`);
+  if (current === 'tracker') {
+    logWatch('tracker.gg is measured at one lookup a minute, so some of these will be refused');
+  }
+
+  const lists = await burstList(handles);
+  const baseline = new Map();
+  let answered = 0;
+
+  for (const { handle, matches, ok } of lists) {
+    // An account that did not answer gets no baseline rather than an empty one:
+    // an empty set would make its entire history look new on the next click.
+    baseline.set(handle, ok ? new Set(matches.map((match) => String(match.id)).filter(Boolean)) : null);
+    if (ok) answered += 1;
+  }
+
+  watch.burst = { handles: [...handles], baseline };
+  logWatch(`baseline took ${took()} - ${answered}/${handles.length} account(s) answered`);
+  setWatchState(`baseline ${answered}/${handles.length}`);
+
+  toast(
+    answered
+      ? `Baseline set on ${answered} account(s) - press again when the game ends`
+      : 'No account answered, so there is no baseline yet - try again',
+  );
+  if (!answered) watch.burst = null;
+}
+
+async function findNewGame(handles, took) {
+  setWatchState('checking all');
+  logWatch(`checking for a new game - ${handles.length} account(s), ${BURST_CONCURRENCY} at a time`);
+
+  const lists = await burstList(handles);
+  const baseline = watch.burst?.baseline ?? new Map();
+
+  // A match counts as new only for an account that had a baseline to compare
+  // against. Accounts without one can still serve the detail, they just cannot
+  // nominate a candidate.
+  const candidates = [];
+  for (const { handle, matches } of lists) {
+    const before = baseline.get(handle);
+    if (!before) continue;
+    for (const match of matches) {
+      if (!match?.id || before.has(String(match.id))) continue;
+      const seen = candidates.find((entry) => String(entry.id) === String(match.id));
+      if (seen) continue;
+      candidates.push({ id: match.id, startedAt: match.startedAt ?? 0, sources: [] });
+    }
+  }
+
+  // Any account that lists a candidate can serve its detail - on tracker.gg one
+  // account's copy is often complete while another's is still filling in.
+  for (const candidate of candidates) {
+    for (const { handle, matches } of lists) {
+      if (matches.some((match) => String(match?.id) === String(candidate.id))) {
+        candidate.sources.push({ handle, matches });
+      }
+    }
+  }
+  candidates.sort((a, b) => b.startedAt - a.startedAt);
+
+  if (!candidates.length) {
+    logWatch(`no new match after ${took()} - nothing here that was not in the baseline`);
+    setWatchState('nothing new');
+    toast('Nothing new yet - press again in a moment');
+    return;
+  }
+
+  logWatch(`${candidates.length} new match(es); newest is ${candidates[0].id} on ${candidates[0].sources.length} account(s)`);
+
+  let tries = 0;
+  for (const candidate of candidates) {
+    for (const source of candidate.sources) {
+      if (tries >= BURST_DETAIL_TRIES) break;
+      tries += 1;
+
+      try {
+        const match = await withRetry(
+          'detail',
+          source.handle,
+          () => api('/api/match', watchParams({ matchId: candidate.id, handle: source.handle })),
+          false,
+        );
+        const { ok, players } = scoreboardReady(match);
+        if (!ok) {
+          logWatch(`${candidate.id} incomplete here (${players} player(s)) - trying another account`, source.handle);
+          continue;
+        }
+
+        logWatch(`found in ${took()} - ${candidate.id} with ${players} players`);
+        setWatchState(`found on ${source.handle}`);
+        adoptHit({ handle: source.handle, match, matchId: candidate.id, matches: source.matches, players });
+
+        // Fold everything just seen into the baseline, so the next click looks
+        // for the game after this one rather than finding this one again.
+        for (const entry of lists) {
+          const before = watch.burst.baseline.get(entry.handle);
+          if (before) for (const seen of entry.matches) before.add(String(seen.id));
+        }
+
+        toast(`Loaded ${candidate.id} from ${source.handle}`);
+        return;
+      } catch (error) {
+        logWatch(`detail failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), source.handle);
+      }
+    }
+    if (tries >= BURST_DETAIL_TRIES) break;
+  }
+
+  setWatchState('new game, no full scoreboard');
+  toast('Found a new game, but no full scoreboard yet - press again shortly');
 }
 
 els.watchBtn.addEventListener('click', () => {
@@ -1085,9 +1163,11 @@ els.watchBtn.addEventListener('click', () => {
   else void startWatch();
 });
 
-els.watchNow.addEventListener('click', () => void checkNow());
+els.watchNow.addEventListener('click', () => void runBurst());
+els.watchIds.addEventListener('input', syncBurstButton);
 
 els.watchIds.value = localStorage.getItem('watch-ids') ?? '';
+syncBurstButton();
 
 // ------------------------------------------------------------ exports ---
 
