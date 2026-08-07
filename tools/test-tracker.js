@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 
-import { findMatchesArray, isEmptyMatchList, isPrivateProfile, TRACKER_XHR_PATTERN } from '../providers.js';
+import { findMatchesArray, isEmptyMatchList, isPrivate, TRACKER_XHR_PATTERN } from '../providers.js';
 
 // --- the endpoints the page calls ------------------------------------------
 
@@ -52,19 +52,33 @@ assert.equal(findMatchesArray({ data: { matches: [match] } })?.length, 1);
 // Private is permanent where throttling and an unplayed mode are not, so it has
 // to be told apart from both - and from the site's own footer.
 
-assert.equal(isPrivateProfile({ errors: [{ code: 'CollectorResultStatus::Private' }] }), true, 'the API error code');
-assert.equal(isPrivateProfile({ errors: [{ message: 'This profile is private' }] }), true, 'or the message');
-assert.equal(isPrivateProfile({ errors: [{ code: 'NotFound' }] }), false, 'other errors are not privacy');
-assert.equal(isPrivateProfile({ data: { matches: [] } }), false, 'an empty list is not a private profile');
-assert.equal(isPrivateProfile(null), false);
+assert.equal(isPrivate({ errors: [{ code: 'CollectorResultStatus::Private' }] }), true, 'the API error code');
+assert.equal(isPrivate({ errors: [{ message: 'This profile is private' }] }), true, 'or the message');
+assert.equal(isPrivate({ errors: [{ code: 'NotFound' }] }), false, 'other errors are not privacy');
+assert.equal(isPrivate({ data: { matches: [] } }), false, 'an empty list is not private');
+assert.equal(isPrivate(null), false);
 
-assert.equal(isPrivateProfile(null, '<h2>This profile is private</h2>'), true, 'page text as a fallback');
-assert.equal(isPrivateProfile(null, '<p>The player has a private profile.</p>'), true);
+// The two switches that produce the same dead end. The second is the one the
+// customs tab actually shows, verbatim.
+assert.equal(isPrivate(null, '<h2>This profile is private</h2>'), true, 'a hidden tracker profile');
+assert.equal(
+  isPrivate(null, "<div>Noth#LFT's matches are private. Check in-game settings to change this.</div>"),
+  true,
+  'match history private in VALORANT itself',
+);
+assert.equal(isPrivate(null, '<span>Check in-game settings to change this.</span>'), true, 'the phrase alone is enough');
+assert.equal(isPrivate(null, '<p>The player has a private profile.</p>'), true);
 
-// The trap: every page on the site links its privacy policy, so a loose match
-// on the word alone would report every throttled lookup as private.
-assert.equal(isPrivateProfile(null, '<a href="/privacy">Privacy Policy</a>'), false, 'the footer must not match');
-assert.equal(isPrivateProfile(null, '<a href="/legal">Privacy</a> | <a href="/tos">Terms</a>'), false);
-assert.equal(isPrivateProfile(null, ''), false);
+// The traps, both measured on a perfectly readable profile: the footer links a
+// privacy policy, and Stripe injects an iframe with "private" in its name. A
+// loose match on the word would report every throttled lookup as private.
+assert.equal(isPrivate(null, '<a href="/privacy">Privacy Policy</a>'), false, 'the footer must not match');
+assert.equal(isPrivate(null, '<a href="/legal">Privacy</a> | <a href="/tos">Terms</a>'), false);
+assert.equal(
+  isPrivate(null, '<iframe name="__privateStripeMetricsController7100" frameborder="0"></iframe>'),
+  false,
+  'the Stripe iframe must not match',
+);
+assert.equal(isPrivate(null, ''), false);
 
 console.log('tracker self-check passed');

@@ -1004,8 +1004,11 @@ async function burstList(handles) {
 
 /** The button says which half of the job it will do next. */
 function syncBurstButton() {
-  const handles = parseHandles(els.watchIds.value, WATCH_MAX).slice(0, BURST_MAX);
-  const stale = watch.burst && String(watch.burst.handles) !== String(handles);
+  // Compared against the raw list, not the five actually used: skipping a
+  // private account changes the five, and that must not throw away a baseline
+  // taken moments before the game ended.
+  const listed = parseHandles(els.watchIds.value, WATCH_MAX);
+  const stale = watch.burst && String(watch.burst.listed) !== String(listed);
   if (stale) watch.burst = null;
 
   els.watchNow.textContent = watch.burst ? 'Check for new game' : 'Set baseline';
@@ -1016,7 +1019,11 @@ function syncBurstButton() {
 
 async function runBurst() {
   const all = parseHandles(els.watchIds.value, WATCH_MAX);
-  const handles = all.slice(0, BURST_MAX);
+  // The baseline decides which accounts are in play; the check reuses exactly
+  // those, minus any that turned out to be private in the meantime.
+  const handles = watch.burst
+    ? watch.burst.handles.filter((handle) => !watch.skip.has(handle))
+    : all.filter((handle) => !watch.skip.has(handle)).slice(0, BURST_MAX);
   if (!handles.length) {
     toast('Add at least one Riot ID in the form Name#TAG');
     return;
@@ -1041,7 +1048,7 @@ async function runBurst() {
   const took = () => `${Math.round(performance.now() - startedAt) / 1000}s`;
 
   try {
-    if (!watch.burst) return await takeBaseline(handles, current, took);
+    if (!watch.burst) return await takeBaseline(all, current, took);
     return await findNewGame(handles, took);
   } finally {
     watch.busy = false;
@@ -1050,27 +1057,42 @@ async function runBurst() {
   }
 }
 
-async function takeBaseline(handles, current, took) {
+async function takeBaseline(all, current, took) {
   setWatchState('baselining');
-  logWatch(`baseline - ${handles.length} account(s), ${BURST_CONCURRENCY} at a time, source ${current}`);
+  logWatch(`baseline - up to ${BURST_MAX} account(s), ${BURST_CONCURRENCY} at a time, source ${current}`);
   if (current === 'tracker') {
     logWatch('tracker.gg is measured at one lookup a minute, so some of these will be refused');
   }
 
-  const lists = await burstList(handles);
   const baseline = new Map();
-  let answered = 0;
+  const used = [];
+  let pool = all.filter((handle) => !watch.skip.has(handle));
 
-  for (const { handle, matches, ok } of lists) {
-    // An account that did not answer gets no baseline rather than an empty one:
-    // an empty set would make its entire history look new on the next click.
-    baseline.set(handle, ok ? new Set(matches.map((match) => String(match.id)).filter(Boolean)) : null);
-    if (ok) answered += 1;
+  // Keep topping the set back up to five. A private account is discovered here,
+  // and replacing it now is what makes the next click able to use its stand-in:
+  // an account with no baseline can serve a scoreboard but cannot say what is
+  // new, so a replacement pulled in later would be along for the ride only.
+  while (used.length < BURST_MAX && pool.length) {
+    const batch = pool.slice(0, BURST_MAX - used.length);
+    pool = pool.slice(batch.length);
+
+    for (const { handle, matches, ok } of await burstList(batch)) {
+      // Private or missing: dropped for good, and its slot goes to the next one.
+      if (!ok && watch.skip.has(handle)) {
+        logWatch(`replaced in the baseline set - ${pool.length} account(s) left to draw from`, handle);
+        continue;
+      }
+      // A transient failure keeps its slot but gets no baseline: an empty set
+      // would make its whole history look new next click.
+      baseline.set(handle, ok ? new Set(matches.map((match) => String(match.id)).filter(Boolean)) : null);
+      used.push(handle);
+    }
   }
 
-  watch.burst = { handles: [...handles], baseline };
-  logWatch(`baseline took ${took()} - ${answered}/${handles.length} account(s) answered`);
-  setWatchState(`baseline ${answered}/${handles.length}`);
+  const answered = [...baseline.values()].filter(Boolean).length;
+  watch.burst = { handles: used, listed: [...all], baseline };
+  logWatch(`baseline took ${took()} - ${answered}/${used.length} account(s) answered: ${used.join(', ') || 'none'}`);
+  setWatchState(`baseline ${answered}/${used.length}`);
 
   toast(
     answered

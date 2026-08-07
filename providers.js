@@ -551,11 +551,11 @@ export async function trackerPage(browser, url, options = {}) {
       arrays.push({ matches, via: `XHR ${new URL(capture.url).pathname}` });
       continue;
     }
-    if (isPrivateProfile(capture.body)) privateProfile = true;
+    if (isPrivate(capture.body)) privateProfile = true;
     else if (TRACKER_XHR_PATTERN.test(capture.url) && isEmptyMatchList(capture.body)) emptyList = true;
   }
 
-  if (!privateProfile && isPrivateProfile(null, html)) privateProfile = true;
+  if (!privateProfile && isPrivate(null, html)) privateProfile = true;
   for (const blob of extractEmbeddedJson(html)) {
     const matches = findMatchesArray(blob);
     if (matches) arrays.push({ matches, via: 'embedded JSON' });
@@ -594,27 +594,39 @@ export function isEmptyMatchList(body) {
 }
 
 /**
- * Has the player hidden their tracker.gg profile?
+ * Can this player's matches be read at all?
  *
- * Worth separating from every other empty answer because it is the one that
- * never resolves on its own: throttling clears with time and an un-played mode
- * fills in after a game, but a private profile stays private until its owner
- * changes a setting. The watch uses that to drop the account rather than spend
- * a slot on it every round, which on a source measured at one lookup a minute
- * is the difference between watching nine accounts and watching eight.
+ * Two different switches produce the same dead end, and neither resolves on its
+ * own the way throttling or an unplayed mode does:
  *
- * The site's own API is the signal; it answers with an error entry rather than
- * data. The page text is only a fallback, and is matched tightly - "Privacy
- * Policy" appears in the footer of every page on the site, so a loose match on
- * the word alone would report every throttled lookup as private.
+ *   the tracker.gg profile is private   - a Tracker Network account setting
+ *   the player's matches are private    - a VALORANT in-game setting, which
+ *                                         tracker reports as "X's matches are
+ *                                         private. Check in-game settings to
+ *                                         change this."
+ *
+ * Both mean the account is a dead slot until its owner changes something, so
+ * the watch drops it and the burst promotes another account in its place.
+ *
+ * The site's own API error is the first signal; page text is the fallback, and
+ * it is matched tightly on purpose. "Privacy Policy" sits in the footer of every
+ * page on the site, and Stripe injects an iframe named
+ * __privateStripeMetricsController into the same document - measured, both are
+ * present on a perfectly readable profile, so a loose match on the word alone
+ * would report every throttled lookup as private.
  */
-export function isPrivateProfile(body, html = '') {
+export function isPrivate(body, html = '') {
   for (const error of body?.errors ?? []) {
     if (/private/i.test(`${error?.code ?? ''} ${error?.message ?? ''}`)) return true;
   }
 
-  return /\bprofile\b[^<>]{0,40}\bis private\b|\bprivate\b[^<>]{0,20}\bprofile\b/i.test(String(html));
+  return (
+    /\b(?:profile|matches)\b[^<>]{0,40}\b(?:is|are) private\b/i.test(String(html)) ||
+    /\bprivate\b[^<>]{0,20}\b(?:profile|matches)\b/i.test(String(html)) ||
+    /check in-game settings/i.test(String(html))
+  );
 }
+
 
 /** Match mode as tracker labels it, tolerant of casing and separators. */
 const modeKey = (value) => String(value ?? '').toLowerCase().replace(/[\s_-]/g, '');
@@ -662,9 +674,10 @@ async function trackerMatchesRaw(config, handle, type) {
   if (page.privateProfile) {
     throw new ProviderError(
       403,
-      'That tracker.gg profile is private.',
-      'The player has hidden their profile, so no source can read it. Ask them to make it public in their ' +
-        'tracker.gg privacy settings, or drop them from the roster.',
+      'That player\'s matches are private.',
+      'Either the tracker.gg profile is hidden, or match history is set to private in VALORANT itself ' +
+        '(Settings > General > Privacy). Nothing can read it until they change that, so this account is ' +
+        'skipped and another one is tried instead.',
     );
   }
 
