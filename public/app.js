@@ -717,7 +717,7 @@ async function takeSlot(handle) {
   await sleep(wait);
 }
 
-async function withRetry(label, handle, run, paced = true) {
+async function withRetry(label, handle, run, paced = true, attempts = RETRY_ATTEMPTS) {
   for (let attempt = 1; ; attempt += 1) {
     if (paced) {
       await takeSlot(handle);
@@ -735,11 +735,11 @@ async function withRetry(label, handle, run, paced = true) {
       const status = error.status ?? 0;
       logWatch(`${label} failed in ${took}ms - ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
 
-      const canRetry = RETRYABLE_STATUS.has(status) && attempt < RETRY_ATTEMPTS && (watch.running || watch.busy);
+      const canRetry = RETRYABLE_STATUS.has(status) && attempt < attempts && (watch.running || watch.busy);
       if (!canRetry) throw error;
 
       const backoff = RETRY_BACKOFF_MS * 2 ** (attempt - 1);
-      logWatch(`retrying in ${backoff}ms (attempt ${attempt + 1} of ${RETRY_ATTEMPTS})`, handle);
+      logWatch(`retrying in ${backoff}ms (attempt ${attempt + 1} of ${attempts})`, handle);
       setStatus(handle, `retrying after ${status || 'network'} error`, 'wait');
       await sleep(backoff);
       if (!watch.running && !watch.busy) throw error;
@@ -985,18 +985,33 @@ const BURST_CONCURRENCY = 5;
 const BURST_DETAIL_TRIES = 4;
 
 /** Ask each account for its list, five at a time. One failure is not fatal. */
+/**
+ * Ask each account for its list, five at a time.
+ *
+ * One attempt each, not three. The watch retries because it has nothing better
+ * to do with the slot; a burst has a bench. Measured, a throttled tracker.gg
+ * request takes 45s to fail, so three attempts on one account is over two
+ * minutes spent on the least promising account in the set - while a reserve
+ * would have answered in five seconds. Failing fast and moving on is strictly
+ * better whenever there is someone else to ask.
+ */
 async function burstList(handles) {
   return mapLimit(handles, BURST_CONCURRENCY, async (handle) => {
     setStatus(handle, 'asking');
     try {
-      const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), false);
+      const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })), false, 1);
       const matches = result.matches ?? [];
       setStatus(handle, matches.length ? `${matches.length} match(es)` : 'no matches');
       return { handle, matches, ok: true };
     } catch (error) {
-      logWatch(`burst failed: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
-      setStatus(handle, error.status === 403 ? 'private' : `error ${error.status ?? ''}`.trim(), 'err');
-      if (isPermanentFailure(error.status)) watch.skip.add(handle);
+      const status = error.status ?? 0;
+      logWatch(`burst failed: ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
+      setStatus(handle, status === 403 ? 'private' : `error ${status || 'network'} - replaced`, 'err');
+
+      // Private and missing are gone for the session; a 502 is usually tracker
+      // throttling, which clears - so it loses its place in this set but stays
+      // eligible for the next baseline.
+      if (isPermanentFailure(status)) watch.skip.add(handle);
       return { handle, matches: [], ok: false };
     }
   });
@@ -1077,29 +1092,35 @@ async function takeBaseline(all, current, took) {
     pool = pool.slice(batch.length);
 
     for (const { handle, matches, ok } of await burstList(batch)) {
-      // Private or missing: dropped for good, and its slot goes to the next one.
-      if (!ok && watch.skip.has(handle)) {
-        logWatch(`replaced in the baseline set - ${pool.length} account(s) left to draw from`, handle);
+      // Any account that did not answer loses its place, whatever the reason.
+      // An account with no baseline cannot tell a new game from an old one, so
+      // keeping it would spend one of five slots on a seat that can only watch -
+      // and a 502 here is usually throttling, which the reserve is not under.
+      if (!ok) {
+        logWatch(
+          `${watch.skip.has(handle) ? 'dropped for the session' : 'replaced in this set'} - ` +
+            `${pool.length} account(s) left to draw from`,
+          handle,
+        );
         continue;
       }
-      // A transient failure keeps its slot but gets no baseline: an empty set
-      // would make its whole history look new next click.
-      baseline.set(handle, ok ? new Set(matches.map((match) => String(match.id)).filter(Boolean)) : null);
+
+      baseline.set(handle, new Set(matches.map((match) => String(match.id)).filter(Boolean)));
       used.push(handle);
     }
   }
 
-  const answered = [...baseline.values()].filter(Boolean).length;
+  // Every account that kept its place answered, so the count is the set size.
   watch.burst = { handles: used, listed: [...all], baseline };
-  logWatch(`baseline took ${took()} - ${answered}/${used.length} account(s) answered: ${used.join(', ') || 'none'}`);
-  setWatchState(`baseline ${answered}/${used.length}`);
+  logWatch(`baseline took ${took()} - ${used.length} of ${all.length} listed: ${used.join(', ') || 'none'}`);
+  setWatchState(`baseline ${used.length}/${Math.min(all.length, BURST_MAX)}`);
 
   toast(
-    answered
-      ? `Baseline set on ${answered} account(s) - press again when the game ends`
+    used.length
+      ? `Baseline set on ${used.length} account(s) - press again when the game ends`
       : 'No account answered, so there is no baseline yet - try again',
   );
-  if (!answered) watch.burst = null;
+  if (!used.length) watch.burst = null;
 }
 
 async function findNewGame(handles, took) {
