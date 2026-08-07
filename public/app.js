@@ -1034,13 +1034,23 @@ function syncBurstButton() {
 
 async function runBurst() {
   const all = parseHandles(els.watchIds.value, WATCH_MAX);
-  // The baseline decides which accounts are in play; the check reuses exactly
-  // those, minus any that turned out to be private in the meantime.
+
+  // The baseline picks the set; every check afterwards reuses exactly that set.
+  // Nothing is ever drafted in later, because a late arrival has no record of
+  // what the account held before the game and so cannot tell a new match from
+  // an old one - it would take a slot and contribute nothing. Accounts only ever
+  // leave: a private one is gone for good, while a 502 keeps its place because
+  // throttling passes.
   const handles = watch.burst
     ? watch.burst.handles.filter((handle) => !watch.skip.has(handle))
     : all.filter((handle) => !watch.skip.has(handle)).slice(0, BURST_MAX);
+
   if (!handles.length) {
-    toast('Add at least one Riot ID in the form Name#TAG');
+    toast(
+      watch.burst
+        ? 'Every account in the baseline turned out to be private - edit the list to start again'
+        : 'Add at least one Riot ID in the form Name#TAG',
+    );
     return;
   }
 
