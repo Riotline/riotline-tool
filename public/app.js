@@ -540,15 +540,20 @@ function scoreboard(title, roster, team) {
   return el('div', { class: 'team-block' }, [head, el('div', { class: 'table-scroll' }, [table])]);
 }
 
-// ------------------------------------------------------ find the custom ---
+// ----------------------------------------------------- post-match lookup ---
 
 /**
- * Find the game that just finished, across several accounts at once.
+ * Get the scoreboard on air as soon as the game ends.
  *
- * A custom lands on each player's profile at a different moment, so asking the
- * whole roster and taking whoever has it first is faster than waiting on one
- * account - the difference between a scoreboard that makes it to air between
- * maps and one that does not.
+ * The baseline is taken while the map is still being played, so the moment it
+ * finishes the only question left is which account has the result - not what
+ * the result is being compared against. That is the whole trick: the expensive
+ * half of the work happens during the game, when nobody is waiting for it.
+ *
+ * A custom lands on each player's profile at a different moment, so asking
+ * several accounts and taking whoever has it first is faster than waiting on
+ * one - the difference between a scoreboard that makes it to air between maps
+ * and one that arrives after the next map has started.
  *
  * Driven by two clicks rather than a timer. Measured, tracker.gg allows about
  * one lookup a minute, so polling ten accounts continuously would take ten
