@@ -170,6 +170,39 @@ function textField(label, path, { placeholder = '', maxlength = 120 } = {}) {
   return field(label, input);
 }
 
+/**
+ * A text field holding an image URL.
+ *
+ * Two things it does that a plain text field must not. The length cap matches
+ * what the server actually stores - 120 characters silently truncates a CDN
+ * link, which then parses as a perfectly valid URL pointing nowhere, so the
+ * logo never appears and the field looks like it refused to save.
+ *
+ * And it says so when the value cannot survive sanitising. Anything that is not
+ * http(s) or a path starting with / is discarded server-side, which without a
+ * mark here is indistinguishable from the save failing.
+ */
+const URL_MAX = 500;
+const USABLE_URL = /^(?:https?:\/\/\S+|\/[\w./-]*)$/i;
+
+function urlField(label, path, { placeholder = '' } = {}) {
+  const wrap = textField(label, path, { placeholder, maxlength: URL_MAX });
+  const input = wrap.querySelector('input');
+
+  const mark = () => {
+    const value = input.value.trim();
+    const usable = !value || USABLE_URL.test(value);
+    input.classList.toggle('invalid', !usable);
+    input.title = usable
+      ? ''
+      : 'Must start with https://, http:// or / - anything else is discarded when the graphic saves.';
+  };
+
+  input.addEventListener('input', mark);
+  mark();
+  return wrap;
+}
+
 function numberField(label, path, { min = 0, max = 999 } = {}) {
   const input = el('input', null, { type: 'number', min, max, step: '1' });
   input.value = String(readPath(state, path) ?? 0);
@@ -307,8 +340,8 @@ function buildMatchEditor() {
       textField('Match ID', 'matchId', { placeholder: 'optional' }),
     ]),
     grid(null, [
-      textField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
-      textField('Centre logo URL', 'eventLogo', { placeholder: 'https://... event or league logo' }),
+      urlField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
+      urlField('Centre logo URL', 'eventLogo', { placeholder: 'https://... event or league logo' }),
     ]),
     subhead('Stat rows'),
     ...Array.from({ length: STAT_SLOTS }, (_, slot) => statRowField(slot)),
@@ -386,7 +419,7 @@ function buildSideEditor(side) {
       textField('Result text', `${side}.result`, { placeholder: 'WIN / LOSS', maxlength: 16 }),
     ]),
     grid(2, [numberField('Rounds won', `${side}.roundsWon`, { max: 99 }), checkField('Won the match', `${side}.won`)]),
-    grid(null, [textField('Team logo URL', `${side}.logo`, { placeholder: 'https://...' })]),
+    grid(null, [urlField('Team logo URL', `${side}.logo`, { placeholder: 'https://...' })]),
     subhead(`Roster - rows show ${state.statRows.slice(0, ROW_STAT_SLOTS).map((key) => statDef(key).label).join(' + ')}`),
     ...Array.from({ length: SLOTS }, (_, index) => playerRow(side, index)),
   );

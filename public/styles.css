@@ -1247,6 +1247,12 @@ pre {
   min-width: 0;
 }
 
+/* A URL the server will discard, marked while it is still being typed. Must
+   come after the rule above, which sets the whole border shorthand. */
+.g-field input.invalid {
+  border-color: var(--warn);
+}
+
 .g-field input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
