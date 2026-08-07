@@ -381,7 +381,6 @@ button:focus-visible {
 
 .watch-actions {
   display: grid;
-  grid-template-columns: 1fr auto;
   gap: 8px;
 }
 
@@ -450,19 +449,19 @@ button:focus-visible {
 }
 
 .watch-log {
-  /* Tall enough to show a round at a glance, capped so it cannot push the
+  /* Tall enough to show a whole check at a glance, capped so it cannot push the
      controls above it off the screen. */
-  max-height: 260px;
+  max-height: 340px;
   overflow: auto;
   margin: 8px 0;
-  padding: 8px;
+  padding: 10px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: 6px;
   font-family: var(--mono);
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

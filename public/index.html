@@ -103,10 +103,10 @@
           </div>
         </div>
 
-        <!-- Watch several rosters at once and take whichever updates first. -->
+        <!-- Ask several accounts at once and take whichever has the game first. -->
         <section class="watch">
           <h3 class="watch-title">
-            Watch for a custom
+            Find the custom
             <span id="watch-state" class="pill" hidden></span>
           </h3>
 
@@ -115,13 +115,12 @@
             <textarea id="watch-ids" rows="6" spellcheck="false" placeholder="Name#TAG&#10;Name#TAG"></textarea>
           </label>
           <p class="field-help">
-            Watching polls every account. The baseline button uses only the first 5, so put the accounts most likely
-            to update first at the top.
+            Press once before the game ends to record what each account already has, then again once it finishes.
+            Only the first 5 that answer are used, so put the accounts most likely to update first at the top.
           </p>
 
           <div class="watch-actions">
-            <button id="watch-btn" type="button" class="btn btn-primary">Start watching</button>
-            <button id="watch-now" type="button" class="btn btn-ghost">Set baseline</button>
+            <button id="watch-now" type="button" class="btn btn-primary">Set baseline</button>
           </div>
           <ul id="watch-status" class="watch-list"></ul>
 

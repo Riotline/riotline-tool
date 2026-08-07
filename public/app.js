@@ -13,15 +13,7 @@
  */
 
 import { setLookupMatch } from './store.js';
-import {
-  WATCH_MAX,
-  freshMatch,
-  isPermanentFailure,
-  mapLimit,
-  parseHandles,
-  reserveSlot,
-  scoreboardReady,
-} from './watch-core.js';
+import { WATCH_MAX, isPermanentFailure, mapLimit, parseHandles, scoreboardReady } from './watch-core.js';
 
 // ------------------------------------------------------------ elements ---
 
@@ -51,7 +43,6 @@ const els = {
   downloadJson: $('download-json'),
   toast: $('toast'),
   watchIds: $('watch-ids'),
-  watchBtn: $('watch-btn'),
   watchStatus: $('watch-status'),
   watchState: $('watch-state'),
   watchLog: $('watch-log'),
@@ -231,9 +222,14 @@ function syncProviderUi() {
 for (const radio of document.querySelectorAll('input[name="provider"]')) {
   radio.addEventListener('change', () => {
     syncProviderUi();
-    // The watch is tuned per source and holds a baseline gathered from the old
-    // one, so switching source ends it rather than silently changing its rules.
-    if (watch.running) stopWatch('stopped - data source changed');
+    // A baseline taken from one source means nothing to another - the match ids
+    // differ - so switching source throws it away rather than comparing across.
+    if (watch.burst) {
+      watch.burst = null;
+      logWatch('baseline discarded - the data source changed');
+      setWatchState('');
+      syncBurstButton();
+    }
     state.matches = [];
     els.matchCount.hidden = true;
     els.playerCard.hidden = true;
@@ -543,60 +539,32 @@ function scoreboard(title, roster, team) {
   return el('div', { class: 'team-block' }, [head, el('div', { class: 'table-scroll' }, [table])]);
 }
 
-// ------------------------------------------------ watch several rosters ---
+// ------------------------------------------------------ find the custom ---
 
 /**
- * Watch up to ten accounts and take whichever sees the game first.
+ * Find the game that just finished, across several accounts at once.
  *
- * A custom appears on each player's profile at a different moment, so polling
- * the whole roster and racing them is measurably faster than waiting on one
- * account - which is the difference between a scoreboard that makes it to air
- * between maps and one that does not.
+ * A custom lands on each player's profile at a different moment, so asking the
+ * whole roster and taking whoever has it first is faster than waiting on one
+ * account - the difference between a scoreboard that makes it to air between
+ * maps and one that does not.
+ *
+ * Driven by two clicks rather than a timer. Measured, tracker.gg allows about
+ * one lookup a minute, so polling ten accounts continuously would take ten
+ * minutes a round - slower than the operator simply pressing a button when the
+ * game ends, and it spends the whole rate budget doing it.
  *
  * Two things stop a false start:
  *
- *   baseline    the match ids each account already had when the watch began, so
- *               only a genuinely new game counts. An account whose first fetch
- *               fails has no baseline yet and cannot report a hit until it gets
- *               one, otherwise its whole history would read as new.
+ *   baseline     the match ids each account already had before the game, so
+ *                only a genuinely new match counts. An account that did not
+ *                answer gets no baseline and loses its place, because an empty
+ *                one would make its whole history look new.
  *   completeness a match that has only half-landed comes back as a valid
- *               payload with an empty or one-sided scoreboard rather than as an
- *               error, so the detail is checked for two scoring players before
- *               it is accepted. A rejected match is deliberately not added to
- *               the baseline: the next round tries it again, and meanwhile
- *               another account's fuller copy can win instead.
+ *                payload with an empty or one-sided scoreboard rather than as
+ *                an error, so the detail is checked for two scoring players
+ *                before it is accepted, and another account's copy is tried.
  */
-
-/**
- * Measured against tracker.gg (tools/tracker-load.js, 2026-08-07):
- *
- *   one lookup every 60s   6/6 clean, ~4.5s each
- *   one lookup every 30s   2/6 clean, failures burning 47.6s each
- *
- * The limit is on how often the site is asked, not how many at once - a sweep
- * never got a clean round even at one account at a time, so concurrency was
- * never the lever. Hence minRequestGapMs, which paces every request the watch
- * makes: a round of ten fired back to back blows the budget no matter how long
- * the pause after it. At that pace a ten-account round takes ten minutes, which
- * is the honest reason this feature wants HenrikDev.
- *
- * HenrikDev's published limit is around 30 requests a minute. Pacing at 2.5s
- * sits just inside that at 24/min, leaving headroom for the detail fetch a hit
- * costs, and puts a ten-account round at 25s.
- *
- * Both sources run with no gap between rounds. Once every request is paced, a
- * pause after the round is a second rate limit stacked on the first, and it
- * lands squarely on the number that matters: the wait between an account
- * getting the game and this asking it again. Rounds therefore run continuously,
- * and worst-case detection is one round.
- */
-const WATCH_TUNING = {
-  henrik: { concurrency: 5, gapMs: 0, minRequestGapMs: 2_500 },
-  tracker: { concurrency: 1, gapMs: 0, minRequestGapMs: 60_000 },
-};
-
-/** Worst case between an account having the match and the watch asking it. */
-const detectionMs = (tuning, accounts) => accounts * (tuning.minRequestGapMs ?? 0) + tuning.gapMs;
 
 // A tracker.gg check drives a real browser, so it fails in ways a JSON call does
 // not: a navigation that times out, a challenge that needed a profile reset, a
@@ -607,18 +575,13 @@ const RETRY_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 4_000;
 
 const watch = {
-  running: false,
   provider: null,
-  /** Earliest moment the next request may start, so the whole watch stays in budget. */
-  nextSlotAt: 0,
-  /** A one-shot burst is in flight. Retries stay live for it; the loop is not running. */
+  /** A burst is in flight, so the button is disabled and retries stay live. */
   busy: false,
-  /** Accounts that cannot answer at all - private, missing - dropped for this run. */
+  /** Accounts that cannot answer at all - private, missing - dropped for the session. */
   skip: new Set(),
-  /** Two-click burst: {handles, baseline: Map<handle, Set<id>|null>} once baselined. */
+  /** Once baselined: {handles, listed, baseline: Map<handle, Set<id>>}. */
   burst: null,
-  /** @type {Map<string, Set<string>|null>} ids already seen; null until a baseline lands */
-  seen: new Map(),
   /** @type {Map<string, {text: string, tone: string}>} */
   status: new Map(),
 };
@@ -664,66 +627,16 @@ els.watchLogCopy.addEventListener('click', async () => {
   }
 });
 
-/**
- * Interruptible sleeps. Several can be in flight at once - a round gap plus a
- * retry backoff per account - so they are tracked as a set and woken rather than
- * cancelled: a cleared timer whose promise never settles would strand the loop
- * that was waiting on it, which is a worse failure than sitting out the gap.
- */
-const sleepers = new Set();
-
-const sleep = (ms) =>
-  new Promise((resolve) => {
-    const sleeper = { resolve };
-    sleeper.id = setTimeout(() => {
-      sleepers.delete(sleeper);
-      resolve();
-    }, ms);
-    sleepers.add(sleeper);
-  });
-
-function wakeSleepers() {
-  for (const sleeper of sleepers) {
-    clearTimeout(sleeper.id);
-    sleeper.resolve();
-  }
-  sleepers.clear();
-}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Run a request, and give a browser-driven failure another chance.
  *
- * Only the transient statuses are retried, and only while the watch is still
- * running - a stop during a backoff should end the round, not serve it out.
+ * Only the transient statuses are retried. The burst passes attempts=1 because
+ * it has a bench: replacing an account beats waiting out a 45s timeout on it.
  */
-/**
- * Hold every request back to the source's measured pace.
- *
- * The cursor moves before anything is awaited, so two concurrent callers cannot
- * be handed the same slot. Retries queue for a slot of their own - a failing
- * account must not be allowed to jump the budget ahead of the nine that are
- * behaving.
- */
-async function takeSlot(handle) {
-  const minGapMs = (WATCH_TUNING[watch.provider] ?? WATCH_TUNING.henrik).minRequestGapMs ?? 0;
-  const { startAt, nextAt } = reserveSlot(Date.now(), watch.nextSlotAt, minGapMs);
-  watch.nextSlotAt = nextAt;
-
-  const wait = startAt - Date.now();
-  if (wait <= 0) return;
-
-  logWatch(`waiting ${Math.round(wait / 1000)}s for its turn (pacing ${Math.round(minGapMs / 1000)}s)`, handle);
-  setStatus(handle, `queued - ${Math.round(wait / 1000)}s`, 'wait');
-  await sleep(wait);
-}
-
-async function withRetry(label, handle, run, paced = true, attempts = RETRY_ATTEMPTS) {
+async function withRetry(label, handle, run, attempts = RETRY_ATTEMPTS) {
   for (let attempt = 1; ; attempt += 1) {
-    if (paced) {
-      await takeSlot(handle);
-      if (!watch.running) throw { status: 0, message: 'watch stopped' };
-    }
-
     const startedAt = performance.now();
     try {
       const value = await run();
@@ -735,14 +648,13 @@ async function withRetry(label, handle, run, paced = true, attempts = RETRY_ATTE
       const status = error.status ?? 0;
       logWatch(`${label} failed in ${took}ms - ${status || 'network'} ${error.message ?? ''}`.trim(), handle);
 
-      const canRetry = RETRYABLE_STATUS.has(status) && attempt < attempts && (watch.running || watch.busy);
+      const canRetry = RETRYABLE_STATUS.has(status) && attempt < attempts;
       if (!canRetry) throw error;
 
       const backoff = RETRY_BACKOFF_MS * 2 ** (attempt - 1);
       logWatch(`retrying in ${backoff}ms (attempt ${attempt + 1} of ${attempts})`, handle);
       setStatus(handle, `retrying after ${status || 'network'} error`, 'wait');
       await sleep(backoff);
-      if (!watch.running && !watch.busy) throw error;
     }
   }
 }
@@ -773,110 +685,6 @@ const watchParams = (extra = {}) => ({
 });
 
 /**
- * One account, one round. Returns the match only if it is new *and* complete.
- */
-async function checkAccount(handle) {
-  const result = await withRetry('list', handle, () => api('/api/matches', watchParams({ handle })));
-  const matches = result.matches ?? [];
-  const ids = matches.map((match) => String(match.id)).filter(Boolean);
-
-  const baseline = watch.seen.get(handle);
-  if (!baseline) {
-    watch.seen.set(handle, new Set(ids));
-    logWatch(`baseline ${ids.length} id(s)${ids.length ? `, newest ${ids[0]}` : ''}`, handle);
-    setStatus(handle, ids.length ? `baseline set (${ids.length})` : 'baseline set (no matches yet)');
-    return null;
-  }
-
-  const fresh = freshMatch(matches, baseline);
-  if (!fresh) {
-    logWatch(`no new id among ${ids.length}`, handle);
-    setStatus(handle, 'no new game');
-    return null;
-  }
-
-  logWatch(`new id ${fresh.id} (${[fresh.queue, fresh.map].filter(Boolean).join(' ') || 'no label'}) - pulling detail`, handle);
-  setStatus(handle, 'new game - checking stats', 'hit');
-  const match = await withRetry('detail', handle, () => api('/api/match', watchParams({ matchId: fresh.id, handle })));
-
-  const { ok, players } = scoreboardReady(match);
-  if (!ok) {
-    logWatch(`rejected ${fresh.id}: ${players} player(s) with stats - not baselined, will retry`, handle);
-    setStatus(handle, `new game, stats not ready yet (${players} player${players === 1 ? '' : 's'})`, 'wait');
-    return null;
-  }
-
-  logWatch(`accepted ${fresh.id} with ${players} players`, handle);
-  return { handle, match, matchId: fresh.id, matches, players };
-}
-
-async function runWatch(handles) {
-  const { concurrency, gapMs } = WATCH_TUNING[watch.provider] ?? WATCH_TUNING.henrik;
-  let round = 0;
-
-  while (watch.running) {
-    round += 1;
-    setWatchState(`round ${round}`);
-
-    const live = handles.filter((handle) => !watch.skip.has(handle));
-    if (!live.length) {
-      logWatch('every account is private or missing - nothing left to watch');
-      stopWatch('no usable accounts');
-      return null;
-    }
-
-    const startedAt = performance.now();
-    logWatch(
-      `round ${round} start - ${live.length} account(s), ${concurrency} at a time` +
-        (watch.skip.size ? `, ${watch.skip.size} skipped` : ''),
-    );
-
-    let failed = 0;
-    const hits = await mapLimit(live, concurrency, async (handle) => {
-      if (!watch.running) return null;
-      try {
-        return await checkAccount(handle);
-      } catch (error) {
-        // Stopping cancels whatever was queued for a slot. That is not a
-        // failure, and painting it red would misreport a clean shutdown.
-        if (!watch.running) return null;
-
-        // Nothing about a private or missing profile changes by next round, and
-        // at one lookup a minute its slot is better spent on an account that
-        // can answer.
-        if (isPermanentFailure(error.status)) {
-          watch.skip.add(handle);
-          logWatch(`dropped for this run: ${error.status} ${error.message ?? ''}`.trim(), handle);
-          setStatus(handle, error.status === 403 ? 'private - skipped' : `${error.status} - skipped`, 'err');
-          return null;
-        }
-
-        // One bad account must not end the watch - the other nine are the point.
-        failed += 1;
-        const rateLimited = error.status === 429;
-        logWatch(`gave up this round: ${error.status ?? 'network'} ${error.message ?? ''}`.trim(), handle);
-        setStatus(handle, rateLimited ? 'rate limited - will retry' : `error ${error.status ?? ''}`.trim(), 'err');
-        return null;
-      }
-    });
-
-    const hit = hits.find(Boolean);
-    logWatch(
-      `round ${round} done in ${Math.round((performance.now() - startedAt) / 100) / 10}s - ` +
-        `${failed} failed, ${hit ? `hit on ${hit.handle}` : 'no hit'}`,
-    );
-
-    if (hit) return hit;
-    if (!watch.running) return null;
-
-    setWatchState(`waiting ${Math.round(gapMs / 1000)}s`);
-    await sleep(gapMs);
-  }
-
-  return null;
-}
-
-/**
  * Take the winning account over, so the rest of the tab behaves as though it
  * had been searched by hand, and show the payload we already hold rather than
  * fetching it a second time.
@@ -894,74 +702,6 @@ function adoptHit(hit) {
   renderMatchList();
   markSelected(hit.matchId);
   showMatch(hit.match, hit.matchId);
-}
-
-function stopWatch(label = '') {
-  if (watch.running) logWatch(`watch stopped${label ? ` - ${label}` : ''}`);
-  watch.running = false;
-  wakeSleepers();
-  els.watchBtn.textContent = 'Start watching';
-  setWatchState(label);
-}
-
-async function startWatch() {
-  const handles = parseHandles(els.watchIds.value, WATCH_MAX);
-  if (!handles.length) {
-    toast('Add at least one Riot ID in the form Name#TAG');
-    return;
-  }
-
-  const current = provider();
-  if (current === 'riot') {
-    toast('Watching needs HenrikDev or tracker.gg - the Riot matchlist has no mode filter.');
-    return;
-  }
-
-  // ponytail: localStorage, so a ten-player roster survives a page reload
-  // mid-show. Nothing here is worth a server round-trip.
-  localStorage.setItem('watch-ids', els.watchIds.value);
-
-  watch.running = true;
-  watch.provider = current;
-  watch.nextSlotAt = 0;
-  watch.skip = new Set();
-  watch.seen = new Map(handles.map((handle) => [handle, null]));
-  watch.status.clear();
-  for (const handle of handles) setStatus(handle, 'waiting for baseline');
-
-  const tuning = WATCH_TUNING[current] ?? WATCH_TUNING.henrik;
-  logWatch(
-    `watch started - source ${current}, type ${els.matchType.value}, ${handles.length} account(s), ` +
-      `${tuning.concurrency} at a time, ${Math.round((tuning.minRequestGapMs ?? 0) / 1000)}s between requests, ` +
-      `${Math.round(tuning.gapMs / 1000)}s between rounds, up to ${RETRY_ATTEMPTS} attempts per request`,
-  );
-
-  // The pacing is measured, not chosen, so what it costs in detection time is
-  // stated up front rather than left for the operator to infer from the log.
-  const expected = detectionMs(tuning, handles.length);
-  logWatch(
-    `worst case, a new game is picked up ${Math.round(expected / 1000)}s after it reaches an account ` +
-      `(${handles.length} account(s) at one every ${Math.round((tuning.minRequestGapMs ?? 0) / 1000)}s)`,
-  );
-
-  if (expected > 60_000) {
-    const minutes = Math.round(expected / 60_000);
-    toast(`${PROVIDER_LABELS[current]} pacing means up to ~${minutes} min to spot a game - see the debug log`);
-  }
-
-  els.watchBtn.textContent = 'Stop watching';
-
-  try {
-    const hit = await runWatch(handles);
-    if (!hit) return;
-
-    stopWatch(`found on ${hit.handle}`);
-    adoptHit(hit);
-    toast(`New ${els.matchType.value} found on ${hit.handle}`);
-  } catch (error) {
-    stopWatch('stopped');
-    showError(els.details, error);
-  }
 }
 
 /**
@@ -1115,14 +855,30 @@ async function takeBaseline(all, current, took) {
         continue;
       }
 
-      baseline.set(handle, new Set(matches.map((match) => String(match.id)).filter(Boolean)));
+      const ids = matches.map((match) => String(match.id)).filter(Boolean);
+      baseline.set(handle, new Set(ids));
       used.push(handle);
+
+      // What the baseline actually holds, not just how big it is. When a check
+      // later says "nothing new", this is the list it compared against, so it
+      // is the only way to tell a working baseline from a stale or empty one.
+      const newest = matches[0];
+      logWatch(
+        `baselined ${ids.length} match(es)` +
+          (newest
+            ? ` - newest ${newest.id} (${[newest.queue, newest.map].filter(Boolean).join(' ') || 'no label'}` +
+              `${newest.startedAt ? `, ${formatDateTime(newest.startedAt)}` : ''})`
+            : ' - none, so any match found next click counts as new'),
+        handle,
+      );
+      if (ids.length > 1) logWatch(`  ids: ${ids.slice(0, 6).join(', ')}${ids.length > 6 ? ` +${ids.length - 6} more` : ''}`, handle);
     }
   }
 
   // Every account that kept its place answered, so the count is the set size.
   watch.burst = { handles: used, listed: [...all], baseline };
   logWatch(`baseline took ${took()} - ${used.length} of ${all.length} listed: ${used.join(', ') || 'none'}`);
+  logWatch(`type ${els.matchType.value} - press again once the game ends and anything not listed above is the new one`);
   setWatchState(`baseline ${used.length}/${Math.min(all.length, BURST_MAX)}`);
 
   toast(
@@ -1144,11 +900,22 @@ async function findNewGame(handles, took) {
   // against. Accounts without one can still serve the detail, they just cannot
   // nominate a candidate.
   const candidates = [];
-  for (const { handle, matches } of lists) {
+  for (const { handle, matches, ok } of lists) {
     const before = baseline.get(handle);
     if (!before) continue;
-    for (const match of matches) {
-      if (!match?.id || before.has(String(match.id))) continue;
+
+    const fresh = matches.filter((match) => match?.id && !before.has(String(match.id)));
+    if (ok) {
+      // Spell out the comparison per account, so "nothing new" is auditable
+      // rather than something the operator has to take on trust.
+      logWatch(
+        `${matches.length} match(es) now vs ${before.size} at baseline -> ` +
+          (fresh.length ? `${fresh.length} new: ${fresh.map((match) => match.id).join(', ')}` : 'no change'),
+        handle,
+      );
+    }
+
+    for (const match of fresh) {
       const seen = candidates.find((entry) => String(entry.id) === String(match.id));
       if (seen) continue;
       candidates.push({ id: match.id, startedAt: match.startedAt ?? 0, sources: [] });
@@ -1217,11 +984,6 @@ async function findNewGame(handles, took) {
   setWatchState('new game, no full scoreboard');
   toast('Found a new game, but no full scoreboard yet - press again shortly');
 }
-
-els.watchBtn.addEventListener('click', () => {
-  if (watch.running) stopWatch('stopped');
-  else void startWatch();
-});
 
 els.watchNow.addEventListener('click', () => void runBurst());
 els.watchIds.addEventListener('input', syncBurstButton);

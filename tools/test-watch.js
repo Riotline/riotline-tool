@@ -1,23 +1,16 @@
 /**
- * Self-check for the multi-account watch rules.
+ * Self-check for the multi-account custom finder.
  *
  *   node tools/test-watch.js
  *
- * Covers the three ways the watch can be wrong on air: firing on a match the
- * account already had, firing on a scoreboard that has not finished landing,
+ * Covers the ways the check can be wrong on air: firing on a scoreboard that
+ * has not finished landing, dropping an account that could still have answered,
  * and hammering tracker.gg with an unbounded fan-out.
  */
 
 import assert from 'node:assert/strict';
 
-import {
-  freshMatch,
-  isPermanentFailure,
-  mapLimit,
-  parseHandles,
-  reserveSlot,
-  scoreboardReady,
-} from '../public/watch-core.js';
+import { isPermanentFailure, mapLimit, parseHandles, scoreboardReady } from '../public/watch-core.js';
 
 // --- parseHandles ----------------------------------------------------------
 
@@ -28,18 +21,6 @@ assert.deepEqual(parseHandles('A#1\nA#1'), ['A#1'], 'deduped');
 assert.deepEqual(parseHandles('nottag\n#1\nB#'), [], 'a Riot ID needs a name and a tagline');
 assert.equal(parseHandles(Array.from({ length: 20 }, (_, i) => `P${i}#T`).join('\n')).length, 10, 'capped at ten');
 assert.deepEqual(parseHandles(null), []);
-
-// --- freshMatch ------------------------------------------------------------
-
-const history = [{ id: 'new' }, { id: 'old-a' }, { id: 'old-b' }];
-const baseline = new Set(['old-a', 'old-b']);
-
-assert.equal(freshMatch(history, baseline)?.id, 'new');
-assert.equal(freshMatch([{ id: 'old-a' }], baseline), null, 'a match already in the baseline is not new');
-assert.equal(freshMatch([], baseline), null);
-assert.equal(freshMatch(history, null), null, 'no baseline yet means no hit - the whole history would look new');
-assert.equal(freshMatch([{ id: 'newer' }, { id: 'new' }], baseline)?.id, 'newer', 'newest first wins');
-assert.equal(freshMatch([{ id: 5 }], new Set(['5'])), null, 'ids compare as strings');
 
 // --- scoreboardReady -------------------------------------------------------
 
@@ -72,35 +53,6 @@ assert.equal(isPermanentFailure(429), false, 'rate limiting passes');
 assert.equal(isPermanentFailure(502), false, 'a browser failure is retryable');
 assert.equal(isPermanentFailure(0), false, 'a network blip is retryable');
 assert.equal(isPermanentFailure(undefined), false);
-
-// --- reserveSlot -----------------------------------------------------------
-// tracker.gg limits how often it is asked, so the watch paces every request.
-
-{
-  // An idle watch goes immediately and books the next slot a gap ahead.
-  const first = reserveSlot(1_000, 0, 60_000);
-  assert.deepEqual(first, { startAt: 1_000, nextAt: 61_000 }, 'the first request does not wait');
-
-  // A second caller in the same tick queues behind it rather than sharing it.
-  const second = reserveSlot(1_000, first.nextAt, 60_000);
-  assert.deepEqual(second, { startAt: 61_000, nextAt: 121_000 }, 'concurrent callers must not share a slot');
-
-  // Ten accounts at a minute each is a ten-minute round - the measured cost.
-  let cursor = 0;
-  let last = 0;
-  for (let i = 0; i < 10; i += 1) {
-    const slot = reserveSlot(1_000, cursor, 60_000);
-    cursor = slot.nextAt;
-    last = slot.startAt;
-  }
-  assert.equal(last - 1_000, 9 * 60_000, 'a round of ten spans nine gaps');
-
-  // A cursor already in the past must not drag a request backwards.
-  assert.deepEqual(reserveSlot(500_000, 1_000, 60_000), { startAt: 500_000, nextAt: 560_000 }, 'a stale cursor is ignored');
-
-  // No pacing configured (HenrikDev before its own limit matters) is a no-op.
-  assert.deepEqual(reserveSlot(1_000, 99_000, 0), { startAt: 1_000, nextAt: 99_000 }, 'zero gap never waits');
-}
 
 // --- mapLimit --------------------------------------------------------------
 
