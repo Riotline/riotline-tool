@@ -25,6 +25,7 @@ import {
   PRISM_RINGS,
   PRISM_ROWS,
   PRISM_SIZE,
+  PULSE_RINGS,
   WINNER_MAP_ROWS,
   WINNER_STAGES,
   WINNER_STAGE_KEYS,
@@ -35,6 +36,7 @@ import {
   openingMs,
   resolveWinner,
   stageBands,
+  upcomingNotes,
 } from './winner-schema.js';
 
 const STAGE_W = 1920;
@@ -161,6 +163,12 @@ const prismTiles = [...prismGrid.children];
   });
 }
 
+// The pulse opening's rings. Same reasoning as the slats: the count is the
+// schema's, because the server times the opening from it.
+const pulseGrid = document.getElementById('pulse');
+for (let index = 0; index < PULSE_RINGS; index += 1) pulseGrid.append(el('div', 'pulse-ring'));
+const pulseRings = [...pulseGrid.children];
+
 // One row per map in the series, same reasoning.
 const scoreMaps = document.getElementById('score-maps');
 for (let index = 0; index < WINNER_MAP_ROWS; index += 1) {
@@ -176,6 +184,14 @@ for (let index = 0; index < WINNER_MAP_ROWS; index += 1) {
     el('span', 'score-map-num', { 'data-bind': `maps.${index}.right`, 'data-lead': `maps.${index}.rightAhead` }),
   );
   row.append(score);
+
+  // Sits where the score would be, and replaces it on an unplayed map. The score
+  // column is the one that is failing to say anything useful on those rows -
+  // 0 - 0 is not a result - so the note answers the question the numbers could
+  // not. Putting it under the map name instead would make one row in the list
+  // taller than its neighbours, which reads as a mistake rather than a state.
+  row.append(el('div', 'score-map-note', { 'data-bind': `maps.${index}.note` }));
+
   scoreMaps.append(row);
 }
 
@@ -190,6 +206,7 @@ const winnerScene = stage.querySelector('.scene-winner');
 const cornerMark = document.getElementById('event-logo');
 const sceneMarks = [...stage.querySelectorAll('[data-mark]')];
 const plate = document.getElementById('plate');
+const textureLines = document.getElementById('texture-lines');
 const winnerSub = stage.querySelector('.winner-sub');
 const winnerLogo = stage.querySelector('.winner-logo');
 const scoreLogoLeft = stage.querySelector('.score-team-left .score-logo');
@@ -263,6 +280,8 @@ function buildView(state) {
   view.left.ahead = (state.left.score ?? 0) > (state.right.score ?? 0);
   view.right.ahead = (state.right.score ?? 0) > (state.left.score ?? 0);
 
+  const notes = upcomingNotes(state);
+
   state.maps.forEach((row, index) => {
     view.maps[index] = {
       name: row.name,
@@ -270,6 +289,10 @@ function buildView(state) {
       right: String(row.right ?? 0),
       leftAhead: (row.left ?? 0) > (row.right ?? 0),
       rightAhead: (row.right ?? 0) > (row.left ?? 0),
+      // Present in `notes` at all means "listed but not played" - the string may
+      // still be empty, which is the fade-only case.
+      upcoming: index in notes,
+      note: notes[index] ?? '',
     };
   });
 
@@ -296,15 +319,45 @@ function applyStyle(style, view) {
   root.setProperty('--font', `"${style.font}"`);
   root.setProperty('--plate-blur', `${style.plateBlur}px`);
   root.setProperty('--plate-dim', String(style.plateDim));
+  root.setProperty('--upcoming-dim', String(style.upcomingDim));
 
   stage.classList.toggle('uppercase', style.uppercase);
   stage.classList.toggle('plate-off', !style.plateBehind);
+
+  applyTexture(style);
 
   // Scoped to the winner scene on purpose. Recolouring the whole overlay from
   // the champion's palette would mean the map card is already flying their
   // colours two scenes before the result is revealed.
   const teamAccent = style.useTeamColour ? view.winner.colour : '';
   winnerScene.style.setProperty('--accent', teamAccent || style.accent);
+}
+
+/**
+ * The backdrop's finish.
+ *
+ * The URL goes into a CSS url(), which is a good deal further than a src
+ * attribute reaches, so it is written with the DOM rather than assembled into a
+ * custom property somebody else parses. encodeURI is belt to the sanitiser's
+ * braces: it escapes the quote and the backslash, which are the only two
+ * characters that could close the url() early and start meaning something else.
+ */
+function applyTexture(style) {
+  const root = document.documentElement.style;
+  const usable = style.texture === 'image' ? Boolean(style.textureImage) : style.texture !== 'none';
+
+  stage.dataset.texture = usable ? style.texture : 'none';
+  root.setProperty('--texture-opacity', String(style.textureOpacity));
+  root.setProperty('--texture-scale', `${style.textureScale}px`);
+  root.setProperty('--texture-blend', style.textureBlend);
+  // Tiling and filling are two different jobs, and neither wants the other's
+  // repeat rule: a cover image repeated is a cover image with seams.
+  root.setProperty('--texture-size', style.textureTile ? `${style.textureScale}px` : 'cover');
+  root.setProperty('--texture-repeat', style.textureTile ? 'repeat' : 'no-repeat');
+
+  const url = style.texture === 'image' ? style.textureImage : '';
+  const next = url ? `url("${encodeURI(url)}")` : '';
+  if (textureLines.style.backgroundImage !== next) textureLines.style.backgroundImage = next;
 }
 
 /**
@@ -425,8 +478,13 @@ function render(state) {
 
   // Hiding rather than leaving empty is what keeps the band count honest: an
   // invisible band would still take a stagger step and stretch the scene.
+  //
+  // An upcoming map is still a band, and deliberately: it is on the list, it is
+  // part of what the score line is saying, and it arrives with the rest.
   for (const row of scoreMaps.children) {
-    row.hidden = !view.maps[Number(row.dataset.row)]?.name;
+    const map = view.maps[Number(row.dataset.row)];
+    row.hidden = !map?.name;
+    row.classList.toggle('is-upcoming', Boolean(map?.upcoming));
   }
   winnerSub.hidden = !view.winnerSubtitle;
 
@@ -526,6 +584,11 @@ function applySeqConfig(seq) {
   for (const tile of prismTiles) {
     tile.style.setProperty('--prism-delay', `${Number(tile.dataset.ring) * seq.openStaggerMs}ms`);
   }
+
+  // The pulse throws one ring per step, in order.
+  pulseRings.forEach((ring, index) => {
+    ring.style.setProperty('--pulse-delay', `${index * seq.openStaggerMs}ms`);
+  });
 }
 
 /**
@@ -541,6 +604,23 @@ function playOpening(seq) {
   commit(); // so re-adding it below counts as a change
   stage.classList.add('is-opening');
   openingTimer = setTimeout(() => stage.classList.remove('is-opening'), openingMs(seq));
+}
+
+/**
+ * The same one-shot, for the scene change that has a flourish of its own.
+ *
+ * Never played on the overlay's own arrival: the opening is already the loudest
+ * thing that will happen, and a bar crossing the frame underneath it just makes
+ * two events out of one.
+ */
+let glintTimer = null;
+
+function playGlint(seq) {
+  clearTimeout(glintTimer);
+  stage.classList.remove('is-glint');
+  commit();
+  stage.classList.add('is-glint');
+  glintTimer = setTimeout(() => stage.classList.remove('is-glint'), seq.stageMs);
 }
 
 /** Stagger the bands of the scene that is about to arrive. */
@@ -606,6 +686,8 @@ function playScene(index, seq, { instant = false, first = false } = {}) {
 
   if (instant) instantly(() => next.classList.add('is-live'));
   else next.classList.add('is-live');
+
+  if (seq.transition === 'glint' && !instant && !first) playGlint(seq);
 
   liveScene = next;
 }

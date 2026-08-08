@@ -451,6 +451,12 @@ export function sanitiseWinnerStyle(input, fallback = DEFAULT_WINNER_STYLE) {
       case 'px':
         clean[field.key] = int(value, previous, field.min, field.max);
         break;
+      // Same rule as every other image reference in the graphic: http(s), or a
+      // path under this server. The page drops it into a CSS url(), so an
+      // unchecked string here would be reaching a good deal further than a src.
+      case 'media':
+        clean[field.key] = imageUrl(value, previous);
+        break;
       default:
         clean[field.key] = colour(value, previous);
     }
@@ -795,7 +801,7 @@ export function makeTeamStore(filePath) {
  */
 
 /** Images are logos; audio is a whole music bed, so it gets its own ceiling. */
-export const MEDIA_LIMITS = { image: 4 * 1024 * 1024, audio: 24 * 1024 * 1024 };
+export const MEDIA_LIMITS = { image: 12 * 1024 * 1024, audio: 32 * 1024 * 1024 };
 
 const ascii = (buffer, from, to) => buffer.toString('latin1', from, to);
 

@@ -85,6 +85,7 @@ export const WINNER_TRANSITIONS = [
   { key: 'zoom', label: 'Zoom through' },
   { key: 'rise', label: 'Rise up' },
   { key: 'shear', label: 'Shear in' },
+  { key: 'glint', label: 'Neon glint' },
 ];
 
 export const WINNER_TRANSITION_KEYS = WINNER_TRANSITIONS.map((entry) => entry.key);
@@ -108,6 +109,7 @@ export const WINNER_OPENINGS = [
   { key: 'streak', label: 'Streak - bolt' },
   { key: 'facets', label: 'Facets - shards fill' },
   { key: 'prism', label: 'Prism - lit lattice' },
+  { key: 'pulse', label: 'Pulse - neon rings' },
 ];
 
 export const WINNER_OPENING_KEYS = WINNER_OPENINGS.map((entry) => entry.key);
@@ -162,6 +164,16 @@ export const PRISM_ROWS = Math.ceil(1080 / (PRISM_SIZE / 2)) + 2;
 export const PRISM_RINGS = 6;
 
 /**
+ * The pulse opening: rings of neon thrown out from the middle of the frame, with
+ * the backdrop opening as a circle behind the last of them.
+ *
+ * Three is not a shy number, it is the readable one. Each ring has to be clear
+ * of the one before it to read as a pulse rather than as a thick blurred edge,
+ * and at a 760ms opening there is only room for three that are far enough apart.
+ */
+export const PULSE_RINGS = 3;
+
+/**
  * How many stagger steps each opening has. The server times auto-advance off
  * this, so an opening that arrives in pieces has to declare how many.
  *
@@ -177,6 +189,7 @@ export const OPENING_STEPS = {
   blinds: Math.ceil(OPENING_SLATS / 2),
   facets: FACET_COLS + FACET_ROWS - 1,
   prism: PRISM_RINGS,
+  pulse: PULSE_RINGS,
 };
 
 // --------------------------------------------------------------- sequence ---
@@ -291,6 +304,46 @@ export const eventLogoScenes = (placement) =>
 export const eventLogoInScene = (state, stageKey) =>
   Boolean(state?.eventLogo) && eventLogoScenes(state?.style?.eventLogoPlacement).includes(stageKey);
 
+/**
+ * What the backdrop is made of, over and above a flat colour and a blurred map.
+ *
+ * A blurred splash is smooth by definition, and smooth reads as empty at
+ * broadcast bitrates - large flat areas are exactly what an encoder throws away,
+ * so the background of the score line can end up looking like a gradient with
+ * banding in it. A little structure gives the encoder something to hold on to
+ * and the eye something to sit on.
+ */
+export const WINNER_TEXTURES = [
+  { key: 'none', label: 'Nothing' },
+  { key: 'lattice', label: 'Neon lattice' },
+  { key: 'image', label: 'Uploaded image' },
+];
+
+export const WINNER_TEXTURE_KEYS = WINNER_TEXTURES.map((entry) => entry.key);
+
+/**
+ * How the texture meets what is behind it.
+ *
+ * Screen is the default, and the reason is arithmetic rather than taste. What
+ * the texture sits on is a splash blurred and then dimmed to under a quarter -
+ * so it is nearly black, and every blend that respects the darks (overlay, soft
+ * light, multiply) has almost nothing to work with and the lattice vanishes.
+ * Screen only ever lightens, which is also what neon does.
+ *
+ * The others are worth keeping for the cases that invert this: a light backdrop
+ * colour, the plate turned off, or a texture that is meant to read as a picture
+ * on the backdrop rather than as light on it.
+ */
+export const TEXTURE_BLENDS = [
+  { key: 'screen', label: 'Screen - only lightens' },
+  { key: 'overlay', label: 'Overlay - follows the picture' },
+  { key: 'soft-light', label: 'Soft light - gentler' },
+  { key: 'multiply', label: 'Multiply - only darkens' },
+  { key: 'normal', label: 'Straight over' },
+];
+
+export const TEXTURE_BLEND_KEYS = TEXTURE_BLENDS.map((entry) => entry.key);
+
 export const WINNER_STYLE_FIELDS = [
   { key: 'font', type: 'font', group: 'Typeface', label: 'Font', default: 'Gabarito' },
 
@@ -322,6 +375,43 @@ export const WINNER_STYLE_FIELDS = [
   },
   { key: 'plateBlur', type: 'px', min: 0, max: 60, group: 'Map plate', label: 'Blur behind them (px)', default: 22 },
   { key: 'plateDim', type: 'ratio', group: 'Map plate', label: 'Darken behind them', default: 0.78 },
+
+  // Sits above the plate and below the text, on for the whole sequence rather
+  // than switching in behind the score line. A texture that arrives partway
+  // through is a second animation nobody asked for; one that is simply there is
+  // a finish on the backdrop.
+  { key: 'texture', type: 'choice', options: WINNER_TEXTURES, group: 'Texture', label: 'Texture', default: 'lattice' },
+  { key: 'textureImage', type: 'media', group: 'Texture', label: 'Texture image', default: '' },
+  {
+    key: 'textureBlend',
+    type: 'choice',
+    options: TEXTURE_BLENDS,
+    group: 'Texture',
+    label: 'How it blends',
+    default: 'screen',
+  },
+  // Deliberately small. This is a finish, and the moment it is legible as a
+  // pattern it is competing with the team name.
+  { key: 'textureOpacity', type: 'ratio', group: 'Texture', label: 'Strength', default: 0.15 },
+  {
+    key: 'textureScale',
+    type: 'px',
+    min: 40,
+    max: 800,
+    group: 'Texture',
+    label: 'Size (px - lattice cell, or tile)',
+    default: 190,
+  },
+  { key: 'textureTile', type: 'bool', group: 'Texture', label: 'Repeat the image instead of filling the frame', default: false },
+
+  {
+    key: 'showUpcoming',
+    type: 'bool',
+    group: 'Upcoming maps',
+    label: 'Fade the maps that have not been played',
+    default: true,
+  },
+  { key: 'upcomingDim', type: 'ratio', group: 'Upcoming maps', label: 'How faded', default: 0.42 },
 
   { key: 'text', type: 'hex', group: 'Colour', label: 'Primary text', default: '#ffffff' },
   { key: 'dimText', type: 'hex', group: 'Colour', label: 'Secondary text', default: '#93a4b5' },
@@ -416,6 +506,10 @@ export const WINNER_TEXT_FIELDS = [
   { key: 'mapKicker', max: 24, label: 'Map kicker', placeholder: 'MAP 3', stage: 'map' },
   { key: 'mapHeadline', max: 32, label: 'Map headline', placeholder: 'MAP COMPLETE', stage: 'map' },
   { key: 'scoreHeadline', max: 32, label: 'Score headline', placeholder: 'SERIES SCORE', stage: 'score' },
+  // Blank means the row is only faded, with no words on it - which is the right
+  // answer for a Bo5 listing two maps nobody has any intention of naming yet.
+  { key: 'upcomingLabel', max: 16, label: 'Unplayed map note', placeholder: 'UPCOMING', stage: 'score' },
+  { key: 'deciderLabel', max: 16, label: 'Last unplayed map note', placeholder: 'DECIDER', stage: 'score' },
   { key: 'winnerHeadline', max: 32, label: 'Winner kicker', placeholder: 'WINNER', stage: 'winner' },
   { key: 'winnerSubtitle', max: 48, label: 'Winner subtitle', placeholder: 'Advances to the grand final', stage: 'winner' },
 ];
@@ -435,6 +529,8 @@ export const DEFAULT_WINNER = {
   scoreHeadline: 'SERIES SCORE',
   winnerHeadline: 'WINNER',
   winnerSubtitle: '',
+  upcomingLabel: 'UPCOMING',
+  deciderLabel: 'DECIDER',
 
   left: { ...emptyTeam(), name: 'Team A', shortName: 'TMA', colour: '#4ea8de', score: 2 },
   right: { ...emptyTeam(), name: 'Team B', shortName: 'TMB', colour: '#ff4655', score: 1 },
@@ -462,6 +558,48 @@ export const WINNER_SIDE_CHOICES = [
 
 /** Map rows an operator has actually filled in - a blank name means "unused". */
 export const activeMaps = (state) => (state?.maps ?? []).filter((row) => String(row?.name ?? '').trim());
+
+/**
+ * A listed map nobody has played yet.
+ *
+ * 0-0 is the tell, and it is a safe one: VALORANT has no scoreline where both
+ * sides finish on nothing, so a listed map still sitting on zeroes is a map that
+ * has not happened. That means the whole feature needs no extra field for an
+ * operator to keep in step with the scores - filling the scores in is what marks
+ * the map played.
+ */
+export const isUpcomingMap = (row) =>
+  Boolean(String(row?.name ?? '').trim()) && (row?.left ?? 0) === 0 && (row?.right ?? 0) === 0;
+
+/**
+ * What to write on each unplayed map, keyed by its index in `maps`.
+ *
+ * The last listed map gets the decider wording, but only once something before
+ * it has been played: a decider is the map that settles a series already under
+ * way, and calling map one of a Bo3 the decider is just wrong. Everything else
+ * unplayed gets the ordinary note.
+ *
+ * An empty string is a real answer - the row is still faded, it simply has no
+ * words on it.
+ */
+export function upcomingNotes(state) {
+  if (!state?.style?.showUpcoming) return {};
+
+  const rows = state?.maps ?? [];
+  const listed = rows.map((row, index) => ({ row, index })).filter(({ row }) => String(row?.name ?? '').trim());
+  if (!listed.length) return {};
+
+  const last = listed[listed.length - 1].index;
+  const anyPlayed = listed.some(({ row }) => !isUpcomingMap(row));
+
+  const notes = {};
+  for (const { row, index } of listed) {
+    if (!isUpcomingMap(row)) continue;
+    const decider = index === last && anyPlayed;
+    notes[index] = String((decider ? state.deciderLabel : state.upcomingLabel) ?? '').trim();
+  }
+  return notes;
+}
 
 /**
  * Which side lifts the trophy. Ties resolve to the left rather than to nothing:

@@ -56,9 +56,12 @@
              the schema owns, not markup. -->
         <div class="prism" id="prism" aria-hidden="true"></div>
 
-        <!-- Opening furniture. Both are inert unless their style is playing. -->
+        <!-- Opening furniture. All inert unless their own style is playing. The
+             pulse rings are filled in by winner.js so the count comes from the
+             schema, which is also what the server times the opening from. -->
         <div class="opening-flash" aria-hidden="true"></div>
         <div class="opening-streak" aria-hidden="true"></div>
+        <div class="pulse" id="pulse" aria-hidden="true"></div>
 
         <!-- The map plate lives behind the whole sequence, not inside the first
              scene: it arrives with the overlay, sits sharp under the map card,
@@ -71,6 +74,28 @@
           <div class="plate-layer plate-soft"><img data-img="map.image" alt="" /></div>
           <div class="plate-scrim"></div>
         </div>
+
+        <!-- The backdrop's finish: a neon lattice, or an uploaded image, blended
+             over everything behind it and under everything in front. Above the
+             plate on purpose - a blurred splash is smooth by definition, and
+             smooth is what an encoder throws away first, so the texture is there
+             to give the flattest part of the frame some structure.
+
+             Two layers: the pattern, and a blurred copy of it that does the
+             glow. The drift is on the wrapper so the blur is rasterised once
+             rather than re-run on every frame of the move. -->
+        <div class="texture" id="texture" aria-hidden="true">
+          <div class="texture-drift">
+            <div class="texture-layer texture-lines" id="texture-lines"></div>
+            <div class="texture-layer texture-glow" id="texture-glow"></div>
+          </div>
+        </div>
+
+        <!-- The glint: one bar of accent that crosses the frame as a scene
+             changes, with the bands arriving behind it. Only for its own scene
+             change, and never on the opening - the overlay arriving is already
+             the loudest thing on screen. -->
+        <div class="glint" id="glint" aria-hidden="true"></div>
 
         <!-- The corner mark: one ident above every scene, outside the sequence,
              so it does not re-animate on each scene change. It still arrives and

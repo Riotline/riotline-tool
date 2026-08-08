@@ -38,6 +38,12 @@
 
   --plate-blur: 22px;
   --plate-dim: 0.78;
+
+  --texture-opacity: 0.1;
+  --texture-scale: 260px;
+  --texture-blend: overlay;
+  --texture-size: cover;
+  --texture-repeat: no-repeat;
 }
 
 * {
@@ -329,6 +335,73 @@ body {
   transition-delay: 0ms;
 }
 
+/* ---- pulse: rings of neon, with the backdrop opening behind them ---- */
+
+/*
+ * The one opening that is radial, and the only one whose backdrop is not a
+ * rectangle on the way in.
+ *
+ * clip-path does not interpolate between shape functions - inset() to circle()
+ * is a jump, not a transition - so this opening has to be a circle at both ends
+ * of every move it makes, which is why it carries its own exit as well as its
+ * own entrance. That makes it the one place the exit really is the entrance
+ * reversed, and the reason is the shape function rather than the design.
+ */
+.stage[data-opening="pulse"] .backdrop {
+  clip-path: circle(100% at 50% 50%);
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="pulse"] .backdrop,
+.stage[data-active="false"][data-park="right"][data-opening="pulse"] .backdrop {
+  clip-path: circle(0% at 50% 50%);
+}
+
+.pulse {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Large enough that the last ring is off the frame before it fades, so the
+   pulse leaves through the edges rather than stopping in mid-air. */
+/*
+ * One stroke and one glow, and no inset. Everything here is scaled by the
+ * animation, the shadows along with it - so a 70px inner glow is a 130px wash
+ * by the time the ring crosses the frame, and three of those overlapping read
+ * as muddy bands rather than as light. A thin line with a tight halo stays a
+ * line at every size the ring passes through.
+ */
+.pulse-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1500px;
+  height: 1500px;
+  margin: -750px 0 0 -750px;
+  border-radius: 50%;
+  border: 4px solid var(--accent);
+  box-shadow: 0 0 30px var(--accent);
+  opacity: 0;
+}
+
+.stage.is-opening[data-opening="pulse"] .pulse-ring {
+  animation: pulse-ring var(--in-ms) cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+  animation-delay: var(--pulse-delay, 0ms);
+}
+
+@keyframes pulse-ring {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.04);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
 /* ------------------------------------------------------ opening furniture --- */
 
 /*
@@ -491,6 +564,7 @@ body {
 .stage.anim-off .prism-tile,
 .stage.anim-off .prism-tile::before,
 .stage.anim-off .event-logo,
+.stage.anim-off .texture,
 .stage.anim-off .plate,
 .stage.anim-off .plate-layer,
 .stage.anim-off .plate-scrim,
@@ -502,11 +576,16 @@ body {
 
 /* ------------------------------------------------- transition: push ------ */
 
-.stage[data-transition="push"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+/* The glint shares these: the bar is the event, and the bands arriving behind it
+   want to be the plainest move there is. Anything more elaborate underneath and
+   the two are competing rather than one covering the other. */
+.stage[data-transition="push"] .scene:not(.is-live):not(.is-leaving) [data-band],
+.stage[data-transition="glint"] .scene:not(.is-live):not(.is-leaving) [data-band] {
   opacity: 0;
   transform: translate3d(var(--travel), 0, 0);
 }
-.stage[data-transition="push"] .scene.is-leaving.is-gone {
+.stage[data-transition="push"] .scene.is-leaving.is-gone,
+.stage[data-transition="glint"] .scene.is-leaving.is-gone {
   transform: translate3d(calc(var(--travel) * -1), 0, 0);
 }
 
@@ -715,6 +794,153 @@ body {
 .stage.plate-off:not([data-stage="map"]) .plate {
   opacity: 0;
   transition-duration: var(--stage-ms);
+}
+
+/* ----------------------------------------------------------- texture --- */
+
+/*
+ * The backdrop's finish. Above the plate, below every scene.
+ *
+ * It is on for the whole sequence rather than switching in behind the score
+ * line, and that is the design: a texture that arrives partway through is a
+ * second animation nobody asked for, where one that is simply there is a finish.
+ *
+ * mix-blend-mode is what makes it read as light on the picture rather than as a
+ * decal over it. It blends within the stage, which is a stacking context of its
+ * own thanks to the fit-to-window transform - so an operator running the
+ * backdrop semi-transparent gets a texture over the backdrop, never one blended
+ * into the game feed underneath.
+ */
+.texture {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  mix-blend-mode: var(--texture-blend);
+  transition: opacity var(--in-ms) var(--ease);
+  transition-delay: var(--plate-delay, 0ms);
+}
+
+.stage[data-active="true"] .texture {
+  opacity: var(--texture-opacity);
+}
+
+.stage[data-active="false"] .texture {
+  transition-duration: var(--out-ms);
+  transition-delay: 0ms;
+}
+
+.stage[data-texture="none"] .texture {
+  display: none;
+}
+
+/* Oversized so the drift below never pulls an edge into frame. */
+.texture-drift,
+.texture-layer {
+  position: absolute;
+  inset: -8%;
+}
+
+/* Slow enough to be felt rather than seen. Hung off the overlay being on air
+   for the same reason the splash drift is: declared on the element it would run
+   itself out during the first browser-source load and never move again. */
+.stage[data-active="true"] .texture-drift {
+  animation: texture-drift 30s linear forwards;
+}
+
+@keyframes texture-drift {
+  to {
+    transform: translate3d(-3%, -2.2%, 0) scale(1.04);
+  }
+}
+
+/* The lattice: the prism opening's geometry, standing still. Two crossed sets of
+   repeating lines make the same diamond grid the shards land in, so the backdrop
+   under the score line is visibly the thing the opening built. */
+.stage[data-texture="lattice"] .texture-layer {
+  background-image:
+    repeating-linear-gradient(
+      45deg,
+      transparent 0 calc(var(--texture-scale) - 2px),
+      var(--accent) calc(var(--texture-scale) - 2px) var(--texture-scale)
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0 calc(var(--texture-scale) - 2px),
+      var(--accent) calc(var(--texture-scale) - 2px) var(--texture-scale)
+    );
+}
+
+/* An uploaded texture is a picture, not a light source, so it does its own
+   glowing or it does none. */
+.stage[data-texture="image"] .texture-glow {
+  display: none;
+}
+
+.stage[data-texture="image"] .texture-lines {
+  background-size: var(--texture-size);
+  background-repeat: var(--texture-repeat);
+  background-position: center;
+}
+
+/* The glow is a blurred copy rather than a shadow, because a gradient cannot
+   cast one. Static, so it is rasterised once and then only ever transformed. */
+.texture-glow {
+  filter: blur(10px);
+  opacity: 0.8;
+}
+
+/* ------------------------------------------------------------- glint --- */
+
+/*
+ * A bar of accent that crosses the frame as one scene hands over to the next,
+ * with the bands arriving behind it.
+ *
+ * An animation rather than a transition, for the same reason the opening
+ * flourishes are: it is a one-shot with no resting state, and re-adding the
+ * class is what replays it.
+ */
+.glint {
+  position: absolute;
+  top: -10%;
+  bottom: -10%;
+  left: 0;
+  width: 16%;
+  z-index: 3;
+  opacity: 0;
+  pointer-events: none;
+  filter: blur(2px);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 42%,
+    #ffffff 52%,
+    var(--accent) 62%,
+    transparent 100%
+  );
+}
+
+.stage.is-glint[data-transition="glint"] .glint {
+  animation: glint-sweep var(--stage-ms) cubic-bezier(0.45, 0, 0.2, 1) forwards;
+}
+
+@keyframes glint-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-130%) skewX(-12deg);
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(560%) skewX(-12deg);
+  }
 }
 
 /* ------------------------------------------------------------ scene: map --- */
@@ -963,6 +1189,53 @@ body {
 
 .score-map-score .is-ahead {
   color: var(--text);
+}
+
+/*
+ * A map on the list that has not been played.
+ *
+ * Faded rather than removed, because it is doing a job: a Bo5 sitting at 2-1
+ * with two rows still to come tells you where the series is far better than
+ * three rows on their own do.
+ *
+ * The whole row dims, including the accent bar down the left - a full-strength
+ * accent stripe next to greyed-out text looks like a rendering fault rather than
+ * a state.
+ */
+.score-map.is-upcoming {
+  opacity: var(--upcoming-dim, 0.42);
+  border-left-color: var(--dim-text);
+}
+
+/* 0 - 0 is not a result, so the note takes the column instead of sitting next to
+   a pair of zeroes that mean nothing. */
+.score-map.is-upcoming .score-map-score {
+  display: none;
+}
+
+.score-map-note {
+  flex: none;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  /* The tracking above hangs a gap off the last letter; this pulls the block
+     back so it lines up with the numbers on the played rows above it. */
+  margin-right: -0.24em;
+  color: var(--dim-text);
+}
+
+/* Only ever on an unplayed row - the played ones have their score there. */
+.score-map:not(.is-upcoming) .score-map-note {
+  display: none;
+}
+
+/* No wording configured is a real choice, not an empty element: the row is faded
+   and that is the whole message. A dash keeps the right edge of the list from
+   going ragged where a score used to be. */
+.score-map.is-upcoming .score-map-note:empty::before {
+  content: "–";
+  letter-spacing: normal;
+  opacity: 0.7;
 }
 
 /* --------------------------------------------------------- scene: winner --- */

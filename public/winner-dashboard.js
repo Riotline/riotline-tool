@@ -479,9 +479,15 @@ function sceneSection(stage, index) {
     case 'score':
       return [
         heading,
-        ...texts.map((node) => grid(2, [node])),
+        grid(2, texts.slice(0, 1)),
         ...Array.from({ length: WINNER_MAP_ROWS }, (_, row) => mapRow(row)),
         help('A map row with no map picked is left out of the graphic, so a Bo3 is just a Bo5 with two rows empty.'),
+        grid(2, texts.slice(1)),
+        help(
+          'A map that is picked but still on 0 - 0 has not been played, so it is faded and carries the note above ' +
+            'instead of a score. The last one gets the second wording, once something before it has been played - ' +
+            'a decider settles a series already under way. Leave either blank to fade the row with no words on it.',
+        ),
       ];
 
     default: {
@@ -557,12 +563,14 @@ function buildSeqEditor() {
         'move; Shards throws the backdrop in as slats from above and below; Blinds closes it in as bars from the ' +
         'sides; Impact slams it in behind a flash of the accent colour; Streak sends an accent bolt across and ' +
         'drags the backdrop in behind it; Facets cascades angled shards across the frame until they lock together; ' +
-        'Prism spins in a lattice of diamonds outlined and lit in the accent colour, in rings out from the middle.',
+        'Prism spins in a lattice of diamonds outlined and lit in the accent colour, in rings out from the middle; ' +
+        'Pulse throws rings of neon out from the centre and opens the backdrop as a circle behind the last of them.',
     ),
     help(
       'The scene change is what happens between the three cards. Push and Rise deal the bands in from the side or ' +
         'from below; Crossfade is the quiet one; Wipe reveals by clipping without any fade; Zoom pushes through; ' +
-        'Shear throws each band in on a lean that unwinds as it lands.',
+        'Shear throws each band in on a lean that unwinds as it lands; Neon glint sends a lit bar across the frame ' +
+        'with the next card arriving behind it.',
     ),
     ...groups,
   );
@@ -627,6 +635,8 @@ function styleField(entry) {
       return selectField(entry.label, path, FONT_CHOICES, { allowUnknown: false });
     case 'choice':
       return choiceField(entry.label, path, entry.options);
+    case 'media':
+      return logoField(entry.label, path);
     case 'ratio':
       return rangeField(entry.label, path);
     case 'bool':
@@ -646,6 +656,17 @@ function buildStyleEditor() {
     const entries = WINNER_STYLE_FIELDS.filter((entry) => entry.group === group);
     const columns = entries.every((entry) => entry.type === 'bool') ? null : 2;
     groups.push(subhead(group), grid(columns, entries.map(styleField)));
+
+    if (group === 'Texture') {
+      groups.push(
+        help(
+          'A finish on the backdrop, above the map plate and under the text, for the whole sequence. The lattice is ' +
+            'the prism opening standing still, so the score line sits on the thing the opening built. Keep it low - ' +
+            'the moment it reads as a pattern it is competing with the team name. It also gives an encoder some ' +
+            'structure to hold on to, which is what stops a blurred splash banding on a stream.',
+        ),
+      );
+    }
   }
 
   host.replaceChildren(title('Style'), ...groups);
