@@ -42,12 +42,23 @@ import { makeTrackerBrowser } from './browser.js';
 import {
   ANIM_TIER_COUNT,
   FONT_CHOICES,
+  MEDIA_MAX_BYTES,
+  MEDIA_MIME_TYPES,
   PLAYERS_PER_SIDE,
   STAT_SLOTS,
+  TEAM_REGIONS,
+  WINNER_STAGES,
+  WINNER_STAGE_COUNT,
   inDurationMs,
+  isOverlayEntry,
   makeAssetCache,
   makeGraphicStore,
+  makeMediaStore,
   makePresetStore,
+  makeTeamStore,
+  makeWinnerStore,
+  stageBands,
+  stageEnterMs,
 } from './graphics.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -115,10 +126,15 @@ const riotGet = makeRiotClient(RIOT_API_KEY);
 // Broadcast graphic: state survives a restart, asset catalogue survives being
 // offline. Both live in .state/ so nothing user-authored is at risk.
 const graphics = makeGraphicStore(path.join(STATE_DIR, 'graphic.json'));
+const winner = makeWinnerStore(path.join(STATE_DIR, 'winner.json'));
 const presets = makePresetStore(path.join(STATE_DIR, 'presets.json'));
+const teams = makeTeamStore(path.join(STATE_DIR, 'teams.json'));
+const media = makeMediaStore(path.join(STATE_DIR, 'media'));
 const assets = makeAssetCache(path.join(STATE_DIR, 'valorant-assets.json'));
 const restoredGraphic = await graphics.load();
+const restoredWinner = await winner.load();
 await presets.load();
+await teams.load();
 
 /**
  * Auto-hide.
@@ -155,6 +171,73 @@ graphics.subscribe(({ state }) => {
 
   // A pending auto-hide must not be the reason the process stays alive.
   autoHideTimer.unref?.();
+});
+
+/**
+ * The winner sequence driver.
+ *
+ * Same reasoning as auto-hide, one step further: the sequence has a position, so
+ * something has to decide when scene 1 becomes scene 2. Doing it here rather
+ * than in the output page means the dashboard's stage indicator, the preview and
+ * every browser source are all reading the same position from the same place -
+ * a page that advanced itself would leave three of them guessing.
+ *
+ * Every automatic move bumps the cue exactly like a button press, so the pages
+ * cannot tell the difference and do not need to.
+ */
+let sequenceTimer = null;
+let lastSeenSeqCue = winner.state.seq.cue;
+
+function clearSequenceTimer() {
+  clearTimeout(sequenceTimer);
+  sequenceTimer = null;
+}
+
+function scheduleSequence(state) {
+  clearSequenceTimer();
+
+  const seq = state.seq;
+  if (!seq.active || !seq.autoAdvance) return;
+
+  const stage = WINNER_STAGES[seq.stage];
+  if (!stage) return;
+
+  const last = seq.stage >= WINNER_STAGE_COUNT - 1;
+  // Nothing left to do: the last scene holds until an operator takes it off.
+  if (last && !seq.exitAtEnd) return;
+
+  // Measured from the scene's last band settling, so "hold on the map for 3s" is
+  // three seconds of a finished scene rather than three from the cue.
+  const bands = stageBands(state, stage.key);
+  const wait = stageEnterMs(seq, bands, isOverlayEntry(seq)) + (seq[stage.hold] ?? 0);
+
+  sequenceTimer = setTimeout(() => {
+    sequenceTimer = null;
+    const current = winner.state.seq;
+    // Taken over by hand in the meantime - an operator's cue always wins.
+    if (!current.active || current.cue !== seq.cue) return;
+
+    winner.patch({
+      seq: {
+        ...current,
+        active: !last,
+        stage: last ? current.stage : current.stage + 1,
+        restart: false,
+        // The graphic coming off takes the music with it unless the operator
+        // asked for it to carry on underneath whatever follows.
+        music: last ? Boolean(winner.state.audio.keepPlaying) : current.music,
+        cue: current.cue + 1,
+      },
+    });
+  }, wait);
+
+  sequenceTimer.unref?.();
+}
+
+winner.subscribe(({ state }) => {
+  if (state.seq.cue === lastSeenSeqCue) return;
+  lastSeenSeqCue = state.seq.cue;
+  scheduleSequence(state);
 });
 
 // ----------------------------------------------------------------- riot ---
@@ -206,6 +289,9 @@ async function handleApi(pathname, params) {
         fonts: FONT_CHOICES,
         playersPerSide: PLAYERS_PER_SIDE,
         statSlots: STAT_SLOTS,
+        // Distinct from `regions` above, which is Riot's platform routing.
+        teamRegions: TEAM_REGIONS,
+        mediaMaxBytes: MEDIA_MAX_BYTES,
       };
 
     case '/api/valorant-assets':
@@ -214,8 +300,17 @@ async function handleApi(pathname, params) {
     case '/api/graphic':
       return { revision: graphics.revision, state: graphics.state };
 
+    case '/api/winner':
+      return { revision: winner.revision, state: winner.state };
+
     case '/api/presets':
       return { presets: presets.list(), activeId: graphics.state.presetId };
+
+    case '/api/teams':
+      return { teams: teams.list() };
+
+    case '/api/media':
+      return { media: await media.list() };
 
     case '/api/account': {
       const { gameName, tagLine } = splitRiotId(params.get('riotId'));
@@ -333,34 +428,56 @@ function sendJson(res, status, payload) {
 
 const MAX_BODY_BYTES = 256 * 1024;
 
-/** Read a JSON request body, capped - this endpoint is the only writable one. */
-function readJsonBody(req) {
+/**
+ * Read a request body into one buffer, refusing anything over `limit`.
+ *
+ * Once over the limit the rest is drained rather than kept, and the socket is
+ * left open: tearing it down here would reach the browser as a network failure
+ * instead of as the 413 that says which limit was hit and by how much. The drain
+ * has its own ceiling so a client that ignores the response cannot stream for
+ * ever into a request nobody is going to answer.
+ */
+function readBody(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let refused = false;
 
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new ProviderError(413, 'Graphic payload too large.'));
-        req.destroy();
+
+      if (refused) {
+        if (size > limit * 4) req.destroy();
         return;
       }
+
+      if (size > limit) {
+        refused = true;
+        chunks.length = 0;
+        reject(new ProviderError(413, `Payload too large - the limit is ${Math.round(limit / 1024)} KB.`));
+        return;
+      }
+
       chunks.push(chunk);
     });
 
     req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
-      if (!raw.trim()) return resolve({});
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new ProviderError(400, 'Graphic payload was not valid JSON.'));
-      }
+      if (!refused) resolve(Buffer.concat(chunks));
     });
-
-    req.on('error', reject);
+    req.on('error', (error) => {
+      if (!refused) reject(error);
+    });
   });
+}
+
+async function readJsonBody(req) {
+  const raw = (await readBody(req, MAX_BODY_BYTES)).toString('utf8');
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new ProviderError(400, 'Payload was not valid JSON.');
+  }
 }
 
 /**
@@ -402,11 +519,38 @@ async function handlePresetAction(body) {
 }
 
 /**
+ * Team library actions. Saving or deleting a team never touches a graphic: the
+ * fields were copied on the way in, so what is on air stays on air.
+ */
+async function handleTeamAction(body) {
+  const action = String(body?.action ?? '');
+
+  switch (action) {
+    case 'save': {
+      const saved = teams.save(body?.team ?? {});
+      await teams.flush();
+      return { teams: teams.list(), saved };
+    }
+
+    case 'delete': {
+      if (!teams.remove(String(body?.id ?? ''))) throw new ProviderError(404, 'No such team.');
+      await teams.flush();
+      return { teams: teams.list() };
+    }
+
+    default:
+      throw new ProviderError(400, `Unknown team action: ${action || '(none)'}`);
+  }
+}
+
+/**
  * Server-sent events, one connection per output source. OBS keeps the page
  * open for the whole broadcast, so the heartbeat exists to stop an idle proxy
  * or the OS from quietly dropping a connection that then never updates again.
+ *
+ * @param {string} name the SSE event name the page listens for
  */
-function streamGraphic(req, res) {
+function streamState(store, name, req, res) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -415,12 +559,12 @@ function streamGraphic(req, res) {
   });
 
   const send = ({ revision, state }) => {
-    res.write(`event: graphic\ndata: ${JSON.stringify({ revision, state })}\n\n`);
+    res.write(`event: ${name}\ndata: ${JSON.stringify({ revision, state })}\n\n`);
   };
 
-  send({ revision: graphics.revision, state: graphics.state });
+  send({ revision: store.revision, state: store.state });
 
-  const unsubscribe = graphics.subscribe(send);
+  const unsubscribe = store.subscribe(send);
   const heartbeat = setInterval(() => res.write(': ping\n\n'), 20_000);
 
   const stop = () => {
@@ -431,37 +575,101 @@ function streamGraphic(req, res) {
   res.on('error', stop);
 }
 
+/**
+ * Uploads are the one thing served from outside ./public, so they get their own
+ * handler rather than a second static root.
+ *
+ * The two headers are what make it safe to accept SVG at all: nosniff stops a
+ * mislabelled file being reinterpreted, and a `default-src 'none'` policy means
+ * script inside an SVG has nothing it is allowed to do even if the file is
+ * opened directly rather than drawn into an <img>.
+ */
+async function serveMedia(pathname, res, method = 'GET') {
+  const name = decodeURIComponent(pathname.slice('/media/'.length));
+  const target = media.resolve(name);
+
+  if (!target) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('404 - not found');
+  }
+
+  try {
+    const file = await readFile(target);
+    res.writeHead(200, {
+      'Content-Type': MEDIA_MIME_TYPES[path.extname(target).slice(1).toLowerCase()] ?? 'application/octet-stream',
+      'Content-Length': file.length,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      // Named after their own hash, so a given URL is always the same bytes.
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    res.end(method === 'HEAD' ? undefined : file);
+  } catch {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404 - not found');
+  }
+}
+
+/** POST bodies all answer the same way, so the error shape is written once. */
+async function handleWrite(res, work) {
+  try {
+    return sendJson(res, 200, await work());
+  } catch (error) {
+    const status = error instanceof ProviderError ? error.status : 400;
+    return sendJson(res, status, { error: { status, message: error.message } });
+  }
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? '127.0.0.1'}`);
 
-  if (url.pathname === '/api/graphic/events' && req.method === 'GET') {
-    return streamGraphic(req, res);
+  if (req.method === 'GET') {
+    if (url.pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res);
+    if (url.pathname === '/api/winner/events') return streamState(winner, 'winner', req, res);
   }
 
-  // The graphic is the one piece of mutable state, so it is the one writable
-  // route; everything else stays read-only.
-  if (url.pathname === '/api/graphic' && req.method === 'POST') {
-    try {
-      const body = await readJsonBody(req);
-      const state = body?.reset === true ? graphics.reset() : graphics.replace(body?.state ?? body);
-      return sendJson(res, 200, { revision: graphics.revision, state });
-    } catch (error) {
-      const status = error instanceof ProviderError ? error.status : 400;
-      return sendJson(res, status, { error: { status, message: error.message } });
-    }
-  }
+  // The two graphics and the two libraries are the mutable state, so these are
+  // the writable routes; everything else stays read-only.
+  if (req.method === 'POST') {
+    switch (url.pathname) {
+      case '/api/graphic':
+        return handleWrite(res, async () => {
+          const body = await readJsonBody(req);
+          const state = body?.reset === true ? graphics.reset() : graphics.replace(body?.state ?? body);
+          return { revision: graphics.revision, state };
+        });
 
-  if (url.pathname === '/api/presets' && req.method === 'POST') {
-    try {
-      return sendJson(res, 200, await handlePresetAction(await readJsonBody(req)));
-    } catch (error) {
-      const status = error instanceof ProviderError ? error.status : 400;
-      return sendJson(res, status, { error: { status, message: error.message } });
+      case '/api/winner':
+        return handleWrite(res, async () => {
+          const body = await readJsonBody(req);
+          const state = body?.reset === true ? winner.reset() : winner.replace(body?.state ?? body);
+          return { revision: winner.revision, state };
+        });
+
+      case '/api/presets':
+        return handleWrite(res, async () => handlePresetAction(await readJsonBody(req)));
+
+      case '/api/teams':
+        return handleWrite(res, async () => handleTeamAction(await readJsonBody(req)));
+
+      // Raw bytes rather than multipart: there is exactly one file per request
+      // and no other fields, so parsing a multipart envelope by hand would be
+      // work with nothing to show for it. The declared type is ignored - the
+      // store reads the format out of the bytes themselves.
+      case '/api/media':
+        return handleWrite(res, async () => media.save(await readBody(req, MEDIA_MAX_BYTES)));
+
+      default:
+        break;
     }
   }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return sendJson(res, 405, { error: { status: 405, message: 'Only GET is supported.' } });
+  }
+
+  if (url.pathname.startsWith('/media/')) {
+    return serveMedia(url.pathname, res, req.method);
   }
 
   if (!url.pathname.startsWith('/api/')) {
@@ -481,7 +689,7 @@ const server = createServer(async (req, res) => {
 // in-flight graphic save.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    void Promise.all([graphics.flush(), presets.flush()])
+    void Promise.all([graphics.flush(), winner.flush(), presets.flush(), teams.flush()])
       .catch(() => {})
       .then(() => browser?.close())
       .catch(() => {})
@@ -495,8 +703,10 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  Riotline Tool');
   console.log(line);
   console.log(`  UI              http://127.0.0.1:${PORT}`);
-  console.log(`  OBS source      http://127.0.0.1:${PORT}/output.html   (1920x1080, transparent)`);
+  console.log(`  OBS scoreboard  http://127.0.0.1:${PORT}/output.html   (1920x1080, transparent)`);
+  console.log(`  OBS winner      http://127.0.0.1:${PORT}/winner.html   (1920x1080, full screen)`);
   console.log(`  Graphic state   ${restoredGraphic ? 'restored from .state/graphic.json' : 'defaults'}`);
+  console.log(`  Winner state    ${restoredWinner ? 'restored from .state/winner.json' : 'defaults'}`);
   console.log(`  Default source  ${DEFAULT_PROVIDER}`);
   console.log(`  Riot region     ${DEFAULT_REGION} / routing ${DEFAULT_ROUTING}`);
   console.log(`  HenrikDev       ${HENRIK_API_KEY ? 'key loaded' : 'missing (HENRIK_API_KEY)'} | ${DEFAULT_AFFINITY}/${DEFAULT_PLATFORM}`);

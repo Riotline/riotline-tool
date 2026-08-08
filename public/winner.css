@@ -1,0 +1,1352 @@
+/*
+ * Winner sequence graphic.
+ *
+ * Same fixed 1920x1080 stage as the scoreboard, and for the same reason: OBS
+ * renders at an exact canvas size, so a font size chosen here is the font size
+ * that goes to air.
+ *
+ * The structure of the motion is worth reading before the rules:
+ *
+ *   The backdrop wipes. It is what makes this read as a stinger rather than as
+ *   a graphic fading up - one coloured sweep passes across the frame on the way
+ *   in and carries on off the other side on the way out.
+ *
+ *   Scenes leave, bands arrive. An outgoing scene moves as one block; the
+ *   incoming one reveals band by band on a stagger. That way a scene change is
+ *   one gesture out and a sequence of gestures in, instead of two crossfading
+ *   piles of text.
+ *
+ *   Direction lives on the stage, not on the elements. [data-transition] picks
+ *   which pair of rules applies, so no band knows or cares how it is arriving.
+ */
+
+:root {
+  --bg: #0b0f14;
+  --bg-opacity: 1;
+  --scrim: 0.55;
+  --text: #ffffff;
+  --dim-text: #93a4b5;
+  --accent: #ff4655;
+  --panel: #161d26;
+  --font: "Gabarito";
+
+  --in-ms: 760ms;
+  --out-ms: 560ms;
+  --stage-ms: 620ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --travel: 240px;
+
+  --plate-blur: 22px;
+  --plate-dim: 0.78;
+
+  --texture-opacity: 0.1;
+  --texture-scale: 260px;
+  --texture-blend: overlay;
+  --texture-size: cover;
+  --texture-repeat: no-repeat;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  /* Transparent behind the backdrop, so an operator who turns the backdrop's
+     opacity down gets the live feed rather than black. */
+  background: transparent;
+}
+
+body {
+  font-family: var(--font), "Gabarito", "Poppins", "Segoe UI", system-ui, sans-serif;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------- stage --- */
+
+#stage-wrap {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.stage {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  flex: none;
+  overflow: hidden;
+}
+
+/* Nothing goes to air until the first state arrives. Without this, a browser
+   source that has parsed the HTML but not yet run the module paints the resting
+   skeleton - a visible flash on every OBS restart. */
+.stage:not([data-ready]) {
+  visibility: hidden;
+}
+
+.stage.uppercase {
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------- backdrop --- */
+
+/*
+ * The backdrop is a row of slats that tile the frame. At rest they are
+ * indistinguishable from one filled panel; the openings that arrive in pieces
+ * move them independently.
+ *
+ * Two parked states, and the difference between them is the whole trick:
+ *
+ *   data-park="left"   loaded, about to fire. What this looks like is the
+ *                      opening style's business - clipped off one edge, slats
+ *                      thrown off the top, scaled up and transparent.
+ *   data-park="right"  swept off. Always the same clip, whatever the opening
+ *                      was, because an exit is not a reversed entrance.
+ */
+.backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  opacity: var(--bg-opacity);
+  clip-path: inset(0 0 0 0);
+  transition:
+    clip-path var(--in-ms) var(--ease),
+    opacity var(--in-ms) var(--ease),
+    transform var(--in-ms) var(--ease);
+}
+
+.slat {
+  flex: 1 1 0;
+  /* The fill lives on the slats, not the container, so they can move apart and
+     still be the backdrop. The shadow is a seam cover: flex rounding can leave
+     a hairline between neighbours, and a hairline of game feed showing through
+     a supposedly solid overlay is very visible on air. */
+  background: var(--bg);
+  box-shadow: 0 0 0 1.5px var(--bg);
+  transition: transform var(--in-ms) var(--ease);
+  transition-delay: var(--slat-delay, 0ms);
+}
+
+/* The exit. One rule, every opening. */
+.stage[data-active="false"] .backdrop {
+  clip-path: inset(0 0 0 100%);
+  transition-duration: var(--out-ms);
+}
+
+/* ---- parked: sweep and streak both wipe in from the left edge ---- */
+
+.stage[data-active="false"][data-park="left"][data-opening="sweep"] .backdrop,
+.stage[data-active="false"][data-park="left"][data-opening="streak"] .backdrop {
+  clip-path: inset(0 100% 0 0);
+}
+
+/* ---- parked: shards throw the slats clear, alternating up and down ---- */
+
+.stage[data-active="false"][data-park="left"][data-opening="shards"] .slat {
+  transform: translateY(-115%);
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="shards"] .slat:nth-child(even) {
+  transform: translateY(115%);
+}
+
+/* ---- parked: blinds are horizontal bars closing in from the sides ---- */
+
+.stage[data-opening="blinds"] .backdrop {
+  flex-direction: column;
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="blinds"] .slat {
+  transform: translateX(-105%);
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="blinds"] .slat:nth-child(even) {
+  transform: translateX(105%);
+}
+
+/* ---- parked: impact slams the whole thing in from oversize ---- */
+
+.stage[data-active="false"][data-park="left"][data-opening="impact"] .backdrop {
+  opacity: 0;
+  transform: scale(1.22);
+}
+
+/* ---- facets: angled shards sweep in and lock together ---- */
+
+/*
+ * The one opening that does not use the slats. A grid of skewed quads cascades
+ * in along the diagonal and closes up into a solid frame - the shape language
+ * VALORANT's own end-of-match card uses.
+ *
+ * Each tile is wider and taller than its cell and the grid overscans the frame,
+ * so the skew cannot open a wedge of game feed at the edges and neighbours have
+ * something to overlap into as they land.
+ */
+.facets {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  opacity: var(--bg-opacity);
+  clip-path: inset(0 0 0 0);
+  transition: clip-path var(--out-ms) var(--ease);
+  /* Inert unless its own opening is playing - it is never the resting backdrop,
+     which is what the slats are for. */
+  visibility: hidden;
+}
+
+.stage[data-opening="facets"] .facets {
+  visibility: visible;
+}
+
+/*
+ * For this opening the facets *are* the fill, so the slats stay out of the way
+ * entirely. Fading them in behind would flood the frame solid long before the
+ * cascade finished and there would be nothing left to watch.
+ */
+.stage[data-opening="facets"] .slat {
+  opacity: 0;
+}
+
+/* The exit is a sweep like every other opening's - a stinger that dismantled
+   itself shard by shard on the way out would be twice the length and half the
+   impact. Only on the way out: the parked-left state is the cascade's, and a
+   clip there would hide the pieces it is made of. */
+.stage[data-active="false"][data-park="right"] .facets {
+  clip-path: inset(0 0 0 100%);
+}
+
+.facet {
+  position: absolute;
+  background: var(--bg);
+  transform: skewX(var(--facet-skew)) translate3d(0, 0, 0);
+  transition:
+    transform var(--in-ms) var(--ease),
+    opacity var(--in-ms) var(--ease);
+  transition-delay: var(--facet-delay, 0ms);
+}
+
+/* Parked: thrown out along the skew and scaled down, so they read as pieces
+   arriving rather than as a grid fading up. */
+.stage[data-active="false"][data-park="left"][data-opening="facets"] .facet {
+  opacity: 0;
+  transform: skewX(var(--facet-skew)) translate3d(var(--facet-from), -18%, 0) scale(0.72);
+}
+
+/* ---- prism: an outlined lattice that lights up and tiles the frame ---- */
+
+/*
+ * The same job as the facets, drawn the way VALORANT draws it: diamonds, each
+ * one outlined and glowing in the accent colour, spinning up out of nothing in
+ * rings from the middle of the frame.
+ *
+ * Symmetry is the point. A diagonal cascade reads as a wipe with texture; rings
+ * expanding from the centre read as the frame being assembled, and they finish
+ * everywhere at once instead of trailing off in one corner.
+ *
+ * Two layers per tile, and the split is what makes it work:
+ *
+ *   .prism-tile      the fill. Solid backdrop colour, so once the rings land
+ *                    this really is the backdrop rather than a pattern on one.
+ *   .prism-tile::before  the outline and its glow, which fades back after the
+ *                    tile arrives. Bright while it is flying, near-invisible
+ *                    once there is text to read on top of it.
+ */
+.prism {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  opacity: var(--bg-opacity);
+  clip-path: inset(0 0 0 0);
+  transition: clip-path var(--out-ms) var(--ease);
+  visibility: hidden;
+}
+
+.stage[data-opening="prism"] .prism {
+  visibility: visible;
+}
+
+/* The lattice is the fill for this opening, so the slats stay out of its way -
+   fading a solid panel in behind would flood the frame long before the rings
+   finished and leave nothing to watch. Same bargain the facets make. */
+.stage[data-opening="prism"] .slat {
+  opacity: 0;
+}
+
+/* Off the same way every opening goes off: one sweep. Dismantling the lattice
+   ring by ring would double the length of the exit and halve its point. */
+.stage[data-active="false"][data-park="right"] .prism {
+  clip-path: inset(0 0 0 100%);
+}
+
+.prism-tile {
+  position: absolute;
+  background: var(--bg);
+  /* A hair over its cell, plus a spread the colour of the backdrop: rotated
+     boxes land on subpixel boundaries, and a hairline of game feed through a
+     supposedly solid overlay is very visible on air. */
+  box-shadow: 0 0 0 1px var(--bg);
+  transform: rotate(45deg) scale(1.012);
+  transition:
+    transform var(--in-ms) var(--ease),
+    opacity var(--in-ms) var(--ease);
+  transition-delay: var(--prism-delay, 0ms);
+}
+
+.prism-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 3px solid var(--accent);
+  box-shadow:
+    0 0 26px var(--accent),
+    inset 0 0 22px var(--accent);
+  /* Where the mesh settles to. Held back until this tile has landed, so the
+     outline is at full strength for the flight and out of the way by the time
+     the first band of text arrives. */
+  opacity: 0.14;
+  transition: opacity var(--stage-ms) var(--ease);
+  transition-delay: calc(var(--prism-delay, 0ms) + var(--in-ms));
+}
+
+/* Parked: nothing at all, turned a little off true. Growing *and* rotating is
+   what makes a diamond read as a shard rather than as a square fading up - but
+   only a little, and that is the whole judgement in this rule. A quarter turn
+   carries every tile through axis-aligned on its way in, so for most of the
+   flight the screen is full of squares and the diamond only appears at the end.
+   Twenty-five degrees keeps the shape legible the whole way. */
+.stage[data-active="false"][data-park="left"][data-opening="prism"] .prism-tile {
+  opacity: 0;
+  transform: rotate(70deg) scale(0.12);
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="prism"] .prism-tile::before {
+  opacity: 0.95;
+  transition-delay: 0ms;
+}
+
+/* ---- pulse: rings of neon, with the backdrop opening behind them ---- */
+
+/*
+ * The one opening that is radial, and the only one whose backdrop is not a
+ * rectangle on the way in.
+ *
+ * clip-path does not interpolate between shape functions - inset() to circle()
+ * is a jump, not a transition - so this opening has to be a circle at both ends
+ * of every move it makes, which is why it carries its own exit as well as its
+ * own entrance. That makes it the one place the exit really is the entrance
+ * reversed, and the reason is the shape function rather than the design.
+ */
+.stage[data-opening="pulse"] .backdrop {
+  clip-path: circle(100% at 50% 50%);
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="pulse"] .backdrop,
+.stage[data-active="false"][data-park="right"][data-opening="pulse"] .backdrop {
+  clip-path: circle(0% at 50% 50%);
+}
+
+.pulse {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Large enough that the last ring is off the frame before it fades, so the
+   pulse leaves through the edges rather than stopping in mid-air. */
+/*
+ * One stroke and one glow, and no inset. Everything here is scaled by the
+ * animation, the shadows along with it - so a 70px inner glow is a 130px wash
+ * by the time the ring crosses the frame, and three of those overlapping read
+ * as muddy bands rather than as light. A thin line with a tight halo stays a
+ * line at every size the ring passes through.
+ */
+.pulse-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1500px;
+  height: 1500px;
+  margin: -750px 0 0 -750px;
+  border-radius: 50%;
+  border: 4px solid var(--accent);
+  box-shadow: 0 0 30px var(--accent);
+  opacity: 0;
+}
+
+.stage.is-opening[data-opening="pulse"] .pulse-ring {
+  animation: pulse-ring var(--in-ms) cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+  animation-delay: var(--pulse-delay, 0ms);
+}
+
+@keyframes pulse-ring {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.04);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
+/* ------------------------------------------------------ opening furniture --- */
+
+/*
+ * Both of these are driven by CSS animations rather than transitions, because
+ * they are one-shot flourishes with no resting state to sit in - and because
+ * re-adding the class is what replays them.
+ */
+.opening-flash,
+.opening-streak {
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 4;
+}
+
+.opening-flash {
+  inset: 0;
+  background: radial-gradient(circle at 50% 50%, var(--accent) 0%, transparent 58%);
+}
+
+.stage.is-opening[data-opening="impact"] .opening-flash {
+  animation: opening-flash var(--in-ms) cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes opening-flash {
+  0% {
+    opacity: 0.85;
+    transform: scale(0.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+/* A bolt of accent that crosses the frame ahead of the backdrop, so the wipe
+   reads as something arriving at speed rather than a panel growing. */
+.opening-streak {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 26%;
+  background: linear-gradient(90deg, transparent 0%, var(--accent) 55%, #fff 100%);
+}
+
+.stage.is-opening[data-opening="streak"] .opening-streak {
+  animation: opening-streak var(--in-ms) cubic-bezier(0.5, 0, 0.2, 1) forwards;
+}
+
+@keyframes opening-streak {
+  0% {
+    opacity: 1;
+    transform: translateX(-110%) skewX(-14deg);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(430%) skewX(-14deg);
+  }
+}
+
+/* Impact also kicks the content, which is what sells it as a hit. The scenes
+   carry it rather than the stage, because the stage owns the fit-to-window
+   scale and a second transform there would fight it. */
+.stage.is-opening[data-opening="impact"] .scene-body {
+  animation: opening-kick var(--in-ms) cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes opening-kick {
+  0% {
+    transform: scale(1.06);
+  }
+  60% {
+    transform: scale(0.995);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* --------------------------------------------------------------- scenes --- */
+
+.scene {
+  position: absolute;
+  inset: 0;
+  /* Above the map plate, below the opening's flourishes and the event mark. */
+  z-index: 2;
+  /* Hidden rather than merely transparent: a scene left painted underneath
+     would still catch the eye through a semi-opaque backdrop. */
+  visibility: hidden;
+  opacity: 0;
+}
+
+.scene.is-live {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* Still painted, on its way out. The transform and opacity come from the
+   per-transition rules below. */
+.scene.is-leaving {
+  visibility: visible;
+  opacity: 1;
+  transition:
+    opacity var(--stage-ms) var(--ease),
+    transform var(--stage-ms) var(--ease),
+    clip-path var(--stage-ms) var(--ease);
+}
+
+.scene.is-leaving.is-gone {
+  opacity: 0;
+}
+
+/* The whole overlay coming off takes the live scene with it. */
+.stage[data-active="false"] .scene {
+  opacity: 0;
+  transition: opacity var(--out-ms) var(--ease);
+}
+
+.scene-body {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 150px;
+}
+
+/* --------------------------------------------------------------- bands --- */
+
+/*
+ * A band is the unit of the reveal. Every one carries the same transition; what
+ * differs is the hidden state, which the [data-transition] rules set.
+ */
+[data-band] {
+  transition:
+    opacity var(--stage-ms) var(--ease),
+    transform var(--stage-ms) var(--ease),
+    clip-path var(--stage-ms) var(--ease);
+  transition-delay: var(--band-delay, 0ms);
+}
+
+/* Bands of a scene that is not live sit in their hidden state with no delay, so
+   a scene that is cued again starts from rest rather than mid-flight. */
+.scene:not(.is-live):not(.is-leaving) [data-band] {
+  transition-delay: 0ms;
+}
+
+/* Jump to a state without playing it - used to rewind before a replay.
+   The plate has to be in here too: left out, a rewind lets it transition
+   towards hidden and then straight back, so it never actually leaves and the
+   next opening plays on top of a splash that is already up. */
+.stage.anim-off .backdrop,
+.stage.anim-off .slat,
+.stage.anim-off .facets,
+.stage.anim-off .facet,
+.stage.anim-off .prism,
+.stage.anim-off .prism-tile,
+.stage.anim-off .prism-tile::before,
+.stage.anim-off .event-logo,
+.stage.anim-off .texture,
+.stage.anim-off .plate,
+.stage.anim-off .plate-layer,
+.stage.anim-off .plate-scrim,
+.stage.anim-off .scene,
+.stage.anim-off [data-band] {
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+
+/* ------------------------------------------------- transition: push ------ */
+
+/* The glint shares these: the bar is the event, and the bands arriving behind it
+   want to be the plainest move there is. Anything more elaborate underneath and
+   the two are competing rather than one covering the other. */
+.stage[data-transition="push"] .scene:not(.is-live):not(.is-leaving) [data-band],
+.stage[data-transition="glint"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+  opacity: 0;
+  transform: translate3d(var(--travel), 0, 0);
+}
+.stage[data-transition="push"] .scene.is-leaving.is-gone,
+.stage[data-transition="glint"] .scene.is-leaving.is-gone {
+  transform: translate3d(calc(var(--travel) * -1), 0, 0);
+}
+
+/* ------------------------------------------------- transition: fade ------ */
+
+.stage[data-transition="fade"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+  opacity: 0;
+}
+
+/* ------------------------------------------------- transition: wipe ------ */
+
+/* The one transition that does not fade: a wipe that also dissolves reads as
+   mush, so it reveals purely by clipping. */
+.stage[data-transition="wipe"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+  clip-path: inset(0 100% 0 0);
+}
+.stage[data-transition="wipe"] .scene.is-leaving.is-gone {
+  clip-path: inset(0 0 0 100%);
+  opacity: 1;
+}
+
+/* ------------------------------------------------- transition: zoom ------ */
+
+.stage[data-transition="zoom"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+  opacity: 0;
+  transform: scale(0.88);
+}
+.stage[data-transition="zoom"] .scene.is-leaving.is-gone {
+  transform: scale(1.12);
+}
+
+/* ------------------------------------------------- transition: rise ------ */
+
+/* Vertical rather than sideways, which changes what the stagger reads as: bands
+   pushing across look like a list being dealt, bands rising look like one thing
+   assembling itself. Half the travel, because a vertical move of the same
+   distance crosses far more of a 1080-tall frame than of a 1920-wide one. */
+.stage[data-transition="rise"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+  opacity: 0;
+  transform: translate3d(0, calc(var(--travel) * 0.5), 0);
+}
+.stage[data-transition="rise"] .scene.is-leaving.is-gone {
+  transform: translate3d(0, calc(var(--travel) * -0.35), 0);
+}
+
+/* ------------------------------------------------ transition: shear ------ */
+
+/* A push with a lean on it. The skew unwinds as the band lands, so each one
+   arrives like something thrown rather than slid - the most aggressive of the
+   scene changes, and the one that sits best under the prism opening. */
+.stage[data-transition="shear"] .scene:not(.is-live):not(.is-leaving) [data-band] {
+  opacity: 0;
+  transform: translate3d(var(--travel), 0, 0) skewX(-16deg);
+}
+.stage[data-transition="shear"] .scene.is-leaving.is-gone {
+  transform: translate3d(calc(var(--travel) * -1), 0, 0) skewX(-16deg);
+}
+
+/* ----------------------------------------------------------- event logo --- */
+
+/* Held to the overlay's own life. It is an ident for the sequence, not for the
+   channel - left ungated it hangs over the game feed between cues, which is the
+   one thing a graphic that "appears when the map ends" must not do. Timed with
+   the map plate so the backdrop arrives first and the mark lands on it. */
+.event-logo {
+  position: absolute;
+  top: 64px;
+  right: 84px;
+  width: 190px;
+  height: 96px;
+  z-index: 5;
+  transition: opacity var(--in-ms) var(--ease);
+  transition-delay: var(--plate-delay, 0ms);
+}
+
+.stage[data-active="false"] .event-logo {
+  opacity: 0;
+  transition-duration: var(--out-ms);
+  transition-delay: 0ms;
+}
+
+.event-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: right center;
+}
+
+/* ------------------------------------------------------------- map plate --- */
+
+/*
+ * The map splash, behind the entire sequence rather than inside the first scene.
+ *
+ * Sharp under the map card, then soft and dark under the score line and the
+ * winner - so the map you just played stays present without ever competing with
+ * the text laid over it.
+ *
+ * The blur is a crossfade between a sharp copy and a permanently-blurred one.
+ * Animating filter: blur() across a full 1080p frame is one of the most
+ * expensive things a compositor can be asked to do, and this looks the same.
+ */
+/* Held back until the opening has mostly landed, so the backdrop arrives first
+   and the splash appears on it - rather than the opening playing on top of a
+   picture that was already there, which reads as two unrelated animations. */
+.plate {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  transition: opacity var(--in-ms) var(--ease);
+  transition-delay: var(--plate-delay, 0ms);
+}
+
+/* Nothing waits on the way out. */
+.stage[data-active="false"] .plate {
+  opacity: 0;
+  transition-duration: var(--out-ms);
+  transition-delay: 0ms;
+}
+
+.plate-layer {
+  position: absolute;
+  inset: 0;
+  transition: opacity var(--stage-ms) var(--ease);
+}
+
+.plate-layer img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Nudged past the frame so the drift below has somewhere to go. */
+  transform: scale(1.06);
+}
+
+/* The drift is hung off the overlay being on air rather than declared on the
+   image, which is what restarts it every time the sequence is cued - an
+   animation on the element itself would have run itself out during the first
+   browser-source load and never move again. Slow enough to read as a live
+   plate, not as an animation. */
+.stage[data-active="true"] .plate-layer img {
+  animation: splash-drift 18s ease-out forwards;
+}
+
+@keyframes splash-drift {
+  to {
+    transform: scale(1.16);
+  }
+}
+
+/* Scaled up because a blur samples past its own edges and would otherwise show
+   a soft vignette where the image runs out. */
+.plate-soft {
+  opacity: 0;
+  filter: blur(var(--plate-blur)) saturate(0.85);
+}
+
+.plate-soft img {
+  transform: scale(1.14);
+}
+
+.stage[data-active="true"] .plate-soft img {
+  animation-name: splash-drift-soft;
+}
+
+@keyframes splash-drift-soft {
+  to {
+    transform: scale(1.24);
+  }
+}
+
+/* Weighted to the left, where the map card's text is, so the right of the plate
+   stays readable as artwork instead of being flattened by an even wash. */
+.plate-scrim {
+  position: absolute;
+  inset: 0;
+  transition: opacity var(--stage-ms) var(--ease);
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, var(--scrim)) 0%, rgba(0, 0, 0, var(--scrim)) 42%, transparent 88%),
+    linear-gradient(0deg, rgba(0, 0, 0, calc(var(--scrim) * 0.8)) 0%, transparent 55%);
+}
+
+/* Past the map card the plate is background, so it swaps the directional scrim
+   for a flat wash and brings the blurred copy up. */
+.stage:not([data-stage="map"]) .plate-sharp,
+.stage:not([data-stage="map"]) .plate-scrim {
+  opacity: 0;
+}
+
+.stage:not([data-stage="map"]) .plate-soft {
+  opacity: 1;
+}
+
+.plate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: 0;
+  transition: opacity var(--stage-ms) var(--ease);
+}
+
+.stage:not([data-stage="map"]) .plate::after {
+  opacity: var(--plate-dim);
+}
+
+/* Turned off, the plate simply is not there past the first scene. */
+.stage.plate-off:not([data-stage="map"]) .plate {
+  opacity: 0;
+  transition-duration: var(--stage-ms);
+}
+
+/* ----------------------------------------------------------- texture --- */
+
+/*
+ * The backdrop's finish. Above the plate, below every scene.
+ *
+ * It is on for the whole sequence rather than switching in behind the score
+ * line, and that is the design: a texture that arrives partway through is a
+ * second animation nobody asked for, where one that is simply there is a finish.
+ *
+ * mix-blend-mode is what makes it read as light on the picture rather than as a
+ * decal over it. It blends within the stage, which is a stacking context of its
+ * own thanks to the fit-to-window transform - so an operator running the
+ * backdrop semi-transparent gets a texture over the backdrop, never one blended
+ * into the game feed underneath.
+ */
+.texture {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  mix-blend-mode: var(--texture-blend);
+  transition: opacity var(--in-ms) var(--ease);
+  transition-delay: var(--plate-delay, 0ms);
+}
+
+.stage[data-active="true"] .texture {
+  opacity: var(--texture-opacity);
+}
+
+.stage[data-active="false"] .texture {
+  transition-duration: var(--out-ms);
+  transition-delay: 0ms;
+}
+
+.stage[data-texture="none"] .texture {
+  display: none;
+}
+
+/* Oversized so the drift below never pulls an edge into frame. */
+.texture-drift,
+.texture-layer {
+  position: absolute;
+  inset: -8%;
+}
+
+/* Slow enough to be felt rather than seen. Hung off the overlay being on air
+   for the same reason the splash drift is: declared on the element it would run
+   itself out during the first browser-source load and never move again. */
+.stage[data-active="true"] .texture-drift {
+  animation: texture-drift 30s linear forwards;
+}
+
+@keyframes texture-drift {
+  to {
+    transform: translate3d(-3%, -2.2%, 0) scale(1.04);
+  }
+}
+
+/* The lattice: the prism opening's geometry, standing still. Two crossed sets of
+   repeating lines make the same diamond grid the shards land in, so the backdrop
+   under the score line is visibly the thing the opening built. */
+.stage[data-texture="lattice"] .texture-layer {
+  background-image:
+    repeating-linear-gradient(
+      45deg,
+      transparent 0 calc(var(--texture-scale) - 2px),
+      var(--accent) calc(var(--texture-scale) - 2px) var(--texture-scale)
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0 calc(var(--texture-scale) - 2px),
+      var(--accent) calc(var(--texture-scale) - 2px) var(--texture-scale)
+    );
+}
+
+/* An uploaded texture is a picture, not a light source, so it does its own
+   glowing or it does none. */
+.stage[data-texture="image"] .texture-glow {
+  display: none;
+}
+
+.stage[data-texture="image"] .texture-lines {
+  background-size: var(--texture-size);
+  background-repeat: var(--texture-repeat);
+  background-position: center;
+}
+
+/* The glow is a blurred copy rather than a shadow, because a gradient cannot
+   cast one. Static, so it is rasterised once and then only ever transformed. */
+.texture-glow {
+  filter: blur(10px);
+  opacity: 0.8;
+}
+
+/* ------------------------------------------------------------- glint --- */
+
+/*
+ * A bar of accent that crosses the frame as one scene hands over to the next,
+ * with the bands arriving behind it.
+ *
+ * An animation rather than a transition, for the same reason the opening
+ * flourishes are: it is a one-shot with no resting state, and re-adding the
+ * class is what replays it.
+ */
+.glint {
+  position: absolute;
+  top: -10%;
+  bottom: -10%;
+  left: 0;
+  width: 16%;
+  z-index: 3;
+  opacity: 0;
+  pointer-events: none;
+  filter: blur(2px);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 42%,
+    #ffffff 52%,
+    var(--accent) 62%,
+    transparent 100%
+  );
+}
+
+.stage.is-glint[data-transition="glint"] .glint {
+  animation: glint-sweep var(--stage-ms) cubic-bezier(0.45, 0, 0.2, 1) forwards;
+}
+
+@keyframes glint-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-130%) skewX(-12deg);
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(560%) skewX(-12deg);
+  }
+}
+
+/* ------------------------------------------------------------ scene: map --- */
+
+.scene-map .scene-body {
+  justify-content: flex-end;
+  padding-bottom: 190px;
+}
+
+.kicker {
+  margin: 0 0 18px;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  color: var(--accent);
+}
+
+.map-name {
+  margin: 0;
+  font-size: 210px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  line-height: 0.9;
+  transform-origin: left center;
+  white-space: nowrap;
+}
+
+.map-headline {
+  margin: 34px 0 0;
+  font-size: 46px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  color: var(--dim-text);
+}
+
+/* The rule under the headline is drawn rather than bordered so it can grow with
+   the band instead of appearing at full width the instant the text does. */
+.map-headline::before {
+  content: "";
+  display: block;
+  width: 220px;
+  height: 6px;
+  margin-bottom: 30px;
+  background: var(--accent);
+}
+
+/* ---------------------------------------------------------- scene: score --- */
+
+.scene-score .scene-body {
+  justify-content: center;
+  align-items: center;
+}
+
+.score-headline {
+  margin: 0 0 70px;
+  font-size: 42px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  color: var(--dim-text);
+}
+
+.score-teams {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 60px;
+  width: 100%;
+}
+
+.score-team {
+  display: flex;
+  align-items: center;
+  gap: 34px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.score-team-right {
+  flex-direction: row;
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.score-logo {
+  width: 160px;
+  height: 160px;
+  flex: none;
+}
+
+.score-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/*
+ * Fitted headings all scale from their left edge, whichever way they are
+ * aligned, and that is not an oversight.
+ *
+ * text-align only distributes *leftover* space. A line with none - which is
+ * exactly the case worth fitting - starts at the left edge and overflows right
+ * no matter what the alignment says. So the left edge is the one that reliably
+ * coincides with the box, and scaling about it lands the far end precisely on
+ * the far edge of the box. Anchoring right instead anchors to a point outside
+ * the box, which is what used to push a long team name under the crest.
+ */
+.score-name,
+.map-name,
+.winner-name {
+  transform-origin: left center;
+}
+
+/*
+ * Fitted headings size themselves to their own text.
+ *
+ * As blocks they filled the box and let the glyphs spill outside it, and a
+ * transform-origin resolves against the element box - so "scale about the right
+ * edge" anchored somewhere the text did not actually end, and the squeeze
+ * landed in the wrong place. As inline-blocks the box *is* the glyphs, so the
+ * measurement and the anchor describe the same thing.
+ */
+.score-name,
+.map-name,
+.winner-name {
+  display: inline-block;
+}
+
+/*
+ * The name box has to be sized by the layout, not by the name.
+ *
+ * With `flex: 0 1 auto` it takes its basis from its own content, and a long
+ * enough team name simply wins - it pushes the box out under the crest, and
+ * fitText, which measures the box, then thinks everything fits. Pinning the
+ * basis to 0 makes the remaining space authoritative and the text the thing
+ * that has to give.
+ *
+ * The clip is the backstop. Squeezing has a floor and the tricode fallback has
+ * a threshold, so there is always some name long enough to reach the edge -
+ * and a name running underneath the crest on air is worse than one that stops.
+ */
+.score-id {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.score-name {
+  font-size: 76px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  transform-origin: left center;
+}
+
+
+.score-region {
+  margin-top: 14px;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  color: var(--dim-text);
+}
+
+.score-region:empty {
+  display: none;
+}
+
+.score-line {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  flex: none;
+  font-size: 150px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.score-dash {
+  color: var(--dim-text);
+  font-weight: 400;
+}
+
+/* The leading side's number carries the accent, so the result is legible in the
+   half-second the scene is on screen without reading both digits. */
+.score-num.is-ahead {
+  color: var(--accent);
+}
+
+.score-maps {
+  margin-top: 76px;
+  width: 100%;
+  max-width: 1040px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.score-map {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 20px 40px;
+  background: var(--panel);
+  border-left: 6px solid var(--accent);
+}
+
+.score-map[hidden] {
+  display: none;
+}
+
+.score-map-name {
+  flex: 1 1 auto;
+  font-size: 38px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-map-score {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 40px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim-text);
+}
+
+/* Fixed width so 9 and 13 sit in the same column down the list - a ragged
+   right edge on three rows of scores looks like a mistake. */
+.score-map-num {
+  min-width: 2ch;
+  text-align: center;
+}
+
+.score-map-dash {
+  width: 16px;
+  height: 3px;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.score-map-score .is-ahead {
+  color: var(--text);
+}
+
+/*
+ * A map on the list that has not been played.
+ *
+ * Faded rather than removed, because it is doing a job: a Bo5 sitting at 2-1
+ * with two rows still to come tells you where the series is far better than
+ * three rows on their own do.
+ *
+ * The whole row dims, including the accent bar down the left - a full-strength
+ * accent stripe next to greyed-out text looks like a rendering fault rather than
+ * a state.
+ */
+.score-map.is-upcoming {
+  opacity: var(--upcoming-dim, 0.42);
+  border-left-color: var(--dim-text);
+}
+
+/* 0 - 0 is not a result, so the note takes the column instead of sitting next to
+   a pair of zeroes that mean nothing. */
+.score-map.is-upcoming .score-map-score {
+  display: none;
+}
+
+.score-map-note {
+  flex: none;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  /* The tracking above hangs a gap off the last letter; this pulls the block
+     back so it lines up with the numbers on the played rows above it. */
+  margin-right: -0.24em;
+  color: var(--dim-text);
+}
+
+/* Only ever on an unplayed row - the played ones have their score there. */
+.score-map:not(.is-upcoming) .score-map-note {
+  display: none;
+}
+
+/* No wording configured is a real choice, not an empty element: the row is faded
+   and that is the whole message. A dash keeps the right edge of the list from
+   going ragged where a score used to be. */
+.score-map.is-upcoming .score-map-note:empty::before {
+  content: "–";
+  letter-spacing: normal;
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------- scene: winner --- */
+
+.scene-winner .scene-body {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+/* A pool of accent behind the crest. Radial rather than a solid shape so it
+   reads as light on the backdrop instead of as a second panel.
+   The wash is done with opacity rather than color-mix() because OBS ships an
+   embedded Chromium that is often several versions behind the desktop one. */
+.winner-glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1500px;
+  height: 1500px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, var(--accent) 0%, transparent 62%);
+  opacity: 0.34;
+  pointer-events: none;
+}
+
+.winner-kicker {
+  margin: 0 0 40px;
+  padding: 14px 46px;
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 0.42em;
+  /* Optical centring: the tracking above adds a trailing gap the eye reads as
+     the block sitting left of centre. */
+  text-indent: 0.42em;
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.winner-logo {
+  width: 300px;
+  height: 300px;
+  margin-bottom: 44px;
+}
+
+.winner-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.winner-name {
+  margin: 0;
+  font-size: 190px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  line-height: 0.92;
+  white-space: nowrap;
+}
+
+.winner-sub {
+  margin: 40px 0 0;
+  font-size: 44px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: var(--dim-text);
+}
+
+.winner-sub:empty {
+  display: none;
+}
+
+/* --------------------------------------------------------- event mark --- */
+
+/*
+ * The in-scene event logo. Sits above the headline as a band of its own, so it
+ * arrives on the scene's stagger rather than simply being present - which is
+ * the whole point of placing it here instead of in the corner.
+ *
+ * Alignment follows the scene it is in: the map card is left-aligned, the score
+ * line and the winner card are centred.
+ *
+ * Bigger on the two result scenes, where it is billing rather than a note in the
+ * corner - the mark belongs to the moment the trophy is handed over. Not so big
+ * that it competes with the team name underneath it: the winner scene has one
+ * headline and it is not the event's.
+ */
+.event-mark {
+  height: 84px;
+  margin-bottom: 34px;
+}
+
+.event-mark img {
+  height: 100%;
+  max-width: 460px;
+  object-fit: contain;
+  object-position: left center;
+}
+
+.scene-score .event-mark img,
+.scene-winner .event-mark img {
+  object-position: center;
+  width: 100%;
+  max-width: 620px;
+}
+
+.scene-score .event-mark,
+.scene-winner .event-mark {
+  height: 118px;
+}
+
+.scene-winner .event-mark {
+  margin-bottom: 30px;
+}

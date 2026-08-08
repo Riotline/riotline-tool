@@ -14,6 +14,7 @@
 import { onLookupMatch } from './store.js';
 import { STATS, STAT_FIELDS, STAT_SLOTS, statDef } from './stats.js';
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
+import { el, field, grid, makeFields, subhead, title } from './fields.js';
 import {
   FONT_CHOICES,
   PRESET_FIELDS,
@@ -35,7 +36,7 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   tabs: [...document.querySelectorAll('.tab')],
-  panels: { lookup: $('tab-lookup'), graphic: $('tab-graphic') },
+  panels: { lookup: $('tab-lookup'), graphic: $('tab-graphic'), winner: $('tab-winner') },
   importBtn: $('g-import'),
   importHint: $('g-import-hint'),
   swapBtn: $('g-swap'),
@@ -69,34 +70,16 @@ function showTab(name) {
   for (const [key, panel] of Object.entries(els.panels)) panel.hidden = key !== name;
   // The topbar's routing selects belong to the lookup flow only. A body class
   // rather than [hidden] so app.js's own show/hide logic is not fought over.
-  document.body.classList.toggle('tab-graphic', name === 'graphic');
+  document.body.classList.toggle('tab-graphic', name !== 'lookup');
   if (name === 'graphic') fitPreview();
+  // The winner dashboard is a separate module with its own preview to scale, and
+  // an iframe measured while its panel is hidden measures zero.
+  window.dispatchEvent(new CustomEvent('app-tab', { detail: name }));
 }
 
 for (const tab of els.tabs) tab.addEventListener('click', () => showTab(tab.dataset.tab));
 
 // -------------------------------------------------------------- helpers ---
-
-function el(tag, className, attrs = {}, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === false || value === null || value === undefined) continue;
-    node.setAttribute(key, value === true ? '' : value);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-const readPath = (source, path) =>
-  path.split('.').reduce((value, part) => (value === null || value === undefined ? value : value[part]), source);
-
-function writePath(target, path, value) {
-  const parts = path.split('.');
-  const last = parts.pop();
-  const host = parts.reduce((value, part) => value[part], target);
-  host[last] = value;
-}
 
 const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { detail: message }));
 
@@ -104,6 +87,7 @@ const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { d
 
 let state = null;
 let catalogue = { agents: [], maps: [] };
+let teamLibrary = [];
 let saveTimer = null;
 let saveGeneration = 0;
 
@@ -153,146 +137,20 @@ async function save() {
 
 // -------------------------------------------------------- field builders ---
 
-function field(label, input) {
-  const wrap = el('label', 'g-field');
-  wrap.append(el('span', null, {}, label), input);
-  return wrap;
-}
-
-/** Text/URL input bound to a dotted path in the state. */
-function textField(label, path, { placeholder = '', maxlength = 120 } = {}) {
-  const input = el('input', null, { type: 'text', spellcheck: 'false', placeholder, maxlength });
-  input.value = readPath(state, path) ?? '';
-  input.addEventListener('input', () => {
-    writePath(state, path, input.value);
-    queueSave();
-  });
-  return field(label, input);
-}
-
-/**
- * A text field holding an image URL.
- *
- * Two things it does that a plain text field must not. The length cap matches
- * what the server actually stores - 120 characters silently truncates a CDN
- * link, which then parses as a perfectly valid URL pointing nowhere, so the
- * logo never appears and the field looks like it refused to save.
- *
- * And it says so when the value cannot survive sanitising. Anything that is not
- * http(s) or a path starting with / is discarded server-side, which without a
- * mark here is indistinguishable from the save failing.
- */
-const URL_MAX = 500;
-const USABLE_URL = /^(?:https?:\/\/\S+|\/[\w./-]*)$/i;
-
-function urlField(label, path, { placeholder = '' } = {}) {
-  const wrap = textField(label, path, { placeholder, maxlength: URL_MAX });
-  const input = wrap.querySelector('input');
-
-  const mark = () => {
-    const value = input.value.trim();
-    const usable = !value || USABLE_URL.test(value);
-    input.classList.toggle('invalid', !usable);
-    input.title = usable
-      ? ''
-      : 'Must start with https://, http:// or / - anything else is discarded when the graphic saves.';
-  };
-
-  input.addEventListener('input', mark);
-  mark();
-  return wrap;
-}
-
-function numberField(label, path, { min = 0, max = 999 } = {}) {
-  const input = el('input', null, { type: 'number', min, max, step: '1' });
-  input.value = String(readPath(state, path) ?? 0);
-  input.addEventListener('input', () => {
-    // A cleared box means zero, not "keep the old number" - otherwise the
-    // graphic silently keeps a stale score while the field looks empty.
-    const parsed = Number.parseInt(input.value, 10);
-    writePath(state, path, Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : 0);
-    queueSave();
-  });
-  return field(label, input);
-}
-
-/**
- * A select over {key, label} options. Unlike selectField there is no blank
- * entry: these fields always hold one of the listed values.
- */
-function choiceField(label, path, options) {
-  const select = el('select');
-  for (const option of options) select.append(el('option', null, { value: option.key }, option.label));
-  select.value = String(readPath(state, path) ?? '');
-
-  select.addEventListener('change', () => {
-    writePath(state, path, select.value);
-    queueSave();
-  });
-  return field(label, select);
-}
-
-function selectField(label, path, options, { allowUnknown = true } = {}) {
-  const select = el('select');
-  const current = String(readPath(state, path) ?? '');
-  const values = options.includes(current) || !current || !allowUnknown ? options : [current, ...options];
-
-  select.append(el('option', null, { value: '' }, '- none -'));
-  for (const value of values) select.append(el('option', null, { value }, value));
-  select.value = current;
-
-  select.addEventListener('change', () => {
-    writePath(state, path, select.value);
-    queueSave();
-  });
-  return field(label, select);
-}
-
-function colourField(label, path) {
-  const input = el('input', null, { type: 'color' });
-  input.value = readPath(state, path) || '#000000';
-  input.addEventListener('input', () => {
-    writePath(state, path, input.value);
-    queueSave();
-  });
-  return field(label, input);
-}
-
-function checkField(label, path) {
-  const input = el('input', null, { type: 'checkbox' });
-  input.checked = Boolean(readPath(state, path));
-  input.addEventListener('change', () => {
-    writePath(state, path, input.checked);
-    queueSave();
-  });
-  const wrap = el('label', 'checkline');
-  wrap.append(input, el('span', null, {}, label));
-  return wrap;
-}
-
-function rangeField(label, path, { min = 0, max = 1, step = 0.05 } = {}) {
-  const input = el('input', null, { type: 'range', min, max, step });
-  input.value = String(readPath(state, path) ?? 0);
-  input.addEventListener('input', () => {
-    writePath(state, path, Number.parseFloat(input.value));
-    queueSave();
-  });
-  return field(label, input);
-}
-
-const grid = (columns, children) => {
-  const node = el('div', `field-grid${columns ? ` cols-${columns}` : ''}`);
-  node.append(...children);
-  return node;
-};
-
-const title = (text, extra) => {
-  const node = el('h2', 'panel-title', {}, text);
-  if (extra) node.append(extra);
-  return node;
-};
-
-const subhead = (text) => el('div', 'subhead', {}, text);
+// Shared with the winner dashboard. The state is passed as a getter because it
+// is replaced wholesale after every save - a captured reference would leave
+// controls writing into a discarded copy.
+const {
+  textField,
+  urlField,
+  numberField,
+  choiceField,
+  selectField,
+  colourField,
+  checkField,
+  rangeField,
+  optionalColourField,
+} = makeFields(() => state, queueSave);
 
 // ------------------------------------------------------- editor: match ---
 
@@ -403,6 +261,42 @@ function playerRow(side, index) {
   return row;
 }
 
+/**
+ * Fills a side's name and logo from the team library.
+ *
+ * The fields are copied rather than referenced, so this is a shortcut for typing
+ * rather than a link - the operator is free to edit the name afterwards, and
+ * renaming the team later cannot rewrite a scoreboard that is already on air.
+ */
+function teamPicker(side) {
+  const select = el('select');
+  select.append(el('option', null, { value: '' }, teamLibrary.length ? '- pick a team -' : '- no saved teams -'));
+  for (const team of teamLibrary) {
+    select.append(el('option', null, { value: team.id }, team.region ? `${team.name} (${team.region})` : team.name));
+  }
+  select.value = state[side].teamId ?? '';
+  select.disabled = !teamLibrary.length;
+
+  select.addEventListener('change', () => {
+    const team = teamLibrary.find((entry) => entry.id === select.value);
+    if (!team) {
+      state[side].teamId = '';
+      queueSave();
+      return;
+    }
+    // The header has room for the full name; the tricode is the winner
+    // graphic's problem, not this one's.
+    state[side].teamName = team.name;
+    state[side].logo = team.logo;
+    state[side].teamId = team.id;
+    queueSave();
+    buildSideEditor(side);
+    toast(`Filled the ${side} side from "${team.name}"`);
+  });
+
+  return field('From the team library', select);
+}
+
 function buildSideEditor(side) {
   const host = els.editors[side];
   const swatchColour = state.preset[side === 'left' ? 'leftBg' : 'rightBg'];
@@ -414,6 +308,7 @@ function buildSideEditor(side) {
 
   host.replaceChildren(
     heading,
+    grid(null, [teamPicker(side)]),
     grid(2, [
       textField('Team name', `${side}.teamName`, { placeholder: side === 'left' ? 'ATK' : 'DEF', maxlength: 24 }),
       textField('Result text', `${side}.result`, { placeholder: 'WIN / LOSS', maxlength: 16 }),
@@ -679,36 +574,6 @@ function presetBar() {
   return bar;
 }
 
-/**
- * A colour that can be switched off entirely (currently just the page
- * background: blank means transparent, which is what an OBS source wants).
- */
-function optionalColourField(label, path) {
-  const toggle = el('input', null, { type: 'checkbox' });
-  const picker = el('input', null, { type: 'color' });
-
-  const current = readPath(state, path);
-  toggle.checked = Boolean(current);
-  picker.value = current || '#000000';
-  picker.disabled = !toggle.checked;
-
-  const push = () => {
-    picker.disabled = !toggle.checked;
-    writePath(state, path, toggle.checked ? picker.value : '');
-    queueSave();
-  };
-
-  toggle.addEventListener('change', push);
-  picker.addEventListener('input', push);
-
-  const line = el('label', 'checkline');
-  line.append(toggle, el('span', null, {}, label));
-
-  const wrap = el('div', 'g-field');
-  wrap.append(line, picker);
-  return wrap;
-}
-
 /** One editor control per schema field, chosen by its declared type. */
 function presetField(field) {
   const path = `preset.${field.key}`;
@@ -926,7 +791,7 @@ async function start() {
   els.obsUrl.textContent = `${location.origin}/output.html`;
   els.openLink.href = '/output.html';
 
-  const [graphic, assetData, presetData] = await Promise.all([
+  const [graphic, assetData, presetData, teamData] = await Promise.all([
     fetch('/api/graphic').then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { agents: [], maps: [] }))
@@ -934,11 +799,22 @@ async function start() {
     fetch('/api/presets')
       .then((r) => r.json())
       .catch(() => ({ presets: [] })),
+    fetch('/api/teams')
+      .then((r) => r.json())
+      .catch(() => ({ teams: [] })),
   ]);
 
   state = graphic.state;
   catalogue = assetData;
   presetLibrary = presetData.presets ?? [];
+  teamLibrary = teamData.teams ?? [];
+
+  // The library is edited on the winner tab; the pickers here have to follow it
+  // without a reload, or a team saved on one tab is invisible on the other.
+  window.addEventListener('teams-changed', (event) => {
+    teamLibrary = event.detail ?? [];
+    if (state) for (const side of SIDES) buildSideEditor(side);
+  });
 
   if (!catalogue.agents.length) {
     toast('Agent and map lists unavailable - type names by hand, art will be missing.');
