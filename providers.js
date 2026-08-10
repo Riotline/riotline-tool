@@ -681,6 +681,14 @@ async function trackerMatchesRaw(config, handle, type) {
     );
   }
 
+  // Nothing on the page. Ask the site's own API why, because the page itself
+  // will not say: when tracker is rate-limiting, it serves a perfectly normal
+  // profile shell and simply never fetches the data, which is indistinguishable
+  // from a redesign or a dead account until something asks the API directly.
+  // One extra request, only on a path that has already failed.
+  const refusal = await trackerRefusal(config, handle);
+  if (refusal) throw refusal;
+
   throw new ProviderError(
     502,
     `The ${onCustomsTab ? 'customs' : 'matches'} page loaded, but no match data could be found.`,
@@ -689,6 +697,41 @@ async function trackerMatchesRaw(config, handle, type) {
       'usual cause is throttling: over its limit the site serves a normal-looking page with the match ' +
       'request simply missing, and only time fixes it. Run "npm run tracker:probe <Name#TAG>" to see every ' +
       'request the page made and what it returned.',
+  );
+}
+
+/**
+ * Why did the page come back empty? Returns a ProviderError when the API gives
+ * a reason worth repeating, or null to leave the generic message in place.
+ *
+ * Warden is tracker's own rate limiter. It answers 429 with a captcha demand,
+ * and no amount of waiting inside one request clears it - a human has to solve
+ * it once, which is exactly what "npm run tracker:login" is for.
+ */
+async function trackerRefusal(config, handle) {
+  if (!config.browser) return null;
+
+  let response;
+  try {
+    response = await config.browser.fetchJson(
+      `${trackerBase(config)}/valorant`,
+      `${trackerApiBase(config)}/matches/riot/${encodeURIComponent(handle)}?platform=pc`,
+    );
+  } catch {
+    return null;
+  }
+
+  const error = response.body?.errors?.[0];
+  const captcha = response.status === 429 || /warden|captcha/i.test(`${error?.code ?? ''} ${error?.message ?? ''}`);
+
+  if (!captcha) return null;
+
+  return new ProviderError(
+    429,
+    'tracker.gg is rate limiting this machine and wants a captcha solved.',
+    `Its own API answered ${response.status} ${error?.code ?? ''}: ${error?.message ?? 'too many requests'}. ` +
+      'Nothing will read until it is cleared: run "npm run tracker:login" and solve it once in the window that ' +
+      'opens, or leave the site alone for a while. Measured, tracker tolerates about one lookup a minute.',
   );
 }
 
