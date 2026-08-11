@@ -1702,3 +1702,97 @@ body.tab-graphic #key-warning {
 .logo-preview.is-audio.is-empty::after {
   content: "";
 }
+
+/* ------------------------------------------------------- agent select --- */
+
+/* The roster editor is ten near-identical rows, so it earns a tighter grid than
+   the general field layout: a name, an agent and a lock, in that order. */
+.slot-row {
+  grid-template-columns: 1.4fr 1.2fr auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.slot-row .checkline {
+  padding-bottom: 8px;
+  white-space: nowrap;
+}
+
+.alias-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/*
+ * Two rows, not three columns.
+ *
+ * Who they are is a Riot ID and a UUID; what you call them is an input and a
+ * button. Side by side those four fight for the width of one dashboard column
+ * and the identity loses - the name truncates to a letter and the id to
+ * nothing, which is exactly the half you need to tell two similar handles
+ * apart before naming one of them.
+ */
+.alias-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+}
+
+.alias-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.alias-controls input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.alias-controls .mini-btn {
+  flex: none;
+}
+
+.alias-who {
+  min-width: 0;
+}
+
+.alias-riot {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The player id is what the library is actually keyed on, so it is worth being
+   able to see - but it is a UUID, and a UUID at full size in a list of forty
+   would be the only thing anybody could read. */
+/* The player id is what the library is actually keyed on, so it has to be
+   visible - but it is a UUID, and forty of them at full size would be the only
+   thing in the panel anybody could see. */
+.alias-id {
+  margin-top: 3px;
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.alias-list {
+  max-height: 460px;
+}
+
+/* A toggle that stays pressed, unlike the momentary buttons around it. */
+.btn.is-active {
+  border-color: var(--accent, #ff4655);
+  color: var(--accent, #ff4655);
+}

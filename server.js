@@ -55,8 +55,15 @@ import {
   makeGraphicStore,
   makeMediaStore,
   makePresetStore,
+  displayName,
+  isAgentSelectScene,
+  makeAliasStore,
+  makeSelectStore,
   makeTeamStore,
   makeWinnerStore,
+  ingestGame,
+  ingestRoster,
+  stopTimer,
   stageBands,
   stageEnterMs,
 } from './graphics.js';
@@ -130,11 +137,15 @@ const winner = makeWinnerStore(path.join(STATE_DIR, 'winner.json'));
 const presets = makePresetStore(path.join(STATE_DIR, 'presets.json'));
 const teams = makeTeamStore(path.join(STATE_DIR, 'teams.json'));
 const media = makeMediaStore(path.join(STATE_DIR, 'media'));
+const select = makeSelectStore(path.join(STATE_DIR, 'select.json'));
+const aliases = makeAliasStore(path.join(STATE_DIR, 'aliases.json'));
 const assets = makeAssetCache(path.join(STATE_DIR, 'valorant-assets.json'));
 const restoredGraphic = await graphics.load();
 const restoredWinner = await winner.load();
+const restoredSelect = await select.load();
 await presets.load();
 await teams.load();
+await aliases.load();
 
 /**
  * Auto-hide.
@@ -240,6 +251,42 @@ winner.subscribe(({ state }) => {
   scheduleSequence(state);
 });
 
+/**
+ * The agent select clock, expired on the server.
+ *
+ * The bar in the page fills itself off a start stamp and needs no help to look
+ * right, so this exists purely to keep the *state* honest: once the 85 seconds
+ * are up the clock is not running, and a dashboard opened a minute later should
+ * not be told that it is. Without this the graphic would look finished while
+ * every readout still claimed it was counting.
+ *
+ * Keyed on the start stamp rather than a cue, because restarting the clock is
+ * the only thing that should ever cancel a pending expiry.
+ */
+let timerExpiry = null;
+let lastTimerStart = null;
+
+select.subscribe(({ state }) => {
+  const { running, startedAt, durationMs } = state.timer;
+  if (running && startedAt === lastTimerStart) return;
+
+  clearTimeout(timerExpiry);
+  timerExpiry = null;
+  lastTimerStart = running ? startedAt : null;
+  if (!running) return;
+
+  const wait = Math.max(0, startedAt + durationMs - Date.now());
+  timerExpiry = setTimeout(() => {
+    timerExpiry = null;
+    const current = select.state.timer;
+    // Restarted or stopped by hand in the meantime - an operator always wins.
+    if (!current.running || current.startedAt !== startedAt) return;
+    select.replace(stopTimer(select.state, { filled: true }));
+  }, wait);
+
+  timerExpiry.unref?.();
+});
+
 // ----------------------------------------------------------------- riot ---
 
 function splitRiotId(riotId) {
@@ -302,6 +349,12 @@ async function handleApi(pathname, params) {
 
     case '/api/winner':
       return { revision: winner.revision, state: winner.state };
+
+    case '/api/select':
+      return { revision: select.revision, state: select.state };
+
+    case '/api/aliases':
+      return { players: aliases.list() };
 
     case '/api/presets':
       return { presets: presets.list(), activeId: graphics.state.presetId };
@@ -544,13 +597,53 @@ async function handleTeamAction(body) {
 }
 
 /**
+ * Player alias actions.
+ *
+ * Saving an alias re-resolves the names on any card that came from the feed, so
+ * naming somebody mid-lobby fixes the strip that is already on air rather than
+ * waiting for their next event. Cards typed by hand have no player id and are
+ * left exactly as they are - an operator's own words are not the library's to
+ * overwrite.
+ */
+async function handleAliasAction(body) {
+  const action = String(body?.action ?? '');
+
+  const reresolve = () => {
+    const slots = select.state.slots.map((slot) =>
+      slot.playerId ? { ...slot, name: displayName(slot.riotId, aliases.aliasFor(slot.playerId)) } : slot,
+    );
+    if (slots.some((slot, index) => slot.name !== select.state.slots[index].name)) select.patch({ slots });
+  };
+
+  switch (action) {
+    case 'save': {
+      const players = aliases.save(body?.player ?? {});
+      reresolve();
+      return { players };
+    }
+
+    case 'delete': {
+      const players = aliases.remove(String(body?.id ?? ''));
+      reresolve();
+      return { players };
+    }
+
+    case 'clear-unnamed':
+      return { players: aliases.clearUnnamed() };
+
+    default:
+      throw new ProviderError(400, `Unknown alias action: ${action || '(none)'}`);
+  }
+}
+
+/**
  * Server-sent events, one connection per output source. OBS keeps the page
  * open for the whole broadcast, so the heartbeat exists to stop an idle proxy
  * or the OS from quietly dropping a connection that then never updates again.
  *
  * @param {string} name the SSE event name the page listens for
  */
-function streamState(store, name, req, res) {
+function streamStores(entries, req, res) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -558,22 +651,25 @@ function streamState(store, name, req, res) {
     'X-Accel-Buffering': 'no',
   });
 
-  const send = ({ revision, state }) => {
-    res.write(`event: ${name}\ndata: ${JSON.stringify({ revision, state })}\n\n`);
-  };
+  const unsubscribes = entries.map(([name, store]) => {
+    const send = ({ revision, state }) => {
+      res.write(`event: ${name}\ndata: ${JSON.stringify({ revision, state })}\n\n`);
+    };
+    send({ revision: store.revision, state: store.state });
+    return store.subscribe(send);
+  });
 
-  send({ revision: store.revision, state: store.state });
-
-  const unsubscribe = store.subscribe(send);
   const heartbeat = setInterval(() => res.write(': ping\n\n'), 20_000);
 
   const stop = () => {
     clearInterval(heartbeat);
-    unsubscribe();
+    for (const unsubscribe of unsubscribes) unsubscribe();
   };
   req.on('close', stop);
   res.on('error', stop);
 }
+
+const streamState = (store, name, req, res) => streamStores([[name, store]], req, res);
 
 /**
  * Uploads are the one thing served from outside ./public, so they get their own
@@ -626,6 +722,33 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET') {
     if (url.pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res);
     if (url.pathname === '/api/winner/events') return streamState(winner, 'winner', req, res);
+    if (url.pathname === '/api/select/events') return streamState(select, 'select', req, res);
+
+    /*
+     * Every graphic on one connection, for the dashboard.
+     *
+     * A browser allows six HTTP/1.1 connections to an origin, and a server-sent
+     * event stream holds one open for as long as the page lives. The dashboard
+     * has a module per graphic and a live preview of each, so one stream apiece
+     * came to exactly six - at which point the seventh request, which is the
+     * POST that saves what you just typed, queues behind connections that never
+     * finish. The symptom is a dashboard stuck on "Saving..." for ever, with
+     * nothing in the log to say why.
+     *
+     * The output pages keep their own single-store streams: each is a separate
+     * browser source holding one connection, which was never the problem.
+     */
+    if (url.pathname === '/api/events') {
+      return streamStores(
+        [
+          ['graphic', graphics],
+          ['winner', winner],
+          ['select', select],
+        ],
+        req,
+        res,
+      );
+    }
   }
 
   // The two graphics and the two libraries are the mutable state, so these are
@@ -645,6 +768,75 @@ const server = createServer(async (req, res) => {
           const state = body?.reset === true ? winner.reset() : winner.replace(body?.state ?? body);
           return { revision: winner.revision, state };
         });
+
+      case '/api/select':
+        return handleWrite(res, async () => {
+          const body = await readJsonBody(req);
+          const state = body?.reset === true ? select.reset() : select.replace(body?.state ?? body);
+          return { revision: select.revision, state };
+        });
+
+      /*
+       * The agent-select feed.
+       *
+       * A separate route from /api/select on purpose. That one takes a whole
+       * graphic and replaces it, which is what a dashboard does; this one takes
+       * whatever a client in the lobby happens to send and folds it in, which is
+       * a different contract and wants a different name in whatever is
+       * configured to call it.
+       *
+       * Answers with what changed rather than with the whole state: the caller
+       * is a game client, not a dashboard, and "applied: 1" is a far more useful
+       * thing to find in its log than ten cards of JSON.
+       */
+      case '/api/roster':
+        return handleWrite(res, async () => {
+          const result = ingestRoster(select.state, await readJsonBody(req), (id) => aliases.aliasFor(id));
+
+          // Recorded before the state goes out, so a player who has just been
+          // seen is already in the library by the time the dashboard repaints.
+          aliases.seen(result.seen);
+
+          if (result.applied) select.replace(result.state);
+          return {
+            applied: result.applied,
+            reset: result.reset,
+            gameId: select.state.gameId,
+            slots: select.state.slots.map((slot) => ({ name: slot.name, character: slot.character, locked: slot.locked })),
+          };
+        });
+
+      /*
+       * The general game feed - scenes and match facts.
+       *
+       * A second hook rather than a mode on the first, because the two are
+       * different shapes doing different jobs: /api/roster addresses a seat and
+       * says who is in it, this says what the game as a whole is doing. Whatever
+       * is watching the client can point each of its features at its own URL
+       * instead of at one that has to work out which it was sent.
+       */
+      case '/api/game':
+        return handleWrite(res, async () => {
+          const body = await readJsonBody(req);
+          // Cached in memory after the first call, so this costs nothing per
+          // event. Null when there is no network and nothing on disk, which the
+          // written-down table covers.
+          const catalogue = await assets.get().catch(() => null);
+          const result = ingestGame(select.state, body, { catalogue });
+          if (result.applied) select.replace(result.state);
+          return {
+            applied: result.applied,
+            scene: select.state.scene,
+            agentSelect: isAgentSelectScene(select.state.scene),
+            entered: result.entered,
+            left: result.left,
+            map: select.state.mapName,
+            onAir: select.state.anim.visible,
+          };
+        });
+
+      case '/api/aliases':
+        return handleWrite(res, async () => handleAliasAction(await readJsonBody(req)));
 
       case '/api/presets':
         return handleWrite(res, async () => handlePresetAction(await readJsonBody(req)));
@@ -705,8 +897,12 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`  UI              http://127.0.0.1:${PORT}`);
   console.log(`  OBS scoreboard  http://127.0.0.1:${PORT}/output.html   (1920x1080, transparent)`);
   console.log(`  OBS winner      http://127.0.0.1:${PORT}/winner.html   (1920x1080, full screen)`);
+  console.log(`  OBS agent sel.  http://127.0.0.1:${PORT}/select.html   (1920x1080, transparent)`);
+  console.log(`  Roster webhook  POST http://127.0.0.1:${PORT}/api/roster   (per-player picks and locks)`);
+  console.log(`  Game webhook    POST http://127.0.0.1:${PORT}/api/game     (scene and map)`);
   console.log(`  Graphic state   ${restoredGraphic ? 'restored from .state/graphic.json' : 'defaults'}`);
   console.log(`  Winner state    ${restoredWinner ? 'restored from .state/winner.json' : 'defaults'}`);
+  console.log(`  Select state    ${restoredSelect ? 'restored from .state/select.json' : 'defaults'}`);
   console.log(`  Default source  ${DEFAULT_PROVIDER}`);
   console.log(`  Riot region     ${DEFAULT_REGION} / routing ${DEFAULT_ROUTING}`);
   console.log(`  HenrikDev       ${HENRIK_API_KEY ? 'key loaded' : 'missing (HENRIK_API_KEY)'} | ${DEFAULT_AFFINITY}/${DEFAULT_PLATFORM}`);

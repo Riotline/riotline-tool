@@ -15,6 +15,8 @@
  */
 
 import { FONT_CHOICES } from './preset-schema.js';
+import { onState } from './live.js';
+import { mediaControl } from './media-field.js';
 import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, teamLabel } from './teams.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import {
@@ -240,131 +242,16 @@ els.musicBtn.addEventListener('click', () => setMusic(!state.seq.music));
  * dashboard having asked. Only the command channel is taken from the stream -
  * adopting the whole state would overwrite whatever is being typed.
  */
-const stream = new EventSource('/api/winner/events');
-
-stream.addEventListener('winner', (event) => {
-  if (!state) return;
-  try {
-    const seq = JSON.parse(event.data)?.state?.seq;
-    if (!seq) return;
-    state.seq.active = seq.active;
-    state.seq.stage = seq.stage;
-    state.seq.restart = seq.restart;
-    state.seq.cue = seq.cue;
-    syncCueUi();
-  } catch {
-    // A malformed frame is not worth breaking the dashboard over.
-  }
+onState('winner', (next) => {
+  if (!state || !next.seq) return;
+  state.seq.active = next.seq.active;
+  state.seq.stage = next.seq.stage;
+  state.seq.restart = next.seq.restart;
+  state.seq.cue = next.seq.cue;
+  syncCueUi();
 });
 
 // ------------------------------------------------------- editor: content ---
-
-/**
- * A media control: drop a file on it, browse for one, or paste a URL. All three
- * end up as the same string - an upload is just a URL that happens to be served
- * out of .state/media, which is why there is no second "uploaded vs pasted"
- * concept anywhere downstream of here.
- *
- * Takes accessors rather than a path because it is used against three different
- * objects: the live graphic state, the team library's draft, and the music bed.
- *
- * @param {() => string} get
- * @param {(value: string) => void} set
- */
-function mediaControl(label, get, set, { accept = 'image/*', placeholder = 'https://... or drop a file here' } = {}) {
-  const isAudio = accept.startsWith('audio');
-
-  const preview = el('div', `logo-preview${isAudio ? ' is-audio' : ''}`);
-  const image = el('img', null, { alt: '' });
-  if (!isAudio) preview.append(image);
-
-  const url = el('input', null, {
-    type: 'text',
-    spellcheck: 'false',
-    placeholder,
-    maxlength: 500,
-  });
-
-  // An audio file has no thumbnail, so its box just reports whether one is set.
-  const showThumb = (value) => {
-    if (!isAudio) {
-      image.hidden = !value;
-      if (value) image.src = value;
-      else image.removeAttribute('src');
-    }
-    preview.classList.toggle('is-empty', !value);
-  };
-
-  const paint = () => {
-    url.value = get() ?? '';
-    showThumb(url.value);
-  };
-
-  // Typing writes through but does not repaint the box the operator is in -
-  // only the thumbnail needs to follow along.
-  url.addEventListener('input', () => {
-    set(url.value);
-    showThumb(url.value);
-  });
-
-  const upload = async (file) => {
-    if (!file) return;
-    try {
-      // No multipart envelope: one file per request, so the body is the file.
-      const response = await fetch('/api/media', { method: 'POST', body: file });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
-      set(payload.url);
-      paint();
-      toast(`Uploaded ${file.name}`);
-    } catch (error) {
-      toast(`Logo not uploaded: ${error.message}`);
-    }
-  };
-
-  const picker = el('input', 'logo-file', { type: 'file', accept });
-  picker.addEventListener('change', () => {
-    void upload(picker.files?.[0]);
-    // Cleared so re-picking the same file still fires a change event.
-    picker.value = '';
-  });
-
-  const browse = el('button', 'mini-btn', { type: 'button' }, 'Upload');
-  browse.addEventListener('click', () => picker.click());
-
-  const clear = el('button', 'mini-btn', { type: 'button', title: 'Remove it' }, 'Clear');
-  clear.addEventListener('click', () => {
-    set('');
-    paint();
-  });
-
-  // Dropping onto the thumbnail is the fast path; the button is there because a
-  // drop target with no visible affordance is a feature nobody finds.
-  preview.addEventListener('dragover', (event) => {
-    event.preventDefault();
-    preview.classList.add('is-over');
-  });
-  preview.addEventListener('dragleave', () => preview.classList.remove('is-over'));
-  preview.addEventListener('drop', (event) => {
-    event.preventDefault();
-    preview.classList.remove('is-over');
-    void upload(event.dataTransfer?.files?.[0]);
-  });
-
-  const tools = el('div', 'logo-tools');
-  tools.append(browse, clear, picker);
-
-  const body = el('div', 'logo-body');
-  body.append(url, tools);
-
-  const row = el('div', 'logo-row');
-  row.append(preview, body);
-  paint();
-
-  const wrap = el('div', 'g-field');
-  wrap.append(el('span', null, {}, label), row);
-  return wrap;
-}
 
 /** The same control, bound to a dotted path in the live graphic state. */
 const logoField = (label, path) =>

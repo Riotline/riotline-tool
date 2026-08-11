@@ -12,6 +12,7 @@
  */
 
 import { onLookupMatch } from './store.js';
+import { onState } from './live.js';
 import { STATS, STAT_FIELDS, STAT_SLOTS, statDef } from './stats.js';
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
 import { el, field, grid, makeFields, subhead, title } from './fields.js';
@@ -36,7 +37,12 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   tabs: [...document.querySelectorAll('.tab')],
-  panels: { lookup: $('tab-lookup'), graphic: $('tab-graphic'), winner: $('tab-winner') },
+  panels: {
+    lookup: $('tab-lookup'),
+    graphic: $('tab-graphic'),
+    winner: $('tab-winner'),
+    select: $('tab-select'),
+  },
   importBtn: $('g-import'),
   importHint: $('g-import-hint'),
   swapBtn: $('g-swap'),
@@ -65,9 +71,29 @@ const els = {
 
 // ----------------------------------------------------------------- tabs ---
 
+/**
+ * Load a preview only once its tab has been opened.
+ *
+ * Each preview is the real output page, and each output page holds a live event
+ * stream open for as long as it exists. A browser allows six connections to an
+ * origin, so three previews loading up front spend three of them permanently on
+ * graphics nobody is looking at - and the request that then cannot get through
+ * is the POST that saves what you are typing.
+ *
+ * The src stays put once set: reloading it on every tab change would restart the
+ * animation an operator is trying to judge.
+ */
+function loadPreview(panel) {
+  for (const frame of panel?.querySelectorAll('iframe[data-src]') ?? []) {
+    frame.src = frame.dataset.src;
+    delete frame.dataset.src;
+  }
+}
+
 function showTab(name) {
   for (const tab of els.tabs) tab.setAttribute('aria-selected', String(tab.dataset.tab === name));
   for (const [key, panel] of Object.entries(els.panels)) panel.hidden = key !== name;
+  loadPreview(els.panels[name]);
   // The topbar's routing selects belong to the lookup flow only. A body class
   // rather than [hidden] so app.js's own show/hide logic is not fought over.
   document.body.classList.toggle('tab-graphic', name !== 'lookup');
@@ -411,19 +437,11 @@ els.replayBtn.addEventListener('click', () => cue('replay'));
  * dashboard having asked. Only visibility is taken from the stream - adopting
  * the whole state would overwrite whatever is being typed.
  */
-const graphicStream = new EventSource('/api/graphic/events');
-
-graphicStream.addEventListener('graphic', (event) => {
-  if (!state) return;
-  try {
-    const anim = JSON.parse(event.data)?.state?.anim;
-    if (!anim) return;
-    state.anim.visible = anim.visible;
-    state.anim.cue = anim.cue;
-    syncCueUi();
-  } catch {
-    // A malformed frame is not worth breaking the dashboard over.
-  }
+onState('graphic', (next) => {
+  if (!state || !next.anim) return;
+  state.anim.visible = next.anim.visible;
+  state.anim.cue = next.anim.cue;
+  syncCueUi();
 });
 
 // -------------------------------------------------------- editor: style ---

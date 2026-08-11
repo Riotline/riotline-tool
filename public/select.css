@@ -1,0 +1,720 @@
+/*
+ * Agent select strip.
+ *
+ * Same fixed 1920x1080 stage as the other two outputs, and for the same reason:
+ * OBS renders at an exact canvas size, so a font size chosen here is the font
+ * size that goes to air.
+ *
+ * The one idea worth reading before the rules is the card's three states, and
+ * that the difference between them is only ever opacity and scale. Nothing about
+ * a card's layout changes when it locks in - if it did, ten cards would reflow
+ * every time somebody committed, which is the one thing this graphic must never
+ * do while an audience is watching it.
+ */
+
+:root {
+  --bg: #0b0f14;
+  --bg-opacity: 0.92;
+  --panel: #141a22;
+  --text: #ffffff;
+  --dim-text: #93a4b5;
+  --font: "Gabarito";
+
+  --left: #4ea8de;
+  --right: #ff4655;
+
+  --pick-opacity: 0.55;
+  --pick-scale: 0.88;
+  --pulse-ms: 1500ms;
+
+  --in-ms: 620ms;
+  --out-ms: 420ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --offset-y: 0px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  font-family: var(--font), "Gabarito", "Poppins", "Segoe UI", system-ui, sans-serif;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------- stage --- */
+
+#stage-wrap {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.stage {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  flex: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Nothing goes to air until the first state arrives - otherwise a browser source
+   that has parsed the HTML but not yet run the module paints the empty skeleton,
+   which is a visible flash on every OBS restart. */
+.stage:not([data-ready]) {
+  visibility: hidden;
+}
+
+.stage.uppercase {
+  text-transform: uppercase;
+}
+
+.stage[data-align="top"] {
+  justify-content: flex-start;
+}
+.stage[data-align="middle"] {
+  justify-content: center;
+}
+.stage[data-align="bottom"] {
+  justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------- strip --- */
+
+.strip {
+  position: relative;
+  width: 100%;
+  padding: 0 0 26px;
+  transform: translateY(var(--offset-y));
+}
+
+/*
+ * The fill is a layer of its own rather than an opacity on the strip, and that
+ * is the whole reason it exists: an opacity here would take the portraits and
+ * the text down with it. What the knob is for is a see-through *strip* with a
+ * solid roster on it, not a faded graphic.
+ */
+.strip::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: var(--bg-opacity);
+  z-index: 0;
+}
+
+.strip > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- the entrance ---- */
+
+/*
+ * The strip drops in as one piece and the cards deal in behind it on a stagger.
+ * Two moves rather than one because they say different things: the strip
+ * arriving is the graphic coming on air, and the cards arriving is the lobby
+ * being introduced.
+ */
+.strip {
+  transition:
+    opacity var(--in-ms) var(--ease),
+    transform var(--in-ms) var(--ease);
+}
+
+.stage[data-visible="false"] .strip {
+  opacity: 0;
+  transform: translateY(calc(var(--offset-y) - 60px));
+  transition-duration: var(--out-ms);
+}
+
+.stage[data-align="bottom"][data-visible="false"] .strip {
+  transform: translateY(calc(var(--offset-y) + 60px));
+}
+
+[data-card],
+.map-card,
+.ident-side,
+.ident-vs {
+  transition:
+    opacity var(--in-ms) var(--ease),
+    transform var(--in-ms) var(--ease);
+  transition-delay: var(--enter-delay, 0ms);
+}
+
+.stage[data-visible="false"] [data-card],
+.stage[data-visible="false"] .map-card,
+.stage[data-visible="false"] .ident-side,
+.stage[data-visible="false"] .ident-vs {
+  opacity: 0;
+  transform: translateY(28px);
+  /* No delay on the way out: a staggered exit means the last card is still on
+     screen after the strip behind it has gone. */
+  transition-delay: 0ms;
+  transition-duration: var(--out-ms);
+}
+
+/*
+ * How the cards arrive.
+ *
+ * Every one of these is symmetrical about the map, because the strip is: an
+ * entrance that favours one end reads as one team being introduced before the
+ * other, which is a thing a graphic should never accidentally say. `--from` is
+ * set per card in select.js and is the *direction* that card comes from, so the
+ * rules below can be written once and mirror themselves.
+ *
+ * The default `deal` keeps the plain lift above; the rest replace it.
+ */
+.stage[data-entrance="split"][data-visible="false"] [data-card] {
+  transform: translateX(var(--from, 0)) scale(0.92);
+}
+
+.stage[data-entrance="rise"][data-visible="false"] [data-card],
+.stage[data-entrance="rise"][data-visible="false"] .map-card {
+  transform: translateY(70px) scale(0.96);
+}
+
+/*
+ * Flip needs the perspective on the card itself rather than on a parent: a
+ * shared perspective origin sits at the centre of the row, so the outermost
+ * cards would turn about a vanishing point ten cards away and skew rather than
+ * flip. Per-card, each turns about its own middle.
+ */
+.stage[data-entrance="flip"] [data-card] {
+  transform-origin: center center;
+}
+
+.stage[data-entrance="flip"][data-visible="false"] [data-card] {
+  transform: perspective(900px) rotateY(var(--flip, 55deg)) scale(0.94);
+}
+
+/* Jump to a state without playing it - used to rewind before a replay. */
+.stage.anim-off .strip,
+.stage.anim-off [data-card],
+.stage.anim-off .card-frame,
+.stage.anim-off .map-card,
+.stage.anim-off .ident-side,
+.stage.anim-off .ident-vs,
+.stage.anim-off .card-media,
+.stage.anim-off .card-pulse {
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+
+/* --------------------------------------------------------------- timer --- */
+
+/*
+ * Two halves closing in from the outside, mirrored.
+ *
+ * Each is anchored at its own outer edge of the frame and scaled along X, so the
+ * pair runs inwards and meets in the middle - the two ends touching is the
+ * moment agent select is over, which is a far clearer thing to watch for than a
+ * bar reaching an edge.
+ *
+ * scaleX rather than width: a width transition relayouts every frame for 85
+ * seconds, where a transform is handed to the compositor once and left alone.
+ */
+.timer {
+  position: relative;
+  height: var(--timer-height, 10px);
+  width: 100%;
+  background: rgba(255, 255, 255, var(--timer-track, 0.16));
+  /* Deliberately not clipped: the glow below is the whole point and it has to
+     be allowed to spill above the bar, over whatever the strip is sitting on.
+     Nothing can overflow anyway - each half is anchored at the frame edge it
+     starts from, so scaling only ever takes it inwards. */
+}
+
+.timer[hidden] {
+  display: none;
+}
+
+/*
+ * The glow.
+ *
+ * A box-shadow rather than a separate blurred layer, and the scale is why that
+ * works: a transform scales everything the element paints, shadow included, so
+ * the horizontal spread shrinks with the bar while the vertical stays put. The
+ * vertical is the half that matters - it is what softens the bar into the frame
+ * instead of leaving a hard-edged rectangle sitting on the game feed - and it is
+ * the half the scale cannot touch.
+ */
+.timer-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  transform: scaleX(0);
+  /* Linear, and only linear. An eased clock is a clock that lies. */
+  transition: transform var(--timer-ms, 0ms) linear;
+}
+
+.timer-left {
+  left: 0;
+  transform-origin: left center;
+  background: var(--left);
+  box-shadow:
+    0 0 16px 1px var(--left),
+    0 0 40px 2px var(--left);
+}
+
+.timer-right {
+  right: 0;
+  transform-origin: right center;
+  background: var(--right);
+  box-shadow:
+    0 0 16px 1px var(--right),
+    0 0 40px 2px var(--right);
+}
+
+
+/* Jumping the bar to a position without animating there - what a page joining
+   an already-running clock does before it starts moving again. */
+.timer.is-set .timer-fill {
+  transition-duration: 0ms;
+}
+
+/* --------------------------------------------------------------- ident --- */
+
+.ident {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  padding: 26px 60px 24px;
+}
+
+.ident-side {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ident-right {
+  justify-content: flex-end;
+}
+
+.ident-logo {
+  width: 74px;
+  height: 74px;
+  flex: none;
+}
+
+.ident-logo[hidden] {
+  display: none;
+}
+
+.ident-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/*
+ * Fitted headings scale from their left edge whichever way they are aligned.
+ *
+ * text-align only distributes *leftover* space, and a line worth fitting has
+ * none - it starts at the left edge and overflows right regardless. So the left
+ * edge is the one that reliably coincides with the box, and scaling about it
+ * lands the far end exactly on the far edge. Inline-block for the same reason:
+ * as a block the box would be the column and the glyphs would spill out of it,
+ * so the measurement and the anchor would describe different things.
+ */
+.ident-name,
+.map-name {
+  display: inline-block;
+  transform-origin: left center;
+  white-space: nowrap;
+}
+
+.ident-name {
+  font-size: 54px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  /* The box has to be sized by the layout, not by the name: given `auto` a long
+     enough org name simply pushes the box out under the logo, and fitText, which
+     measures the box, then thinks everything fits. */
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ident-right .ident-name {
+  text-align: right;
+}
+
+.ident-label {
+  flex: none;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-indent: 0.22em;
+  padding: 9px 16px;
+  color: var(--bg);
+}
+
+.ident-left .ident-label {
+  background: var(--left);
+}
+
+.ident-right .ident-label {
+  background: var(--right);
+}
+
+.ident-label:empty {
+  display: none;
+}
+
+.ident-vs {
+  flex: none;
+  font-size: 34px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  color: var(--dim-text);
+  padding: 8px 20px;
+  border: 3px solid currentColor;
+  /* Corners cut off rather than a full border, which is the shape language the
+     game itself uses for this mark. */
+  clip-path: polygon(0 22%, 22% 0, 78% 0, 100% 22%, 100% 78%, 78% 100%, 22% 100%, 0 78%);
+}
+
+/* -------------------------------------------------------------- roster --- */
+
+.roster {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 22px;
+  padding: 0 44px;
+}
+
+.cards {
+  display: flex;
+  gap: 14px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/*
+ * A card is two elements, and that is not decoration.
+ *
+ * It has two independent things to say with one transform: the entrance, which
+ * flies it in from wherever that style comes from, and the pick scale, which
+ * shrinks it while a player is deciding and grows it when they commit. Declared
+ * on one element the cascade has to pick one, and it silently cancels the other
+ * - which is exactly what happened. The entrance lost, and because `transition`
+ * is a shorthand it took the stagger and the fade down with it, so all four
+ * arrival styles looked identical because none of them were running.
+ *
+ * So: the outer card arrives, the frame inside it reacts to the pick.
+ */
+.card {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 340px;
+}
+
+.card-frame {
+  position: absolute;
+  inset: 0;
+  background: var(--panel);
+  overflow: hidden;
+  /* Scale rather than width, so ten cards never reflow when one locks in. */
+  transform: scale(1);
+  transition: transform var(--pick-ms, 320ms) var(--ease);
+}
+
+.cards-left .card-frame {
+  border-bottom: 5px solid var(--left);
+}
+
+.cards-right .card-frame {
+  border-bottom: 5px solid var(--right);
+}
+
+/* ---- state: picked, not locked ---- */
+
+.card.is-picked:not(.is-locked) .card-frame {
+  transform: scale(var(--pick-scale));
+}
+
+.card-media {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity var(--pick-ms, 320ms) var(--ease);
+}
+
+.card.is-picked .card-media {
+  opacity: var(--pick-opacity);
+}
+
+.card.is-locked .card-media {
+  opacity: 1;
+}
+
+.card-portrait {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Portraits are framed for a tall card; the interesting half is the head. */
+  object-position: center 18%;
+}
+
+.card-portrait[hidden] {
+  display: none;
+}
+
+/* A wash of the agent's own gradient behind the portrait, so a card reads as
+   belonging to that agent even where the artwork is mostly transparent. */
+.card-wash {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(160deg, var(--wash-a, transparent), var(--wash-b, transparent));
+  opacity: 0.55;
+}
+
+/* Keeps the names legible over the busiest part of a portrait. */
+.card-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.35) 34%, transparent 62%);
+}
+
+/*
+ * The pulse.
+ *
+ * A ring inside the card rather than a glow around it: the cards sit 14px apart,
+ * and an outer glow at that spacing bleeds onto its neighbours and reads as one
+ * smear rather than as five separate people thinking.
+ *
+ * Only ever on a card that is picked and not locked - that is the state it is
+ * describing, and leaving it running under a locked card would say the pick is
+ * still in play.
+ */
+.card-pulse {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 2px var(--side),
+    inset 0 0 22px var(--side);
+  transition: opacity var(--pick-ms, 320ms) var(--ease);
+}
+
+.card.is-picked:not(.is-locked) .card-pulse {
+  opacity: 1;
+  animation: card-pulse var(--pulse-ms) ease-in-out infinite alternate;
+}
+
+/* Zero means the operator turned it off, and off has to mean *no ring* rather
+   than a ring sitting at whichever end of the animation it stopped on. */
+.stage[data-pulse="off"] .card-pulse {
+  animation: none;
+  opacity: 0.4;
+}
+
+/*
+ * Never reaches full strength, and that is the point.
+ *
+ * At 1 the ring is the brightest thing on the strip, so the cards that have not
+ * committed end up shouting louder than the ones that have - which is the exact
+ * opposite of what the fade and the scale are saying about them. The ceiling
+ * keeps the pulse a sign of life rather than a highlight.
+ */
+@keyframes card-pulse {
+  from {
+    opacity: 0.16;
+  }
+  to {
+    opacity: 0.62;
+  }
+}
+
+/* ---- card furniture ---- */
+
+.card-role {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 34px;
+  height: 34px;
+  opacity: 0.92;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+}
+
+.card-role[hidden] {
+  display: none;
+}
+
+/*
+ * A column so the two inline-blocks below each get their own line - as inline
+ * they would share one whenever both happened to fit, which is most of the time
+ * and never on the card you are looking at.
+ */
+.card-body {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  /* The names are squeezed, not truncated, so the box has to be able to clip
+     what the squeeze floor cannot save. */
+  overflow: hidden;
+}
+
+/*
+ * Squeezed rather than ellipsised, and that is the whole reason these are
+ * inline-blocks.
+ *
+ * "DRAG..." is not a name. A card 170px wide has to carry a handle somebody
+ * chose and an agent somebody picked, and condensing both a little is the only
+ * way to keep them readable - so they scale from their left edge, which is the
+ * edge that reliably coincides with the box.
+ */
+/*
+ * Deliberately no max-width.
+ *
+ * A cap here would be the end of the fitting: the box could never measure wider
+ * than the column, so "does this overflow?" would always answer no while the
+ * glyphs spilled out of the capped box anyway. The box has to be free to be as
+ * wide as its own text - that is what makes it measurable - and .card-body's
+ * overflow is the backstop for whatever the squeeze floor cannot save.
+ */
+.card-name,
+.card-agent {
+  display: inline-block;
+  white-space: nowrap;
+  transform-origin: left center;
+}
+
+.card-name {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.005em;
+}
+
+.card-agent {
+  margin-top: 6px;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: var(--side);
+}
+
+.card-agent:empty {
+  display: none;
+}
+
+/* An empty seat says nothing at all unless the operator asked for numbers - a
+   card captioned "waiting" ten times over is noise. */
+.card-seat {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 64px;
+  font-weight: 900;
+  color: var(--dim-text);
+  opacity: 0.18;
+}
+
+.card.is-picked .card-seat,
+.stage:not([data-seats]) .card-seat {
+  display: none;
+}
+
+/* ----------------------------------------------------------- map card --- */
+
+.map-card {
+  position: relative;
+  flex: none;
+  width: 260px;
+  height: 340px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.map-card[hidden] {
+  display: none;
+}
+
+.map-splash {
+  position: absolute;
+  inset: 0;
+}
+
+.map-splash img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.7;
+}
+
+.map-splash img[hidden] {
+  display: none;
+}
+
+.map-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.15) 55%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+.map-body {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 16px 20px;
+  text-align: center;
+}
+
+.map-name {
+  font-size: 40px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  max-width: 100%;
+}
+
+.map-logo {
+  width: 100%;
+  height: 120px;
+}
+
+.map-logo[hidden] {
+  display: none;
+}
+
+.map-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}

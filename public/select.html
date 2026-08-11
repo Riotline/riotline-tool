@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VALORANT Agent Select - Output</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Gabarito:wght@400;500;600;700;800;900&family=Oswald:wght@400;500;600;700&family=Poppins:wght@300;400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/select.css" />
+  </head>
+
+  <!--
+    OBS browser source: 1920 x 1080, transparent, "Shutdown source when not
+    visible" off.
+
+    The agent select strip. Ten cards and a map, filled in live by whatever is
+    posting to /api/roster while the lobby picks.
+
+    A card has three states and they are the whole graphic:
+
+      empty     nobody has picked. The resting state, and where every card
+                starts - agent select opens with ten of these.
+      picked    a character is chosen but not committed. Faded, slightly small,
+                and pulsing in the team's colour, because none of that is final.
+      locked    committed. Full size, full opacity, and it arrives with a snap.
+
+    Like the other two outputs the markup is a fixed skeleton: updates only ever
+    rewrite text, image URLs and classes, so a repaint mid-lobby cannot flash a
+    portrait that is already on screen.
+
+    The cards themselves are built in select.js so their count comes from the
+    schema rather than from ten copies of the same block here.
+  -->
+  <body>
+    <div id="stage-wrap">
+      <div class="stage" id="stage" data-visible="false" data-align="middle">
+        <div class="strip" id="strip">
+          <!-- Agent select's clock, along the top edge.
+               Two halves closing in from the outer edges, each in its own
+               team's colour, so the two ends meeting in the middle is the
+               picture of the lobby being over. It fills as the time runs out
+               rather than draining, because a full bar needs no explaining to
+               anybody watching. -->
+          <div class="timer" id="timer" aria-hidden="true">
+            <div class="timer-fill timer-left"></div>
+            <div class="timer-fill timer-right"></div>
+          </div>
+
+          <!-- The identity bar. Both teams, both side labels, and the versus
+               mark between them, so the strip reads as a fixture even before
+               anybody has picked. -->
+          <header class="ident" id="ident">
+            <div class="ident-side ident-left">
+              <div class="ident-logo"><img data-img="left.logo" alt="" /></div>
+              <div class="ident-name" data-bind="left.name" data-short-bind="left.shortName" data-fit="1"></div>
+              <div class="ident-label" data-bind="left.label"></div>
+            </div>
+
+            <div class="ident-vs" aria-hidden="true">
+              <span class="ident-vs-mark">VS</span>
+            </div>
+
+            <div class="ident-side ident-right">
+              <div class="ident-label" data-bind="right.label"></div>
+              <div class="ident-name" data-bind="right.name" data-short-bind="right.shortName" data-fit="1"></div>
+              <div class="ident-logo"><img data-img="right.logo" alt="" /></div>
+            </div>
+          </header>
+
+          <!-- Cards, map, cards. The map sits in the middle of the row rather
+               than above it because that is the one thing on the strip that
+               belongs to neither team. -->
+          <div class="roster">
+            <div class="cards cards-left" id="cards-left"></div>
+
+            <div class="map-card" id="map-card">
+              <div class="map-splash"><img data-img="map.image" alt="" /></div>
+              <div class="map-body">
+                <div class="map-name" data-bind="map.name" data-fit="1"></div>
+                <div class="map-logo"><img data-img="eventLogo" alt="" /></div>
+              </div>
+            </div>
+
+            <div class="cards cards-right" id="cards-right"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/select.js" type="module"></script>
+  </body>
+</html>

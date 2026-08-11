@@ -24,6 +24,7 @@
         <button type="button" class="tab" role="tab" data-tab="lookup" aria-selected="true">Match lookup</button>
         <button type="button" class="tab" role="tab" data-tab="graphic" aria-selected="false">Graphics dashboard</button>
         <button type="button" class="tab" role="tab" data-tab="winner" aria-selected="false">Winner graphic</button>
+        <button type="button" class="tab" role="tab" data-tab="select" aria-selected="false">Agent select</button>
       </nav>
 
       <div class="routing" id="henrik-routing">
@@ -219,7 +220,7 @@
           </span>
         </h2>
         <div class="preview-frame checker" id="preview-frame">
-          <iframe id="preview" src="/output.html" title="Scoreboard preview" scrolling="no"></iframe>
+          <iframe id="preview" data-src="/output.html" title="Scoreboard preview" scrolling="no"></iframe>
         </div>
       </section>
 
@@ -298,7 +299,7 @@
           </span>
         </h2>
         <div class="preview-frame checker" id="w-preview-frame">
-          <iframe id="w-preview" src="/winner.html" title="Winner graphic preview" scrolling="no"></iframe>
+          <iframe id="w-preview" data-src="/winner.html" title="Winner graphic preview" scrolling="no"></iframe>
         </div>
       </section>
 
@@ -311,10 +312,104 @@
       </div>
     </main>
 
+    <!-- ==================================================== agent select === -->
+    <main class="graphic-tab" id="tab-select" role="tabpanel" hidden>
+      <div class="graphic-toolbar">
+        <button type="button" id="s-reset" class="btn btn-ghost">Reset graphic</button>
+
+        <span class="toolbar-gap"></span>
+
+        <label class="obs-url">
+          <span>OBS browser source</span>
+          <span class="obs-url-row">
+            <code id="s-obs-url">/select.html</code>
+            <button type="button" class="btn-copy" data-copy-target="s-obs-url" title="Copy URL">Copy</button>
+            <a class="btn btn-ghost" id="s-open" href="/select.html" target="_blank" rel="noopener">Open</a>
+          </span>
+        </label>
+
+        <!-- The address whatever is watching the game should be POSTing to. It
+             is the one piece of configuration that lives outside this app, so it
+             is worth being able to copy rather than retype. -->
+        <label class="obs-url">
+          <span>Roster webhook</span>
+          <span class="obs-url-row">
+            <code id="s-hook-url">/api/roster</code>
+            <button type="button" class="btn-copy" data-copy-target="s-hook-url" title="Copy URL">Copy</button>
+          </span>
+        </label>
+
+        <!-- The second hook: scenes and match facts, which is what drives all
+             of the automation. -->
+        <label class="obs-url">
+          <span>Game webhook</span>
+          <span class="obs-url-row">
+            <code id="s-game-url">/api/game</code>
+            <button type="button" class="btn-copy" data-copy-target="s-game-url" title="Copy URL">Copy</button>
+          </span>
+        </label>
+
+        <span id="s-status" class="save-status">Saved</span>
+      </div>
+
+      <div class="cue-bar">
+        <span class="cue-state" id="s-air">
+          <span class="cue-dot" aria-hidden="true"></span>
+          <span id="s-air-label">Off air</span>
+        </span>
+
+        <button type="button" id="s-show" class="btn btn-cue">Show</button>
+        <button type="button" id="s-hide" class="btn btn-ghost">Hide</button>
+
+        <span class="toolbar-gap"></span>
+
+        <button type="button" id="s-swap" class="btn btn-ghost" title="Put the other five players on the left">
+          Swap sides
+        </button>
+        <button type="button" id="s-clear" class="btn btn-ghost" title="Empty all ten cards">Clear roster</button>
+
+        <!-- The clock normally starts itself when the game reports agent
+             select. These are for when it does not, or when it started late. -->
+        <button type="button" id="s-clock" class="btn btn-ghost" title="Start the 85 second clock from now">
+          Start clock
+        </button>
+        <button type="button" id="s-clock-end" class="btn btn-ghost" title="Fill the bar and stop the clock">
+          End clock
+        </button>
+
+        <span class="cue-hint" id="s-cue-hint"></span>
+      </div>
+
+      <section class="panel preview-panel">
+        <h2 class="panel-title">
+          Live preview
+          <span class="pill">1920 &times; 1080</span>
+          <span class="detail-actions">
+            <label class="checkline">
+              <input type="checkbox" id="s-checker" checked />
+              <span>Show transparency</span>
+            </label>
+          </span>
+        </h2>
+        <div class="preview-frame checker" id="s-preview-frame">
+          <iframe id="s-preview" data-src="/select.html" title="Agent select preview" scrolling="no"></iframe>
+        </div>
+      </section>
+
+      <div class="editor-grid">
+        <section class="panel" id="sed-teams"></section>
+        <section class="panel" id="sed-roster"></section>
+        <section class="panel" id="sed-aliases"></section>
+        <section class="panel" id="sed-anim"></section>
+        <section class="panel" id="sed-style"></section>
+      </div>
+    </main>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="/app.js" type="module"></script>
     <script src="/dashboard.js" type="module"></script>
     <script src="/winner-dashboard.js" type="module"></script>
+    <script src="/select-dashboard.js" type="module"></script>
   </body>
 </html>
