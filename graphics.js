@@ -765,9 +765,20 @@ export function ingestRoster(state, payload, aliasFor = () => '') {
    * Filled rather than merely stopped: the bar closes the last of the gap and
    * stays shut, which is the picture of agent select finishing early. Stopping
    * it where it stood would read as the clock breaking.
+   *
+   * Read off the resulting state alone - not off `applied`, and not off whether
+   * the clock happened to be running. Ten locked cards under an empty bar is the
+   * failure this guards, and there are ordinary ways to reach it: the scene event
+   * never arrived so the clock was never started, an operator ended it by hand,
+   * or the last event was a resend that changed nothing. The lock-ins are the
+   * real signal that agent select is over; the clock is only an estimate of it.
+   *
+   * `settleSelect` keeps this idempotent - once shut it stays shut, so a feed
+   * repeating itself twenty times a second cannot restart the fill.
    */
-  const finished = applied > 0 && next.timer.running && everyoneLocked(next);
-  if (finished) next = stopTimer(next, { filled: true });
+  const settled = settleSelect(state, next);
+  const finished = settled !== next;
+  next = settled;
 
   return { state: next, applied, seen, reset, finished };
 }
@@ -790,6 +801,30 @@ export const stopTimer = (state, { filled = false, at = Date.now() } = {}) => ({
   ...state,
   timer: { ...state.timer, running: false, filled, stoppedAt: at },
 });
+
+/** Everything that says where the clock is, for telling an operator's move on it
+    apart from a write that left it alone. */
+const TIMER_KEYS = ['running', 'startedAt', 'durationMs', 'filled', 'stoppedAt'];
+const sameTimer = (a, b) => TIMER_KEYS.every((key) => a?.[key] === b?.[key]);
+
+/**
+ * Shut the clock once agent select is over, however the last card got locked.
+ *
+ * This belongs to the state rather than to the feed. Locking the last player by
+ * hand on the dashboard finishes the lobby exactly as surely as the game client
+ * saying so, and a bar that only closes for one of the two is a bar that looks
+ * broken whenever the feed is not the thing driving it.
+ *
+ * The exception is an operator who just touched the clock: starting a fresh
+ * eighty-five seconds over a board that happens to be full should run, not shut
+ * itself the instant it starts. So a write that moved the timer is taken at its
+ * word, and only a write that left the timer alone is allowed to finish it.
+ */
+export function settleSelect(previous, next, at = Date.now()) {
+  if (!everyoneLocked(next) || next?.timer?.filled) return next;
+  if (previous && !sameTimer(previous.timer, next.timer)) return next;
+  return stopTimer(next, { filled: true, at });
+}
 
 export const clearRosterState = (state) => ({ ...state, slots: emptySlots() });
 

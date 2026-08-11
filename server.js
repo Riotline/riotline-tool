@@ -63,6 +63,7 @@ import {
   makeWinnerStore,
   ingestGame,
   ingestRoster,
+  settleSelect,
   stopTimer,
   stageBands,
   stageEnterMs,
@@ -772,7 +773,18 @@ const server = createServer(async (req, res) => {
       case '/api/select':
         return handleWrite(res, async () => {
           const body = await readJsonBody(req);
-          const state = body?.reset === true ? select.reset() : select.replace(body?.state ?? body);
+          const previous = select.state;
+          const written = body?.reset === true ? select.reset() : select.replace(body?.state ?? body);
+
+          /*
+           * Settled after the write rather than before it, because the rule reads
+           * the sanitised board: an operator locking the last card by hand has
+           * finished agent select, and the clock should shut for that the same
+           * way it does for the feed. Only ever a second write on the one save
+           * that completes the lobby - once the bar is shut this is a no-op.
+           */
+          const settled = settleSelect(previous, written);
+          const state = settled === written ? written : select.replace(settled);
           return { revision: select.revision, state };
         });
 
@@ -797,7 +809,15 @@ const server = createServer(async (req, res) => {
           // seen is already in the library by the time the dashboard repaints.
           aliases.seen(result.seen);
 
-          if (result.applied) select.replace(result.state);
+          /*
+           * Saved when the state actually moved, which is not the same question
+           * as whether an event was accepted. A post can change nothing a seat
+           * can see and still finish the lobby - shutting the clock because the
+           * last card was already locked, or clearing for a new game - and
+           * keying this on `applied` threw those away. Identity is the honest
+           * test: ingestRoster only rebuilds what it touched.
+           */
+          if (result.state !== select.state) select.replace(result.state);
           return {
             applied: result.applied,
             reset: result.reset,
