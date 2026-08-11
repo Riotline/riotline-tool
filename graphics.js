@@ -30,6 +30,27 @@ import {
   inDurationMs,
 } from './public/animation.js';
 import { EMPTY_TEAM, TEAM_FIELDS, TEAM_REGIONS, teamSlug } from './public/teams.js';
+import { mapCodeFromUrl, mapDisplayName } from './public/maps.js';
+import {
+  DEFAULT_SELECT,
+  DEFAULT_SELECT_ANIM,
+  DEFAULT_SELECT_AUTO,
+  DEFAULT_SELECT_STYLE,
+  DEFAULT_TIMER,
+  EMPTY_SLOT,
+  SELECT_ANIM_FIELDS,
+  SELECT_AUTO_FIELDS,
+  SELECT_EASING_KEYS,
+  SELECT_ENTRANCE_KEYS,
+  SELECT_SIDE_FIELDS,
+  SELECT_SLOTS,
+  SELECT_STYLE_FIELDS,
+  TIMER_DEFAULT_MS,
+  displayName,
+  emptySlots,
+  everyoneLocked,
+  isAgentSelectScene,
+} from './public/select-schema.js';
 import {
   AUDIO_FIELDS,
   DEFAULT_AUDIO,
@@ -53,6 +74,7 @@ import {
 
 export { STAT_FIELDS, STAT_KEYS, STAT_SLOTS, FONT_CHOICES, BUILT_IN_PRESETS, ANIM_TIER_COUNT, inDurationMs };
 export { TEAM_REGIONS, WINNER_STAGES, WINNER_STAGE_COUNT, isOverlayEntry, resolveWinner, stageBands, stageEnterMs };
+export { SELECT_SLOTS, displayName, isAgentSelectScene };
 
 export const PLAYERS_PER_SIDE = 5;
 
@@ -492,6 +514,522 @@ export function sanitiseWinner(input, base = DEFAULT_WINNER) {
     clean[field.key] = text(source[field.key], fallback[field.key], field.max);
   }
   return clean;
+}
+
+// ----------------------------------------------------------- agent select ---
+
+function sanitiseSelectSlot(input, fallback = EMPTY_SLOT) {
+  const source = input ?? {};
+  const base = fallback ?? EMPTY_SLOT;
+  return {
+    playerId: text(source.playerId, base.playerId, 64),
+    riotId: text(source.riotId, base.riotId, 64),
+    name: text(source.name, base.name, 32),
+    // Stored exactly as the game reports it. Anything that is not a plain
+    // identifier could not have come from the feed, so it is not kept.
+    character: /^[\w .'/-]{0,32}$/.test(String(source.character ?? '')) ? text(source.character, base.character, 32) : base.character,
+    locked: bool(source.locked, base.locked),
+    teammate: bool(source.teammate, base.teammate),
+  };
+}
+
+function sanitiseSelectSide(input, fallback) {
+  const source = input ?? {};
+  const clean = { teamId: text(source.teamId, fallback.teamId ?? '', 48) };
+
+  for (const field of SELECT_SIDE_FIELDS) {
+    const value = source[field.key];
+    const previous = fallback[field.key];
+    switch (field.type) {
+      case 'hex':
+        clean[field.key] = colour(value, previous);
+        break;
+      case 'image':
+        clean[field.key] = imageUrl(value, previous);
+        break;
+      default:
+        clean[field.key] = text(value, previous, field.max);
+    }
+  }
+  return clean;
+}
+
+export function sanitiseSelectStyle(input, fallback = DEFAULT_SELECT_STYLE) {
+  const source = input ?? {};
+  const base = fallback ?? DEFAULT_SELECT_STYLE;
+  const clean = {};
+
+  for (const field of SELECT_STYLE_FIELDS) {
+    const value = source[field.key];
+    const previous = base[field.key];
+
+    switch (field.type) {
+      case 'font':
+        clean[field.key] = FONT_CHOICES.includes(String(value)) ? String(value) : previous;
+        break;
+      case 'choice': {
+        const allowed = (field.options ?? []).map((option) => option.key);
+        clean[field.key] = allowed.includes(String(value)) ? String(value) : previous;
+        break;
+      }
+      case 'ratio':
+        clean[field.key] = ratio(value, previous);
+        break;
+      case 'bool':
+        clean[field.key] = bool(value, previous);
+        break;
+      default:
+        clean[field.key] = int(value, previous, field.min, field.max);
+    }
+  }
+  return clean;
+}
+
+export function sanitiseSelectAnim(input, fallback = DEFAULT_SELECT_ANIM) {
+  const source = input ?? {};
+  const base = fallback ?? DEFAULT_SELECT_ANIM;
+
+  const clean = {
+    visible: bool(source.visible, base.visible),
+    cue: int(source.cue, base.cue, 0, Number.MAX_SAFE_INTEGER) % CUE_WRAP,
+  };
+
+  // Each choice field validates against its own list rather than a shared one,
+  // so adding another cannot silently start accepting easing names.
+  const CHOICES = { easing: SELECT_EASING_KEYS, entrance: SELECT_ENTRANCE_KEYS };
+
+  for (const field of SELECT_ANIM_FIELDS) {
+    const value = source[field.key];
+    const previous = base[field.key];
+
+    switch (field.type) {
+      case 'choice': {
+        const allowed = CHOICES[field.key] ?? [];
+        clean[field.key] = allowed.includes(String(value)) ? String(value) : previous;
+        break;
+      }
+      case 'bool':
+        clean[field.key] = bool(value, previous);
+        break;
+      default:
+        clean[field.key] = int(value, previous, field.min, field.max);
+    }
+  }
+  return clean;
+}
+
+export function sanitiseSelectAuto(input, fallback = DEFAULT_SELECT_AUTO) {
+  const source = input ?? {};
+  const base = fallback ?? DEFAULT_SELECT_AUTO;
+  return Object.fromEntries(SELECT_AUTO_FIELDS.map((field) => [field.key, bool(source[field.key], base[field.key])]));
+}
+
+export function sanitiseTimer(input, fallback = DEFAULT_TIMER) {
+  const source = input ?? {};
+  const base = fallback ?? DEFAULT_TIMER;
+  return {
+    running: bool(source.running, base.running),
+    // A stamp rather than a countdown, so a source that joins late arrives at
+    // the right place. Not clamped to "now" - a clock that was started before
+    // this page loaded is the normal case, not a suspicious one.
+    startedAt: int(source.startedAt, base.startedAt, 0, Number.MAX_SAFE_INTEGER),
+    durationMs: int(source.durationMs, base.durationMs, 1000, 600_000),
+    filled: bool(source.filled, base.filled),
+    stoppedAt: int(source.stoppedAt, base.stoppedAt, 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+export function sanitiseSelect(input, base = DEFAULT_SELECT) {
+  const source = input ?? {};
+  const fallback = base ?? DEFAULT_SELECT;
+  const slots = Array.isArray(source.slots) ? source.slots : [];
+
+  return {
+    version: 1,
+    gameId: text(source.gameId, fallback.gameId, 64),
+    scene: text(source.scene, fallback.scene, 64),
+    mapName: text(source.mapName, fallback.mapName, 40),
+    mapImage: imageUrl(source.mapImage, fallback.mapImage),
+    eventLogo: imageUrl(source.eventLogo, fallback.eventLogo),
+    swap: bool(source.swap, fallback.swap),
+    left: sanitiseSelectSide(source.left, fallback.left),
+    right: sanitiseSelectSide(source.right, fallback.right),
+    // Always exactly SELECT_SLOTS, for the same reason the rosters are always
+    // five: the feed addresses these by index, so a short array would turn a
+    // late-arriving event into a crash rather than into a card.
+    slots: Array.from({ length: SELECT_SLOTS }, (_, index) =>
+      sanitiseSelectSlot(slots[index], fallback.slots[index] ?? EMPTY_SLOT),
+    ),
+    timer: sanitiseTimer(source.timer, fallback.timer),
+    auto: sanitiseSelectAuto(source.auto, fallback.auto),
+    anim: sanitiseSelectAnim(source.anim, fallback.anim),
+    style: sanitiseSelectStyle(source.style, fallback.style),
+  };
+}
+
+export const makeSelectStore = (filePath) => makeStateStore(filePath, sanitiseSelect, DEFAULT_SELECT);
+
+/**
+ * The agent-select feed.
+ *
+ * One event per player, arriving as the lobby picks and locks. The envelope is
+ * whatever the reporting client sends; the part worth having is `eventIndex`
+ * (which of the ten seats) and `data` (who is in it and what they have picked).
+ *
+ * `data` arrives as a JSON *string* inside the JSON envelope, which is not a
+ * mistake to be corrected on the way in - it is how the client sends it, so it
+ * is parsed here and an object is accepted too for anyone hand-testing the hook.
+ *
+ * A changed `gameId` clears the board before applying the event. That is the
+ * whole of "each square should be empty at the start": a new lobby is a new
+ * game id, so nobody has to remember to press anything between matches, and a
+ * stale roster cannot survive into the next map.
+ *
+ * Pure, so the whole of it can be tested without a server or a lobby.
+ *
+ * @param {object} state    the current select state
+ * @param {unknown} payload one event, an array of them, or {events: [...]}
+ * @param {(playerId: string) => string} aliasFor  the alias library's lookup
+ * @returns {{state: object, applied: number, seen: {playerId: string, riotId: string}[], reset: boolean}}
+ */
+export function ingestRoster(state, payload, aliasFor = () => '') {
+  const events = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.events)
+      ? payload.events
+      : [payload];
+
+  let next = state;
+  let applied = 0;
+  let reset = false;
+  const seen = [];
+
+  for (const event of events) {
+    if (!event || typeof event !== 'object') continue;
+
+    // An envelope that says what it is has to say the right thing. One that says
+    // nothing is allowed through, because hand-testing the hook with just the
+    // inner object is a reasonable thing to want to do.
+    const kind = String(event.event ?? event.category ?? '').trim().toLowerCase();
+    if (kind && kind !== 'roster' && kind !== 'match_info') continue;
+
+    let data = event.data ?? event;
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        continue;
+      }
+    }
+    if (!data || typeof data !== 'object') continue;
+
+    /*
+     * Rejected rather than clamped, unlike every other number in this file.
+     *
+     * Clamping is right when a value is meant to be in range and merely arrived
+     * silly - a score of 300 is a typo for something. An index off the board is
+     * not that: it is a message this does not understand, and clamping it would
+     * quietly write a stranger over whoever is in the last seat.
+     */
+    const index = int(event.eventIndex ?? data.eventIndex ?? data.index, -1, -1, Number.MAX_SAFE_INTEGER);
+    if (!(index >= 0 && index < SELECT_SLOTS)) continue;
+
+    const gameId = text(event.gameId ?? data.gameId, '', 64);
+    if (gameId && gameId !== next.gameId) {
+      next = { ...next, gameId, slots: emptySlots() };
+      reset = true;
+    }
+
+    const playerId = text(data.player_id ?? data.playerId, '', 64);
+    const riotId = text(data.name ?? data.riotId, '', 64);
+
+    if (playerId && riotId) seen.push({ playerId, riotId });
+
+    const slots = [...next.slots];
+    slots[index] = sanitiseSelectSlot({
+      playerId,
+      riotId,
+      name: displayName(riotId, playerId ? aliasFor(playerId) : ''),
+      character: data.character ?? '',
+      locked: data.locked,
+      teammate: data.teammate,
+    });
+
+    next = { ...next, slots };
+    applied += 1;
+  }
+
+  /*
+   * Everybody in, so the clock is over.
+   *
+   * Filled rather than merely stopped: the bar closes the last of the gap and
+   * stays shut, which is the picture of agent select finishing early. Stopping
+   * it where it stood would read as the clock breaking.
+   */
+  const finished = applied > 0 && next.timer.running && everyoneLocked(next);
+  if (finished) next = stopTimer(next, { filled: true });
+
+  return { state: next, applied, seen, reset, finished };
+}
+
+/** Start the clock from now. Exported so the dashboard's button and the scene
+    feed's automation are provably the same move. */
+export const startTimer = (state, at = Date.now(), durationMs = state?.timer?.durationMs ?? TIMER_DEFAULT_MS) => ({
+  ...state,
+  timer: { running: true, startedAt: at, durationMs, filled: false, stoppedAt: 0 },
+});
+
+/**
+ * Stop the clock where it is, or at the end.
+ *
+ * `filled` is what makes an early finish read as a finish rather than as the
+ * bar giving up: everybody locked in, so the bar closes the last of the gap and
+ * stays there. Ending it by hand mid-lobby leaves it where it stood.
+ */
+export const stopTimer = (state, { filled = false, at = Date.now() } = {}) => ({
+  ...state,
+  timer: { ...state.timer, running: false, filled, stoppedAt: at },
+});
+
+export const clearRosterState = (state) => ({ ...state, slots: emptySlots() });
+
+/**
+ * The general game feed - scenes and match facts.
+ *
+ * Separate from the roster hook because it is a different shape and a different
+ * job: that one addresses a seat and says who is in it, this one says what the
+ * game as a whole is doing. Keeping them apart means whatever is configured to
+ * post them can be pointed at two URLs rather than one that has to guess.
+ *
+ * What it actually buys is timing. A roster event only arrives once somebody
+ * picks, so without this the first sign of a new lobby is a game id changing
+ * one event too late to have cleared the board tidily. A scene event says the
+ * lobby exists before anybody has done anything in it.
+ *
+ * Pure, like ingestRoster, so all of the automation can be tested without a
+ * server or a game.
+ *
+ * @param {object} state
+ * @param {unknown} payload
+ * @param {{now?: number, catalogue?: object}} options the catalogue is what
+ *   turns a reported map code into the name an audience knows
+ * @returns {{state: object, applied: number, entered: boolean, left: boolean}}
+ */
+export function ingestGame(state, payload, { now = Date.now(), catalogue = null } = {}) {
+  const events = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.events)
+      ? payload.events
+      : [payload];
+
+  let next = state;
+  let applied = 0;
+  let entered = false;
+  let left = false;
+
+  for (const event of events) {
+    if (!event || typeof event !== 'object') continue;
+
+    const kind = String(event.event ?? '').trim().toLowerCase();
+    // `data` is a bare string on these rather than a JSON envelope, which is
+    // why this cannot simply reuse the roster parser.
+    const value = typeof event.data === 'string' ? event.data.trim() : '';
+    const gameId = text(event.gameId, '', 64);
+
+    if (kind === 'scene') {
+      if (!value) continue;
+
+      const wasSelect = isAgentSelectScene(next.scene);
+      const isSelect = isAgentSelectScene(value);
+      next = { ...next, scene: text(value, '', 64) };
+
+      // A new lobby, arriving as a scene rather than as a late roster event.
+      // The game id moves with it so the first roster event is treated as a
+      // continuation rather than as another reset.
+      if (isSelect && (!wasSelect || (gameId && gameId !== next.gameId))) {
+        entered = true;
+        if (gameId) next = { ...next, gameId };
+        if (next.auto.autoClear) next = clearRosterState(next);
+        if (next.auto.autoTimer) next = startTimer(next, now);
+        if (next.auto.autoShow) next = { ...next, anim: { ...next.anim, visible: true, cue: next.anim.cue + 1 } };
+      }
+
+      if (!isSelect && wasSelect) {
+        left = true;
+        // The clock is stopped but not filled: leaving agent select early is
+        // not the lobby finishing, and a bar snapping full on the way out would
+        // say it was.
+        next = stopTimer(next);
+        if (next.auto.autoHide) next = { ...next, anim: { ...next.anim, visible: false, cue: next.anim.cue + 1 } };
+      }
+
+      applied += 1;
+      continue;
+    }
+
+    if (kind === 'map') {
+      if (!value) continue;
+      /*
+       * Resolved here rather than at render, unlike the agent names.
+       *
+       * The map is the one field both the feed and an operator write - it is in
+       * a dropdown on the dashboard and it is what the winner graphic looks its
+       * splash up by - so storing the code name would mean every one of those
+       * places had to know how to undo it. Resolving on the way in leaves a
+       * single spelling in the state, and an unresolved one is still visible in
+       * the dropdown and fixable in a click.
+       */
+      next = { ...next, mapName: text(mapDisplayName(catalogue, value), next.mapName, 40) };
+      applied += 1;
+      continue;
+    }
+
+    // Anything else is a fact this graphic has no use for. Counted as handled
+    // rather than refused, so a client posting its whole feed here does not get
+    // an error back for every event that is simply not ours.
+  }
+
+  return { state: next, applied, entered, left };
+}
+
+/**
+ * Player aliases.
+ *
+ * The feed reports Riot IDs, which are not what anybody is called on a broadcast
+ * - a player known to the audience as "Dragon" turns up as "Kuyareymark #6767".
+ * This is where the mapping between the two lives.
+ *
+ * Keyed on the player id rather than the Riot ID, because that is the half of
+ * the pair that does not change: somebody who renames themselves mid-season
+ * keeps their alias without anybody noticing.
+ *
+ * Every player the feed reports is recorded whether or not they have an alias,
+ * which is the point - an operator cannot write an alias for somebody they have
+ * no record of ever having seen. The list is capped and the least recently seen
+ * fall off, so a season of pick-up games does not grow it without limit.
+ */
+const ALIAS_LIMIT = 500;
+
+export function makeAliasStore(filePath) {
+  /** @type {{id: string, riotId: string, alias: string, seenAt: number}[]} */
+  let players = [];
+  let writeChain = Promise.resolve();
+
+  function persist() {
+    const snapshot = JSON.stringify(players, null, 2);
+    writeChain = writeChain
+      .then(() => mkdir(path.dirname(filePath), { recursive: true }))
+      .then(() => writeFile(filePath, snapshot, 'utf8'))
+      .catch((error) => console.warn(`  aliases not saved: ${error.message}`));
+    return writeChain;
+  }
+
+  const clean = (entry) => ({
+    id: text(entry?.id, '', 64),
+    riotId: text(entry?.riotId, '', 64),
+    alias: text(entry?.alias, '', 32),
+    seenAt: int(entry?.seenAt, 0, 0, Number.MAX_SAFE_INTEGER),
+  });
+
+  /** Aliased first, then most recently seen - the two ways an operator looks. */
+  const sorted = () =>
+    [...players].sort(
+      (a, b) => Number(Boolean(b.alias)) - Number(Boolean(a.alias)) || b.seenAt - a.seenAt || a.riotId.localeCompare(b.riotId),
+    );
+
+  function trim() {
+    if (players.length <= ALIAS_LIMIT) return;
+    // Aliased entries are somebody's work and are never the ones dropped.
+    const keep = players.filter((entry) => entry.alias);
+    const rest = players.filter((entry) => !entry.alias).sort((a, b) => b.seenAt - a.seenAt);
+    players = [...keep, ...rest.slice(0, Math.max(0, ALIAS_LIMIT - keep.length))];
+  }
+
+  return {
+    async load() {
+      try {
+        const parsed = JSON.parse(await readFile(filePath, 'utf8'));
+        if (!Array.isArray(parsed)) return false;
+        players = parsed.map(clean).filter((entry) => entry.id);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    list() {
+      return sorted().map((entry) => ({ ...entry }));
+    },
+
+    /** '' when there is no alias, which `displayName` reads as "use the Riot ID". */
+    aliasFor(playerId) {
+      return players.find((entry) => entry.id === playerId)?.alias ?? '';
+    },
+
+    /**
+     * Record that these players exist, without touching anybody's alias. Called
+     * on every ingest, so it must be cheap and must never overwrite operator
+     * work - only the Riot ID and the timestamp move.
+     */
+    seen(entries, at = Date.now()) {
+      let changed = false;
+
+      for (const entry of entries ?? []) {
+        const id = text(entry?.playerId ?? entry?.id, '', 64);
+        if (!id) continue;
+        const riotId = text(entry?.riotId, '', 64);
+        const existing = players.find((player) => player.id === id);
+
+        if (existing) {
+          if (existing.riotId === riotId && at - existing.seenAt < 1000) continue;
+          if (riotId) existing.riotId = riotId;
+          existing.seenAt = at;
+        } else {
+          players.push({ id, riotId, alias: '', seenAt: at });
+        }
+        changed = true;
+      }
+
+      if (changed) {
+        trim();
+        persist();
+      }
+      return changed;
+    },
+
+    /** Set or clear one alias. An unknown id creates the record. */
+    save({ id, alias = '', riotId = '' }) {
+      const key = text(id, '', 64);
+      if (!key) throw new Error('A player alias needs a player id.');
+
+      const existing = players.find((entry) => entry.id === key);
+      if (existing) {
+        existing.alias = text(alias, '', 32);
+        if (riotId) existing.riotId = text(riotId, existing.riotId, 64);
+      } else {
+        players.push({ id: key, riotId: text(riotId, '', 64), alias: text(alias, '', 32), seenAt: Date.now() });
+      }
+
+      trim();
+      persist();
+      return this.list();
+    },
+
+    remove(id) {
+      const before = players.length;
+      players = players.filter((entry) => entry.id !== text(id, '', 64));
+      if (players.length !== before) persist();
+      return this.list();
+    },
+
+    /** Drop everyone nobody has bothered to name. */
+    clearUnnamed() {
+      const before = players.length;
+      players = players.filter((entry) => entry.alias);
+      if (players.length !== before) persist();
+      return this.list();
+    },
+  };
 }
 
 // ------------------------------------------------------------ the store ---
@@ -952,6 +1490,10 @@ export function makeAssetCache(cachePath) {
   const shrinkAgent = (agent) => ({
     uuid: agent.uuid,
     name: agent.displayName,
+    // The name the game uses internally, which is what the agent-select feed
+    // reports - "Sarge" for Brimstone. Kept because it is the only reliable way
+    // to turn that feed into something an audience recognises.
+    developerName: agent.developerName ?? null,
     icon: agent.displayIcon,
     portrait: agent.fullPortraitV2 ?? agent.fullPortrait ?? null,
     rightFacing: Boolean(agent.isFullPortraitRightFacing),
@@ -981,6 +1523,21 @@ export function makeAssetCache(cachePath) {
         .filter((map) => map.displayName && map.splash && !/range|basic training|skirmish/i.test(map.displayName))
         .map(shrinkMap)
         .sort((a, b) => a.name.localeCompare(b.name)),
+
+      /*
+       * Code name to display name, for the game feed - which reports "Duality"
+       * where an audience knows "Bind".
+       *
+       * Built from the *unfiltered* list on purpose. The picker above has no use
+       * for the practice range, but the feed will happily report it, and a
+       * lookup table that only covers the maps somebody might choose is a table
+       * that fails on exactly the events nobody chose.
+       */
+      mapCodes: Object.fromEntries(
+        (maps?.data ?? [])
+          .filter((map) => map.displayName && map.mapUrl)
+          .map((map) => [mapCodeFromUrl(map.mapUrl).toLowerCase(), map.displayName]),
+      ),
     };
 
     if (!payload.agents.length || !payload.maps.length) throw new Error('valorant-api returned an empty catalogue');
