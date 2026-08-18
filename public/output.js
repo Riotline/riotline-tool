@@ -204,16 +204,26 @@ const fitTargets = [...stage.querySelectorAll('[data-fit]')];
  * A logo URL that 404s would otherwise draw the browser's broken-image icon,
  * which is far worse on air than showing nothing.
  *
- * The failed URLs are remembered because `error` only fires when the src is
+ * The failure is remembered because `error` only fires when the src is
  * assigned: a later repaint that re-shows the same element would otherwise
  * un-hide the broken image with nothing left to fire and hide it again.
+ *
+ * Remembered per element and per save, though, not forever. A permanent
+ * blacklist means an operator who pastes a URL that failed once - a typo since
+ * corrected, a CDN that was briefly down, a link that arrived truncated - can
+ * never get it on screen again without restarting the browser source, and the
+ * graphic simply ignores them with no way to tell why. Every save is a fresh
+ * attempt; repaints within the same save still trust the last result.
  */
-const failedImages = new Set();
+/** Bumped by the server on every save; a new one means "try that URL again". */
+let revision = 0;
+
+const failures = new WeakMap();
 
 for (const node of imageTargets) {
   node.addEventListener('error', () => {
     const src = node.getAttribute('src');
-    if (src) failedImages.add(src);
+    if (src) failures.set(node, { src, revision });
     node.hidden = true;
   });
 }
@@ -387,11 +397,23 @@ function render(state) {
 
   for (const node of imageTargets) {
     const url = read(view, node.dataset.img) || '';
-    // Only touch src when it actually changed: reassigning the same URL is
-    // usually a no-op, but "usually" is not good enough on air.
-    if (url && node.getAttribute('src') !== url) node.setAttribute('src', url);
+
+    // A failure only still counts for the same URL in the same save. A new URL,
+    // or the same one after another save, gets another go.
+    const failure = failures.get(node);
+    const stillFailed = Boolean(failure && failure.src === url && failure.revision === revision);
+    if (failure && !stillFailed) failures.delete(node);
+
+    // Reassigning the same URL is usually a no-op, but "usually" is not good
+    // enough on air - so src is only touched when it actually changed, except
+    // when retrying a URL that failed under an older save.
+    const retrying = Boolean(failure && failure.src === url && !stillFailed);
+    if (url && (node.getAttribute('src') !== url || retrying)) {
+      if (retrying) node.removeAttribute('src');
+      node.setAttribute('src', url);
+    }
     if (!url) node.removeAttribute('src');
-    node.hidden = !url || failedImages.has(url);
+    node.hidden = !url || stillFailed;
   }
 
   for (const node of maskTargets) {
@@ -434,29 +456,79 @@ fitStage();
 
 let latestState = null;
 
-// Subscribe first so the first frame is not held up by the catalogue fetch;
-// names and numbers paint immediately and the art fills in a moment later.
-const stream = new EventSource('/api/graphic/events');
+const RECONNECT_MIN_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+let reconnectMs = RECONNECT_MIN_MS;
 
-stream.addEventListener('graphic', (event) => {
-  try {
-    latestState = JSON.parse(event.data).state;
-    render(latestState);
-  } catch (error) {
-    console.warn(`ignored a malformed graphic update: ${error.message}`);
-  }
-});
+/**
+ * Subscribe, and keep subscribing.
+ *
+ * EventSource retries a dropped connection on its own, but only a *dropped* one:
+ * a non-200 or a wrong content type is a fatal error by the spec, and it closes
+ * the stream for good. An OBS browser source that happens to load while the
+ * server is restarting would therefore sit there for the whole broadcast showing
+ * a graphic that never updates again, with nothing on screen to say so. So a
+ * closed stream is rebuilt here, backing off to half a minute in case the server
+ * is properly down rather than merely restarting.
+ *
+ * Subscribed before the catalogue fetch so the first frame is not held up by it;
+ * names and numbers paint immediately and the art fills in a moment later.
+ */
+function connect() {
+  const stream = new EventSource('/api/graphic/events');
 
-// EventSource reconnects on its own; nothing here should tear the page down.
-stream.addEventListener('error', () => console.warn('graphic stream dropped - reconnecting'));
+  stream.addEventListener('open', () => {
+    reconnectMs = RECONNECT_MIN_MS;
+  });
 
-(async () => {
+  stream.addEventListener('graphic', (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      latestState = payload.state;
+      revision = payload.revision ?? revision + 1;
+      render(latestState);
+    } catch (error) {
+      console.warn(`ignored a malformed graphic update: ${error.message}`);
+    }
+  });
+
+  stream.addEventListener('error', () => {
+    // Still CONNECTING means EventSource is handling it itself - leave it alone,
+    // or two reconnect loops end up racing for the same stream.
+    if (stream.readyState !== EventSource.CLOSED) {
+      console.warn('graphic stream dropped - EventSource is reconnecting');
+      return;
+    }
+
+    console.warn(`graphic stream closed - reconnecting in ${reconnectMs}ms`);
+    stream.close();
+    setTimeout(connect, reconnectMs);
+    reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
+  });
+}
+
+connect();
+
+/**
+ * The agent and map art, retried on the same principle: a source that started
+ * before the server had the catalogue would otherwise render every match of the
+ * broadcast without portraits. Names and numbers go to air regardless, so this
+ * never blocks a render - it just upgrades one when it lands.
+ */
+async function loadCatalogue(attempt = 1) {
   try {
     const response = await fetch('/api/valorant-assets');
-    if (response.ok) indexCatalogue(await response.json());
-  } catch {
-    // Agent art is decoration; names and numbers still go to air without it.
-    console.warn('valorant-api catalogue unavailable - rendering without agent art');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    indexCatalogue(await response.json());
+    if (latestState) render(latestState);
+    return;
+  } catch (error) {
+    console.warn(`valorant-api catalogue unavailable (${error.message}) - rendering without agent art`);
   }
+
   if (latestState) render(latestState);
-})();
+  if (attempt >= 6) return;
+  setTimeout(() => loadCatalogue(attempt + 1), Math.min(RECONNECT_MIN_MS * 2 ** attempt, RECONNECT_MAX_MS));
+}
+
+loadCatalogue();

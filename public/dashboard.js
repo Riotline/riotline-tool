@@ -168,6 +168,7 @@ async function save() {
 // controls writing into a discarded copy.
 const {
   textField,
+  urlField,
   numberField,
   choiceField,
   selectField,
@@ -223,8 +224,8 @@ function buildMatchEditor() {
       textField('Match ID', 'matchId', { placeholder: 'optional' }),
     ]),
     grid(null, [
-      textField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
-      textField('Centre logo URL', 'eventLogo', { placeholder: 'https://... event or league logo' }),
+      urlField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
+      urlField('Centre logo URL', 'eventLogo', { placeholder: 'https://... event or league logo' }),
     ]),
     subhead('Stat rows'),
     ...Array.from({ length: STAT_SLOTS }, (_, slot) => statRowField(slot)),
@@ -339,7 +340,7 @@ function buildSideEditor(side) {
       textField('Result text', `${side}.result`, { placeholder: 'WIN / LOSS', maxlength: 16 }),
     ]),
     grid(2, [numberField('Rounds won', `${side}.roundsWon`, { max: 99 }), checkField('Won the match', `${side}.won`)]),
-    grid(null, [textField('Team logo URL', `${side}.logo`, { placeholder: 'https://...' })]),
+    grid(null, [urlField('Team logo URL', `${side}.logo`, { placeholder: 'https://...' })]),
     subhead(`Roster - rows show ${state.statRows.slice(0, ROW_STAT_SLOTS).map((key) => statDef(key).label).join(' + ')}`),
     ...Array.from({ length: SLOTS }, (_, index) => playerRow(side, index)),
   );

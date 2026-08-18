@@ -102,6 +102,7 @@ body {
 }
 
 select,
+textarea,
 input[type="text"] {
   background: var(--bg-input);
   border: 1px solid var(--border-strong);
@@ -112,7 +113,13 @@ input[type="text"] {
   font-size: 13px;
 }
 
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
 select:focus-visible,
+textarea:focus-visible,
 input[type="text"]:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
@@ -352,6 +359,117 @@ button:focus-visible {
 }
 
 /* -------------------------------------------------------- player card --- */
+
+/* ------------------------------------------------------------- watch --- */
+
+.watch {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.watch-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.watch-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.watch-actions .btn {
+  width: 100%;
+}
+
+.watch-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.watch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--bg-input);
+  font-size: 11px;
+}
+
+.watch-handle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.watch-note {
+  color: var(--text-faint);
+  text-align: right;
+}
+
+.watch-row.hit {
+  border-left: 2px solid var(--team-blue);
+}
+
+.watch-row.hit .watch-note {
+  color: var(--team-blue);
+}
+
+.watch-row.wait .watch-note,
+.watch-row.err .watch-note {
+  color: var(--warn);
+}
+
+.watch-log-box {
+  margin-top: 12px;
+}
+
+.watch-log-box summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.watch-log {
+  /* Tall enough to show a whole check at a glance, capped so it cannot push the
+     controls above it off the screen. */
+  max-height: 340px;
+  overflow: auto;
+  margin: 8px 0;
+  padding: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.watch-log-box .btn {
+  width: 100%;
+}
 
 .player-card {
   margin-top: 16px;
@@ -834,7 +952,9 @@ pre {
 .obs-url-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .obs-url code {
@@ -871,6 +991,7 @@ pre {
 .cue-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -927,6 +1048,8 @@ pre {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------------ preview --- */
@@ -938,6 +1061,12 @@ pre {
 .preview-frame {
   position: relative;
   width: 100%;
+  /* On a wide monitor a full-bleed 16:9 preview is tall enough to push every
+     editor below the fold, so it stops growing once it is comfortably legible.
+     dashboard.js scales the iframe off this element's width, so the cap needs
+     nothing on the JS side. */
+  max-width: 1180px;
+  margin-inline: auto;
   /* The stage is a fixed 1920x1080; the frame just reserves the same ratio. */
   aspect-ratio: 16 / 9;
   border: 1px solid var(--border-strong);
@@ -1002,11 +1131,63 @@ pre {
 
 /* ------------------------------------------------------------ editors --- */
 
+/**
+ * Three tiles of very different heights: a short settings column and two tall
+ * rosters. An equal-width auto-fit grid tiled them by width alone, which left a
+ * column-high hole under the shortest panel and an empty cell on the second row.
+ *
+ * So the pairing is stated instead of inferred: the rosters are what must sit
+ * side by side, and the rest share a column that packs itself. Below the
+ * breakpoint the settings column spans the full width and re-tiles horizontally,
+ * which is the one place the old behaviour was right.
+ */
 .editor-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: minmax(280px, 0.85fr) minmax(330px, 1fr) minmax(330px, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+/* Multi-column rather than a grid, because these three panels are wildly
+   different heights and multicol is the one layout mode that balances by height
+   instead of leaving a hole under the short one. It also picks its own column
+   count from the width it is given, so it needs no breakpoint of its own: one
+   stack as a sidebar, two or three once it spans the grid. */
+.editor-side {
+  columns: 270px;
+  column-gap: 16px;
+  min-width: 0;
+}
+
+.editor-side > .panel {
+  /* A panel split across a column break would put half a form in each. */
+  break-inside: avoid;
+  margin-bottom: 16px;
+}
+
+/* On a broadcast monitor the settings column is the tall one, so give it enough
+   width for its own auto-fit to go two across rather than running on past the
+   bottom of the rosters. */
+@media (min-width: 1800px) {
+  .editor-grid {
+    grid-template-columns: minmax(560px, 1.15fr) minmax(330px, 1fr) minmax(330px, 1fr);
+  }
+}
+
+@media (max-width: 1400px) {
+  .editor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .editor-side {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .field-grid {
@@ -1030,6 +1211,28 @@ pre {
    never more than two digits. */
 .field-grid.score-map-row {
   grid-template-columns: 2fr 1fr 1fr;
+}
+
+/* The stat rows have to answer to the panel they are in, not the window: a
+   roster panel is narrow on a 1440px screen and roomy on a 4K one, and a
+   viewport breakpoint gets both of those wrong. */
+.editor-grid .panel {
+  container-type: inline-size;
+}
+
+@container (max-width: 430px) {
+  .field-grid.cols-3,
+  .field-grid.cols-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@container (max-width: 250px) {
+  .field-grid.cols-2,
+  .field-grid.cols-3,
+  .field-grid.cols-4 {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .g-field {
@@ -1057,6 +1260,12 @@ pre {
   font-size: 13px;
   width: 100%;
   min-width: 0;
+}
+
+/* A URL the server will discard, marked while it is still being typed. Must
+   come after the rule above, which sets the whole border shorthand. */
+.g-field input.invalid {
+  border-color: var(--warn);
 }
 
 .g-field input[type="number"] {
@@ -1178,12 +1387,6 @@ pre {
   flex: none;
 }
 
-@media (max-width: 900px) {
-  .field-grid.cols-3,
-  .field-grid.cols-4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
 
 /* The topbar routing selects and key warnings belong to the lookup flow. A
    body class, not [hidden], so app.js's own show/hide logic is not fought. */

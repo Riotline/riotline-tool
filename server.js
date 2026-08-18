@@ -932,4 +932,10 @@ server.listen(PORT, '127.0.0.1', () => {
   );
   console.log('  Ctrl+C to stop');
   console.log(line);
+
+  // Launch the browser now rather than on the first lookup: it spends its first
+  // page load warming up, and that is better spent before a show than during it.
+  if (browser) {
+    void browser.prepare().then((ok) => console.log(`  tracker.gg      ${ok ? 'browser warmed' : 'browser could not start'}`));
+  }
 });

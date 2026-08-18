@@ -52,6 +52,10 @@ export const subhead = (text) => el('div', 'subhead', {}, text);
 
 export const help = (text) => el('p', 'field-help', {}, text);
 
+/** The server stores image URLs up to 500 characters; the inputs must match. */
+const URL_MAX = 500;
+const USABLE_URL = /^(?:https?:\/\/\S+|\/[\w./-]*)$/i;
+
 export function field(label, input) {
   const wrap = el('label', 'g-field');
   wrap.append(el('span', null, {}, label), input);
@@ -75,6 +79,38 @@ export function makeFields(state, onChange) {
     input.value = get(path) ?? '';
     input.addEventListener('input', () => set(path, input.value));
     return field(label, input);
+  }
+
+  /**
+   * A text field holding an image URL.
+   *
+   * Two things it does that a plain text field must not. The length cap matches
+   * what the server actually stores - the 120 of a normal text field silently
+   * truncates a CDN link, which then parses as a perfectly valid URL pointing
+   * nowhere, so the image never appears and the field looks like it refused to
+   * save. Measured against a real Discord attachment link: 181 characters, cut
+   * mid-signature.
+   *
+   * And it says so when the value cannot survive sanitising. Anything that is
+   * not http(s) or a path starting with / is discarded server-side, which
+   * without a mark here is indistinguishable from the save failing.
+   */
+  function urlField(label, path, { placeholder = '' } = {}) {
+    const wrap = textField(label, path, { placeholder, maxlength: URL_MAX });
+    const input = wrap.querySelector('input');
+
+    const mark = () => {
+      const value = input.value.trim();
+      const usable = !value || USABLE_URL.test(value);
+      input.classList.toggle('invalid', !usable);
+      input.title = usable
+        ? ''
+        : 'Must start with https://, http:// or / - anything else is discarded when the graphic saves.';
+    };
+
+    input.addEventListener('input', mark);
+    mark();
+    return wrap;
   }
 
   function numberField(label, path, { min = 0, max = 999 } = {}) {
@@ -171,6 +207,7 @@ export function makeFields(state, onChange) {
     get,
     set,
     textField,
+    urlField,
     numberField,
     choiceField,
     selectField,

@@ -78,6 +78,12 @@ export function extractEmbeddedJson(html) {
   return found;
 }
 
+/**
+ * A cheap page on the site, opened once per launch to absorb the cold start.
+ * See warmUpContext below for why that is necessary.
+ */
+const WARM_UP_URL = 'https://tracker.gg/valorant';
+
 export function makeTrackerBrowser(options = {}) {
   const {
     headless = true,
@@ -87,6 +93,7 @@ export function makeTrackerBrowser(options = {}) {
     profileDir = PROFILE_DIR,
     channel = 'auto',
     userAgent = null,
+    warmUpOnLaunch = true,
   } = options;
 
   let contextPromise = null;
@@ -161,6 +168,7 @@ export function makeTrackerBrowser(options = {}) {
       }
     }
 
+    if (warmUpOnLaunch) await warmUpContext(context);
     return context;
   }
 
@@ -277,6 +285,18 @@ export function makeTrackerBrowser(options = {}) {
       return runCapture(url, wanted, captureOptions);
     },
 
+    /**
+     * Launch now instead of on the first lookup, so the warm-up above is paid
+     * while nobody is waiting. Safe to call more than once - the context is
+     * created once and reused.
+     */
+    prepare() {
+      return context().then(
+        () => true,
+        () => false,
+      );
+    },
+
     /** Discard the saved browser profile, including any Cloudflare clearance. */
     resetProfile,
 
@@ -352,6 +372,37 @@ export function makeTrackerBrowser(options = {}) {
       return resolvedUserAgent;
     },
   };
+}
+
+/**
+ * Spend the first page load on something nobody is waiting for.
+ *
+ * Measured against tracker.gg: the first navigation after a launch comes back
+ * as a normal 200 with the data the page fetches for itself simply missing, and
+ * it burns the whole timeout getting there. Since the browser also closes itself
+ * after a spell of inactivity, that cost is not paid once at startup - it is
+ * paid again by the first lookup after every idle period, which for a broadcast
+ * is the one at the top of the show.
+ *
+ * Doing it here rather than in the server means every launch absorbs it,
+ * including the relaunch after an idle close, and no caller has to know.
+ *
+ * Failure is ignored on purpose: this is a warm-up, and a launch that cannot
+ * reach the site should be reported by the real request, with its own hints,
+ * rather than by this.
+ */
+async function warmUpContext(context) {
+  const page = await context.newPage().catch(() => null);
+  if (!page) return;
+
+  try {
+    await page.goto(WARM_UP_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await settleChallenge(page, 20_000);
+  } catch {
+    /* the real request will report anything that matters */
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 /**

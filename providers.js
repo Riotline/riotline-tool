@@ -542,17 +542,91 @@ export async function trackerPage(browser, url, options = {}) {
   }
 
   const arrays = [];
+  let emptyList = false;
+  let privateProfile = false;
+
   for (const capture of result.captured ?? []) {
     const matches = findMatchesArray(capture.body);
-    if (matches) arrays.push({ matches, via: `XHR ${new URL(capture.url).pathname}` });
+    if (matches) {
+      arrays.push({ matches, via: `XHR ${new URL(capture.url).pathname}` });
+      continue;
+    }
+    if (isPrivate(capture.body)) privateProfile = true;
+    else if (TRACKER_XHR_PATTERN.test(capture.url) && isEmptyMatchList(capture.body)) emptyList = true;
   }
+
+  if (!privateProfile && isPrivate(null, html)) privateProfile = true;
   for (const blob of extractEmbeddedJson(html)) {
     const matches = findMatchesArray(blob);
     if (matches) arrays.push({ matches, via: 'embedded JSON' });
   }
 
-  return { arrays, html, status: result.status ?? null, capturedCount: (result.captured ?? []).length, url };
+  return {
+    arrays,
+    emptyList,
+    privateProfile,
+    html,
+    status: result.status ?? null,
+    capturedCount: (result.captured ?? []).length,
+    url,
+  };
 }
+
+/**
+ * Did the site answer with a match list that happens to be empty?
+ *
+ * This has to be told apart from "no list arrived at all", because the two look
+ * identical to findMatchesArray - it only recognises a non-empty array - and
+ * they mean opposite things. An account with no games of this type is a normal,
+ * quiet answer; nothing arriving means the page never served its data, which
+ * measured against tracker.gg is usually throttling. Reporting the first as an
+ * error puts a permanent red row in the watch for a player who simply has not
+ * played a custom yet.
+ *
+ * Deliberately narrow: only the site's own match payload shapes count, since
+ * plenty of unrelated endpoints on the page answer with an empty `data` array.
+ */
+export function isEmptyMatchList(body) {
+  const data = body?.data;
+  if (Array.isArray(data?.matches)) return data.matches.length === 0;
+  if (Array.isArray(data)) return data.length === 0;
+  return false;
+}
+
+/**
+ * Can this player's matches be read at all?
+ *
+ * Two different switches produce the same dead end, and neither resolves on its
+ * own the way throttling or an unplayed mode does:
+ *
+ *   the tracker.gg profile is private   - a Tracker Network account setting
+ *   the player's matches are private    - a VALORANT in-game setting, which
+ *                                         tracker reports as "X's matches are
+ *                                         private. Check in-game settings to
+ *                                         change this."
+ *
+ * Both mean the account is a dead slot until its owner changes something, so
+ * the watch drops it and the burst promotes another account in its place.
+ *
+ * The site's own API error is the first signal; page text is the fallback, and
+ * it is matched tightly on purpose. "Privacy Policy" sits in the footer of every
+ * page on the site, and Stripe injects an iframe named
+ * __privateStripeMetricsController into the same document - measured, both are
+ * present on a perfectly readable profile, so a loose match on the word alone
+ * would report every throttled lookup as private.
+ */
+export function isPrivate(body, html = '') {
+  for (const error of body?.errors ?? []) {
+    if (/private/i.test(`${error?.code ?? ''} ${error?.message ?? ''}`)) return true;
+  }
+
+  return (
+    /\b(?:profile|matches)\b[^<>]{0,40}\b(?:is|are) private\b/i.test(String(html)) ||
+    /\bprivate\b[^<>]{0,20}\b(?:profile|matches)\b/i.test(String(html)) ||
+    /check in-game settings/i.test(String(html))
+  );
+}
+
 
 /** Match mode as tracker labels it, tolerant of casing and separators. */
 const modeKey = (value) => String(value ?? '').toLowerCase().replace(/[\s_-]/g, '');
@@ -592,12 +666,72 @@ async function trackerMatchesRaw(config, handle, type) {
   // mode here would throw the whole list away.
   if (best) return onCustomsTab ? best.matches : matchesOfType(best.matches, type);
 
+  // The site answered, this account just has nothing of that kind. Not an error.
+  if (page.emptyList) return [];
+
+  // Private is permanent until its owner changes it, so it gets a status of its
+  // own: the watch drops the account instead of retrying it every round.
+  if (page.privateProfile) {
+    throw new ProviderError(
+      403,
+      'That player\'s matches are private.',
+      'Either the tracker.gg profile is hidden, or match history is set to private in VALORANT itself ' +
+        '(Settings > General > Privacy). Nothing can read it until they change that, so this account is ' +
+        'skipped and another one is tried instead.',
+    );
+  }
+
+  // Nothing on the page. Ask the site's own API why, because the page itself
+  // will not say: when tracker is rate-limiting, it serves a perfectly normal
+  // profile shell and simply never fetches the data, which is indistinguishable
+  // from a redesign or a dead account until something asks the API directly.
+  // One extra request, only on a path that has already failed.
+  const refusal = await trackerRefusal(config, handle);
+  if (refusal) throw refusal;
+
   throw new ProviderError(
     502,
     `The ${onCustomsTab ? 'customs' : 'matches'} page loaded, but no match data could be found.`,
     `HTTP ${page.status ?? '?'}, ${page.html.length} bytes, ${page.capturedCount} matching XHR response(s), ` +
-      'none containing a recognisable match array. Run "npm run tracker:probe <Name#TAG>" to see every ' +
+      'none containing a match array and none saying the list is empty. Measured against tracker.gg, the ' +
+      'usual cause is throttling: over its limit the site serves a normal-looking page with the match ' +
+      'request simply missing, and only time fixes it. Run "npm run tracker:probe <Name#TAG>" to see every ' +
       'request the page made and what it returned.',
+  );
+}
+
+/**
+ * Why did the page come back empty? Returns a ProviderError when the API gives
+ * a reason worth repeating, or null to leave the generic message in place.
+ *
+ * Warden is tracker's own rate limiter. It answers 429 with a captcha demand,
+ * and no amount of waiting inside one request clears it - a human has to solve
+ * it once, which is exactly what "npm run tracker:login" is for.
+ */
+async function trackerRefusal(config, handle) {
+  if (!config.browser) return null;
+
+  let response;
+  try {
+    response = await config.browser.fetchJson(
+      `${trackerBase(config)}/valorant`,
+      `${trackerApiBase(config)}/matches/riot/${encodeURIComponent(handle)}?platform=pc`,
+    );
+  } catch {
+    return null;
+  }
+
+  const error = response.body?.errors?.[0];
+  const captcha = response.status === 429 || /warden|captcha/i.test(`${error?.code ?? ''} ${error?.message ?? ''}`);
+
+  if (!captcha) return null;
+
+  return new ProviderError(
+    429,
+    'tracker.gg is rate limiting this machine and wants a captcha solved.',
+    `Its own API answered ${response.status} ${error?.code ?? ''}: ${error?.message ?? 'too many requests'}. ` +
+      'Nothing will read until it is cleared: run "npm run tracker:login" and solve it once in the window that ' +
+      'opens, or leave the site alone for a while. Measured, tracker tolerates about one lookup a minute.',
   );
 }
 

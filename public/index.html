@@ -104,6 +104,39 @@
             <button type="button" class="btn-copy" data-copy-target="player-puuid" title="Copy PUUID">Copy</button>
           </div>
         </div>
+
+        <!-- Post-match lookup: baseline during the game, results the moment it ends. -->
+        <section class="watch">
+          <h3 class="watch-title">
+            Post-match lookup
+            <span id="watch-state" class="pill" hidden></span>
+          </h3>
+
+          <label class="field">
+            <span>Riot IDs - one per line, up to 10</span>
+            <textarea id="watch-ids" rows="6" spellcheck="false" placeholder="Name#TAG&#10;Name#TAG"></textarea>
+          </label>
+          <p class="field-help">
+            Set the baseline while the game is still running, then check the moment it ends - whichever account has
+            the scoreboard first wins. Only the first 5 that answer are used, so put the accounts most likely to
+            update first at the top.
+          </p>
+
+          <div class="watch-actions">
+            <button id="watch-baseline" type="button" class="btn btn-ghost">1. Set baseline</button>
+            <button id="watch-check" type="button" class="btn btn-primary" disabled>2. Check for new game</button>
+          </div>
+          <ul id="watch-status" class="watch-list"></ul>
+
+          <details class="watch-log-box" id="watch-log-box">
+            <summary>
+              Debug log
+              <span id="watch-log-count" class="pill" hidden></span>
+            </summary>
+            <pre id="watch-log" class="watch-log"></pre>
+            <button type="button" id="watch-log-copy" class="btn btn-ghost">Copy log</button>
+          </details>
+        </section>
       </section>
 
       <!-- ------------------------------------------ step 2: match list --- -->
@@ -191,12 +224,16 @@
         </div>
       </section>
 
+      <!-- The two rosters are the pair that has to stay side by side; everything
+           else is settings, so they share a column that packs itself. -->
       <div class="editor-grid">
-        <section class="panel" id="ed-match"></section>
+        <div class="editor-side">
+          <section class="panel" id="ed-match"></section>
+          <section class="panel" id="ed-anim"></section>
+          <section class="panel" id="ed-style"></section>
+        </div>
         <section class="panel" id="ed-left"></section>
         <section class="panel" id="ed-right"></section>
-        <section class="panel" id="ed-anim"></section>
-        <section class="panel" id="ed-style"></section>
       </div>
     </main>
 

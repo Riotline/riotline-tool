@@ -170,6 +170,29 @@ export const BUILT_IN_PRESETS = [
       showRoleIcon: true,
     },
   },
+  {
+    id: 'bloodranger',
+    name: 'BloodRanger',
+    preset: {
+      font: 'Oswald',
+      leftBg: '#5c0a12',
+      leftBigText: '#f7efe9',
+      leftSmallText: '#f0949b',
+      rightBg: '#140a0c',
+      rightBigText: '#f7efe9',
+      rightSmallText: '#d9606a',
+      globalText: '#efe0d8',
+      mvpBannerBg: '#a5121f',
+      mvpBannerText: '#fff5f0',
+      mvpName: '#ff6b78',
+      mvpAgent: '#efe0d8',
+      panelOpacity: 0.62,
+      pageBackground: '',
+      uppercase: true,
+      showMvpPortrait: true,
+      showRoleIcon: true,
+    },
+  },
 ];
 
 export const BUILT_IN_IDS = new Set(BUILT_IN_PRESETS.map((entry) => entry.id));

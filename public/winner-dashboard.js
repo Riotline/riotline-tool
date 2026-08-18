@@ -123,7 +123,7 @@ async function save() {
 }
 
 const fields = makeFields(() => state, queueSave);
-const { textField, numberField, choiceField, selectField, colourField, checkField, rangeField } = fields;
+const { textField, urlField, numberField, choiceField, selectField, colourField, checkField, rangeField } = fields;
 
 // ------------------------------------------------------------- transport ---
 
@@ -359,7 +359,7 @@ function sceneSection(stage, index) {
         heading,
         grid(2, [selectField('Map', 'mapName', catalogue.maps.map((map) => map.name)), ...texts]),
         grid(null, [
-          textField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
+          urlField('Map image override', 'mapImage', { placeholder: 'https://... (blank = official splash)' }),
         ]),
       ];
 
