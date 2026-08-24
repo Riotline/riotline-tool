@@ -25,6 +25,7 @@ import {
   timerRemainingMs,
 } from './select-schema.js';
 import { mapDisplayName } from './maps.js';
+import { teamColour } from './teams.js';
 
 const STAGE_W = 1920;
 const STAGE_H = 1080;
@@ -200,10 +201,17 @@ function applyStyle(style, state) {
   root.setProperty('--pick-scale', String(style.pickScale));
   root.setProperty('--pulse-ms', `${style.pulseMs}ms`);
 
-  // The two team colours drive the side labels, the card rules and the pulse, so
-  // they are set once here rather than per card.
-  root.setProperty('--left', state.left.colour);
-  root.setProperty('--right', state.right.colour);
+  /*
+   * The two team colours drive the side labels, the card rules and the pulse, so
+   * they are set once here rather than per card.
+   *
+   * Resolved rather than read: a team with no colour of its own wears the colour
+   * of the side it is playing, and the production can force both sides to the
+   * plain attack/defence pair whatever the teams have saved.
+   */
+  const force = state.colourSource === 'sides';
+  root.setProperty('--left', teamColour(state.left.colour, state.left.side, { force }));
+  root.setProperty('--right', teamColour(state.right.colour, state.right.side, { force }));
 
   root.setProperty('--timer-height', `${style.timerHeight}px`);
   root.setProperty('--timer-track', String(style.timerTrack));
@@ -230,8 +238,40 @@ function renderCard(card, slot, style, colour) {
   const picked = Boolean(String(slot.character ?? '').trim());
   const agent = picked ? findAgent(agents, slot.character) : null;
 
+  const locked = picked && Boolean(slot.locked);
+
+  /*
+   * The grow on lock-in is the RELEASE of the provisional 0.88, not a rule of
+   * its own - so it only animates if the browser ever sat at the 0.88. A card
+   * that arrives picked and locked in one repaint never did: measured in plain
+   * Chrome, the frame went 1 -> 1 with no intermediate value at all.
+   *
+   * That is not a vMix fault and not hypothetical. The feed folds a whole array
+   * of events into one state push, so a client that batches a pick with its
+   * lock, or that only emits once the player has committed, lands here in
+   * exactly that shape. It looks browser-specific only because the dashboard's
+   * two controls are seconds apart and so always animate.
+   *
+   * The fix has to put the card AT the provisional scale, not merely into the
+   * class that leads there - the 0.88 is itself transitioned, so staging it with
+   * transitions live just starts a 310ms move toward 0.88 that the lock then
+   * reverses, which is the imperceptible wobble this looked like at first.
+   * `instantly` is the existing helper for exactly that: suppress, change,
+   * commit, release.
+   *
+   * Costs one forced layout per card that arrives already locked - ten a lobby,
+   * not one per repaint, because a card already in the right classes never
+   * enters this branch.
+   */
+  if (locked && !card.classList.contains('is-picked') && !stage.classList.contains('anim-off')) {
+    instantly(() => {
+      card.classList.add('is-picked');
+      card.classList.remove('is-locked');
+    });
+  }
+
   card.classList.toggle('is-picked', picked);
-  card.classList.toggle('is-locked', picked && Boolean(slot.locked));
+  card.classList.toggle('is-locked', locked);
   card.style.setProperty('--side', colour);
 
   const portrait = card.querySelector('.card-portrait');

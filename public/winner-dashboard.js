@@ -17,7 +17,7 @@
 import { FONT_CHOICES } from './preset-schema.js';
 import { onState } from './live.js';
 import { mediaControl } from './media-field.js';
-import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, teamLabel } from './teams.js';
+import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, applyTeam, teamLabel } from './teams.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import {
   AUDIO_FIELDS,
@@ -25,6 +25,7 @@ import {
   SEQ_FIELDS,
   SEQ_GROUPS,
   WINNER_MAP_ROWS,
+  WINNER_SCORE_FIELDS,
   WINNER_SIDE_CHOICES,
   WINNER_STAGES,
   WINNER_STAGE_COUNT,
@@ -32,6 +33,7 @@ import {
   WINNER_STYLE_GROUPS,
   WINNER_TEXT_FIELDS,
   resolveWinner,
+  seriesScore,
   sequenceRunMs,
 } from './winner-schema.js';
 
@@ -88,8 +90,10 @@ function setStatus(kind, label) {
 function queueSave() {
   setStatus('saving', 'Saving...');
   // Any timing edit changes what the transport bar reports, so it is refreshed
-  // here rather than at each of the twenty-odd controls.
+  // here rather than at each of the twenty-odd controls. The derived series
+  // score rides the same funnel for the same reason.
   syncCueUi();
+  syncDerivedUi();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
 }
@@ -114,7 +118,12 @@ async function save() {
 
     // Adopt the sanitised copy so the dashboard and the graphic can never
     // disagree - but only if nothing has been typed since this save started.
-    if (generation === saveGeneration) state = payload.state;
+    if (generation === saveGeneration) {
+      state = payload.state;
+      // The adopted copy is the sanitised one, so anything derived from it is
+      // re-read here or it would lag a save behind.
+      syncDerivedUi();
+    }
     setStatus('', 'Saved');
   } catch (error) {
     setStatus('failed', 'Not saved');
@@ -280,7 +289,7 @@ function teamPicker(half) {
     }
     // Copied, not linked: the score below belongs to this match, and renaming
     // the team next week must not rewrite a graphic that already went to air.
-    for (const key of ['name', 'shortName', 'region', 'logo', 'colour']) state[half][key] = team[key];
+    applyTeam(state[half], team);
     state[half].teamId = team.id;
     queueSave();
     buildContentEditor();
@@ -310,13 +319,61 @@ function teamBlock(half) {
       textField('Name', `${half}.name`, { maxlength: 32 }),
       textField('Tricode', `${half}.shortName`, { maxlength: 8, placeholder: 'SEN' }),
     ]),
-    grid(2, [
-      selectField('Region', `${half}.region`, TEAM_REGIONS),
-      numberField('Maps won', `${half}.score`, { max: 99 }),
-    ]),
-    grid(2, [colourField('Team colour', `${half}.colour`)]),
+    grid(2, [selectField('Region', `${half}.region`, TEAM_REGIONS), seriesField(half)]),
+    grid(2, [colourField('Team colour', `${half}.colour`, { sampleFrom: () => state[half].logo, clearable: true })]),
     logoField('Logo', `${half}.logo`),
   ]);
+}
+
+/*
+ * The series score box, and the one place it is kept honest.
+ *
+ * Held in module scope rather than looked up, because the sync below runs on
+ * every keystroke and must never rebuild the panel: replacing the input the
+ * operator is typing into loses the caret, which is the trap already documented
+ * over syncTeamForm.
+ */
+const seriesInputs = { left: null, right: null };
+let winnerNote = null;
+
+function seriesField(half) {
+  const wrap = numberField('Maps won', `${half}.score`, { max: 99 });
+  seriesInputs[half] = wrap.querySelector('input');
+  return wrap;
+}
+
+/** What the winner scene's note should say, given how the winner is decided. */
+function winnerNoteText() {
+  const decided = resolveWinner(state);
+  const who = state[decided].name || (decided === 'left' ? 'the left team' : 'the right team');
+  if (state.winner !== 'auto') return 'Overridden by hand - the series score is being ignored.';
+  return state.autoSeriesScore === false
+    ? `The series score makes ${who} the winner.`
+    : `The map rows make it ${seriesScore(state).left} - ${seriesScore(state).right}, so ${who} wins.`;
+}
+
+/**
+ * Push everything derived back onto the controls that display it.
+ *
+ * Called from queueSave, which is the one funnel every control already goes
+ * through, so a map score typed anywhere moves the series boxes and the winner
+ * note without either of them being wired to it directly.
+ */
+function syncDerivedUi() {
+  if (!state) return;
+  const counted = state.autoSeriesScore !== false;
+  const score = seriesScore(state);
+
+  for (const half of ['left', 'right']) {
+    const input = seriesInputs[half];
+    if (!input) continue;
+    input.disabled = counted;
+    input.title = counted ? 'Counted from the map rows - untick that to type it by hand.' : '';
+    // Never rewrite the box the cursor is in.
+    if (document.activeElement !== input) input.value = String(counted ? score[half] : state[half].score ?? 0);
+  }
+
+  if (winnerNote) winnerNote.textContent = winnerNoteText();
 }
 
 /** One row of the score line's map breakdown. */
@@ -369,6 +426,13 @@ function sceneSection(stage, index) {
         grid(2, texts.slice(0, 1)),
         ...Array.from({ length: WINNER_MAP_ROWS }, (_, row) => mapRow(row)),
         help('A map row with no map picked is left out of the graphic, so a Bo3 is just a Bo5 with two rows empty.'),
+        grid(null, WINNER_SCORE_FIELDS.map((entry) => checkField(entry.label, entry.key))),
+        help(
+          'On, the two Maps won boxes up in the team blocks are filled in from these rows and locked, so the ' +
+            'number beside the crest can never disagree with the maps underneath it. A row still on 0 - 0 counts ' +
+            'for neither side. Untick it for a series that started before the app was open, a forfeit, or a map ' +
+            'awarded with no round score - the number you typed is kept, so it is safe to switch back and forth.',
+        ),
         grid(2, texts.slice(1)),
         help(
           'A map that is picked but still on 0 - 0 has not been played, so it is faded and carries the note above ' +
@@ -378,16 +442,14 @@ function sceneSection(stage, index) {
       ];
 
     default: {
-      const decided = resolveWinner(state);
+      // Captured rather than written once: the dropdown and every map score
+      // change what this says, and none of them rebuild the panel.
+      winnerNote = help(winnerNoteText());
       return [
         heading,
         grid(2, [choiceField('Winning team', 'winner', WINNER_SIDE_CHOICES), ...texts.slice(0, 1)]),
         grid(null, texts.slice(1)),
-        help(
-          state.winner === 'auto'
-            ? `The series score makes ${state[decided].name || (decided === 'left' ? 'the left team' : 'the right team')} the winner.`
-            : 'Overridden by hand - the series score above is being ignored.',
-        ),
+        winnerNote,
       ];
     }
   }
@@ -612,7 +674,7 @@ function draftControl(entry) {
     case 'choice':
       return draftFields.selectField(entry.label, entry.key, TEAM_REGIONS);
     case 'hex':
-      return draftFields.colourField(entry.label, entry.key);
+      return draftFields.colourField(entry.label, entry.key, { sampleFrom: () => draft.logo, clearable: true });
     case 'image':
       return null; // handled below - the logo control is not a plain input
     default:
@@ -695,7 +757,9 @@ function buildTeamEditor() {
     title('Team library'),
     help(
       'Saved once and reused. Picking a team copies its name, tricode, region, logo and colour onto a graphic - it ' +
-        'does not link them, so editing a team here never changes something that is already on air.',
+        'does not link them, so editing a team here never changes something that is already on air. Leave the ' +
+        'colour switched off and they wear whichever side they are playing, which is usually what you want for a ' +
+        'team with no brand colour of its own.',
     ),
     library.length
       ? wrapChildren('team-list', library.map(teamCard))
@@ -749,6 +813,8 @@ function buildAll() {
   buildAudioEditor();
   buildStyleEditor();
   syncCueUi();
+  // After the editors exist, or the boxes it drives have not been built yet.
+  syncDerivedUi();
 }
 
 async function start() {

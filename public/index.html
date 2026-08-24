@@ -25,6 +25,7 @@
         <button type="button" class="tab" role="tab" data-tab="graphic" aria-selected="false">Graphics dashboard</button>
         <button type="button" class="tab" role="tab" data-tab="winner" aria-selected="false">Winner graphic</button>
         <button type="button" class="tab" role="tab" data-tab="select" aria-selected="false">Agent select</button>
+        <button type="button" class="tab" role="tab" data-tab="global" aria-selected="false">Global</button>
       </nav>
 
       <div class="routing" id="henrik-routing">
@@ -169,7 +170,8 @@
     <main class="graphic-tab" id="tab-graphic" role="tabpanel" hidden>
       <div class="graphic-toolbar">
         <button type="button" id="g-import" class="btn btn-primary" disabled>Import from match lookup</button>
-        <button type="button" id="g-swap" class="btn btn-ghost">Swap sides</button>
+        <button type="button" id="g-swap" class="btn btn-ghost" title="Move everything to the other side - names, logos, rosters and scores">Swap sides</button>
+        <button type="button" id="g-names" class="btn btn-ghost" title="Move only the names, logos and library links; rosters and scores stay where the import put them">Swap names</button>
         <button type="button" id="g-sort" class="btn btn-ghost">Sort by ACS</button>
         <button type="button" id="g-reset" class="btn btn-ghost">Reset graphic</button>
 
@@ -305,7 +307,6 @@
 
       <div class="editor-grid">
         <section class="panel" id="wed-content"></section>
-        <section class="panel" id="wed-teams"></section>
         <section class="panel" id="wed-seq"></section>
         <section class="panel" id="wed-audio"></section>
         <section class="panel" id="wed-style"></section>
@@ -399,9 +400,23 @@
       <div class="editor-grid">
         <section class="panel" id="sed-teams"></section>
         <section class="panel" id="sed-roster"></section>
-        <section class="panel" id="sed-aliases"></section>
         <section class="panel" id="sed-anim"></section>
         <section class="panel" id="sed-style"></section>
+      </div>
+    </main>
+
+    <!-- =========================================================== global === -->
+    <!--
+      The settings that are not any one graphic's business, and the two libraries
+      that were only ever on a tab by accident of where they were first needed.
+      No preview and no event stream of its own: this page edits shared values
+      and the graphics that follow them repaint on their own connections.
+    -->
+    <main class="graphic-tab" id="tab-global" role="tabpanel" hidden>
+      <div class="editor-grid">
+        <section class="panel" id="ged-shared"></section>
+        <section class="panel" id="wed-teams"></section>
+        <section class="panel" id="sed-aliases"></section>
       </div>
     </main>
 
@@ -411,5 +426,6 @@
     <script src="/dashboard.js" type="module"></script>
     <script src="/winner-dashboard.js" type="module"></script>
     <script src="/select-dashboard.js" type="module"></script>
+    <script src="/global-dashboard.js" type="module"></script>
   </body>
 </html>

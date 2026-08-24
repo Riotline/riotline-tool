@@ -32,6 +32,12 @@ import {
 import { EMPTY_TEAM, TEAM_FIELDS, TEAM_REGIONS, teamSlug } from './public/teams.js';
 import { mapCodeFromUrl, mapDisplayName } from './public/maps.js';
 import {
+  COLOUR_SOURCE_KEYS,
+  DEFAULT_GLOBAL,
+  SYNC_FIELDS,
+  graphicPatch,
+} from './public/global-schema.js';
+import {
   DEFAULT_SELECT,
   DEFAULT_SELECT_ANIM,
   DEFAULT_SELECT_AUTO,
@@ -46,6 +52,7 @@ import {
   SELECT_SLOTS,
   SELECT_STYLE_FIELDS,
   TIMER_DEFAULT_MS,
+  aliasForPlayer,
   displayName,
   emptySlots,
   everyoneLocked,
@@ -64,6 +71,7 @@ import {
   WINNER_STAGE_COUNT,
   WINNER_STAGES,
   isOverlayEntry,
+  WINNER_SCORE_FIELDS,
   WINNER_STYLE_FIELDS,
   WINNER_TEXT_FIELDS,
   WINNER_TRANSITION_KEYS,
@@ -74,7 +82,7 @@ import {
 
 export { STAT_FIELDS, STAT_KEYS, STAT_SLOTS, FONT_CHOICES, BUILT_IN_PRESETS, ANIM_TIER_COUNT, inDurationMs };
 export { TEAM_REGIONS, WINNER_STAGES, WINNER_STAGE_COUNT, isOverlayEntry, resolveWinner, stageBands, stageEnterMs };
-export { SELECT_SLOTS, displayName, isAgentSelectScene };
+export { SELECT_SLOTS, aliasForPlayer, displayName, isAgentSelectScene };
 
 export const PLAYERS_PER_SIDE = 5;
 
@@ -86,6 +94,12 @@ const emptyPlayer = () => ({
   name: '',
   tag: '',
   agent: '',
+  // Who this row is, as opposed to what it scored. Carried so the alias library
+  // built in agent select can name the same people on the scoreboard; both are
+  // blank for a row typed by hand, which is what keeps a hand-typed name from
+  // being overwritten the next time an alias is saved.
+  playerId: '',
+  riotId: '',
   ...Object.fromEntries(STAT_FIELDS.map((stat) => [stat.key, 0])),
 });
 
@@ -185,6 +199,10 @@ function sanitisePlayer(input, fallback) {
     name: text(source.name, fallback.name, 40),
     tag: text(source.tag, fallback.tag, 16),
     agent: text(source.agent, fallback.agent, 32),
+    // Same 64 as the select slot and the alias record, so an id cannot be
+    // truncated into one that matches nothing on its way through here.
+    playerId: text(source.playerId, fallback.playerId ?? '', 64),
+    riotId: text(source.riotId, fallback.riotId ?? '', 64),
     ...Object.fromEntries(
       STAT_FIELDS.map((stat) => [stat.key, int(source[stat.key], fallback[stat.key] ?? 0, 0, stat.max)]),
     ),
@@ -342,7 +360,11 @@ export function sanitiseTeamFields(input, fallback = EMPTY_TEAM) {
         clean[field.key] = imageUrl(value, previous);
         break;
       case 'hex':
-        clean[field.key] = colour(value, previous || EMPTY_TEAM.colour);
+        // Blank is a real answer here - it means "whichever side they are on",
+        // which is why an empty string is kept rather than falling back. Only an
+        // absent key takes the previous value; anything unparseable still does.
+        clean[field.key] =
+          typeof value === 'string' && !value.trim() ? '' : colour(value, previous);
         break;
       default:
         // Regions are a suggestion list, not a closed set: an event running a
@@ -513,6 +535,13 @@ export function sanitiseWinner(input, base = DEFAULT_WINNER) {
   for (const field of WINNER_TEXT_FIELDS) {
     clean[field.key] = text(source[field.key], fallback[field.key], field.max);
   }
+  // A state written before the series count existed has no key here, so it takes
+  // the default and starts counting. That is deliberate: a stored series score
+  // the map rows contradict is a wrong number on air, and the rows are the
+  // record of what actually happened.
+  for (const field of WINNER_SCORE_FIELDS) {
+    clean[field.key] = bool(source[field.key], fallback[field.key]);
+  }
   return clean;
 }
 
@@ -542,10 +571,17 @@ function sanitiseSelectSide(input, fallback) {
     const previous = fallback[field.key];
     switch (field.type) {
       case 'hex':
-        clean[field.key] = colour(value, previous);
+        // Blank means "wear the side's colour", so it survives - see teamColour.
+        clean[field.key] =
+          field.optional && typeof value === 'string' && !value.trim() ? '' : colour(value, previous);
         break;
       case 'image':
         clean[field.key] = imageUrl(value, previous);
+        break;
+      case 'choice':
+        clean[field.key] = (field.options ?? []).some((entry) => entry.key === value)
+          ? value
+          : previous;
         break;
       default:
         clean[field.key] = text(value, previous, field.max);
@@ -648,6 +684,9 @@ export function sanitiseSelect(input, base = DEFAULT_SELECT) {
     version: 1,
     gameId: text(source.gameId, fallback.gameId, 64),
     scene: text(source.scene, fallback.scene, 64),
+    colourSource: COLOUR_SOURCE_KEYS.includes(String(source.colourSource))
+      ? String(source.colourSource)
+      : fallback.colourSource,
     mapName: text(source.mapName, fallback.mapName, 40),
     mapImage: imageUrl(source.mapImage, fallback.mapImage),
     eventLogo: imageUrl(source.eventLogo, fallback.eventLogo),
@@ -1150,6 +1189,31 @@ export function makeStateStore(filePath, sanitise, defaults) {
     },
   };
 }
+
+/**
+ * The settings that belong to the production rather than to one graphic.
+ *
+ * Sanitised with the same rules as everything else - the map name is text an
+ * operator can type, the logo is a URL, and the colour source is a closed set.
+ */
+export function sanitiseGlobal(input, base = DEFAULT_GLOBAL) {
+  const source = input ?? {};
+  const fallback = base ?? DEFAULT_GLOBAL;
+  return {
+    version: 1,
+    mapName: text(source.mapName, fallback.mapName, 40),
+    mapImage: imageUrl(source.mapImage, fallback.mapImage),
+    eventLogo: imageUrl(source.eventLogo, fallback.eventLogo),
+    colourSource: COLOUR_SOURCE_KEYS.includes(String(source.colourSource))
+      ? String(source.colourSource)
+      : fallback.colourSource,
+    ...Object.fromEntries(SYNC_FIELDS.map((field) => [field.key, bool(source[field.key], fallback[field.key])])),
+  };
+}
+
+export const makeGlobalStore = (filePath) => makeStateStore(filePath, sanitiseGlobal, DEFAULT_GLOBAL);
+
+export { graphicPatch };
 
 export const makeGraphicStore = (filePath) => makeStateStore(filePath, sanitiseState, DEFAULT_STATE);
 export const makeWinnerStore = (filePath) => makeStateStore(filePath, sanitiseWinner, DEFAULT_WINNER);

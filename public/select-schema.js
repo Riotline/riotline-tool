@@ -21,6 +21,7 @@
  */
 
 import { ANIM_EASINGS, ANIM_EASING_KEYS, easingCurve } from './animation.js';
+import { SIDE_CHOICES } from './teams.js';
 
 export { ANIM_EASINGS as SELECT_EASINGS, ANIM_EASING_KEYS as SELECT_EASING_KEYS, easingCurve };
 
@@ -136,16 +137,26 @@ export const emptySlots = () => Array.from({ length: SELECT_SLOTS }, () => ({ ..
 export const SELECT_SIDE_FIELDS = [
   { key: 'name', type: 'text', max: 32, label: 'Name', placeholder: 'Team' },
   { key: 'shortName', type: 'text', max: 8, label: 'Tricode', placeholder: 'TMA' },
-  { key: 'label', type: 'text', max: 8, label: 'Side', placeholder: 'DEF' },
-  { key: 'colour', type: 'hex', label: 'Colour' },
+  { key: 'label', type: 'text', max: 8, label: 'Side label', placeholder: 'DEF' },
+  /*
+   * Which half they are playing, as a fact rather than as the words on screen.
+   *
+   * The label above is free text and always was - an event may want "ATK", "ATT"
+   * or its own wording - so it can never be read as a side. This can: it is what
+   * lets a team with no colour of its own wear attack red or defence blue, and
+   * what the global switch to plain side colours resolves against.
+   */
+  { key: 'side', type: 'choice', options: SIDE_CHOICES, label: 'Playing as' },
+  { key: 'colour', type: 'hex', label: 'Colour', optional: true },
   { key: 'logo', type: 'image', label: 'Logo' },
 ];
 
-const side = (label, colour) => ({
+const side = (label, colour, playing) => ({
   teamId: '',
   name: '',
   shortName: '',
   label,
+  side: playing,
   colour,
   logo: '',
 });
@@ -267,18 +278,24 @@ export const SELECT_ANIM_GROUPS = [...new Set(SELECT_ANIM_FIELDS.map((field) => 
 /**
  * What the scene feed is allowed to do on its own.
  *
- * All four default on, because automation that has to be switched on is not
- * automation - and every one of them is a thing an operator would otherwise be
- * doing by hand at the exact moment they are busiest. The two that put the
- * graphic on and off air are the ones worth knowing about, so they are first
- * and they are plainly worded.
+ * Three of the four default on, because automation that has to be switched on
+ * is not automation - and each of those is a thing an operator would otherwise
+ * be doing by hand at the exact moment they are busiest.
+ *
+ * `autoHide` is the exception and defaults OFF. Agent select "ending" is the
+ * client leaving CharacterSelectPersistentLevel, which is the loading screen -
+ * the one moment the audience most wants to read the ten agents that were just
+ * locked. Dropping the strip there took it off air exactly when it had become
+ * worth watching, so taking it down is left to the operator, who can see what
+ * the programme is doing. The next lobby still empties the cards on its own
+ * (`autoClear`), so leaving it up costs nothing.
  *
  * With the feed not running these do nothing at all: no scene events, no
  * automatic anything, and the transport bar is the only thing that moves.
  */
 export const SELECT_AUTO_FIELDS = [
   { key: 'autoShow', type: 'bool', label: 'Put it on air when agent select starts', default: true },
-  { key: 'autoHide', type: 'bool', label: 'Take it off when agent select ends', default: true },
+  { key: 'autoHide', type: 'bool', label: 'Take it off when agent select ends', default: false },
   { key: 'autoClear', type: 'bool', label: 'Empty the cards when the lobby changes', default: true },
   { key: 'autoTimer', type: 'bool', label: 'Start the clock when agent select starts', default: true },
 ];
@@ -325,8 +342,18 @@ export const DEFAULT_SELECT = {
    */
   swap: false,
 
-  left: side('DEF', '#4ea8de'),
-  right: side('ATK', '#ff4655'),
+  // Blank colours, so the two default to their side's own - which is what a
+  // lobby nobody has set up should look like.
+  /*
+   * Where the two side colours come from. Owned by the Global page while its
+   * sync is on, which is why it sits on the state rather than in `style` - the
+   * server patches top-level keys, and nesting it would need a special case for
+   * one setting.
+   */
+  colourSource: 'team',
+
+  left: side('DEF', '', 'defence'),
+  right: side('ATK', '', 'attack'),
 
   slots: emptySlots(),
 
@@ -346,6 +373,47 @@ export function sideSlots(state, half) {
 
 /** A Riot ID without its tagline - "Kuyareymark #6767" becomes "Kuyareymark". */
 export const stripTagline = (riotId) => String(riotId ?? '').split('#')[0].trim();
+
+/**
+ * One spelling of a Riot ID, for comparing two that came from different places.
+ *
+ * The game client sends "RTLine #GLHF" - a space before the hash - and 41 of the
+ * 50 records in a real alias library are stored exactly that way. The match
+ * providers hand back the name and the tag as separate fields, so the obvious
+ * `name + '#' + tag` comparison misses every one of them. Both sides go through
+ * here instead: lowercased, split on the hash, each half trimmed.
+ */
+export const riotIdKey = (riotId) => {
+  const [rawName, rawTag = ''] = String(riotId ?? '').split('#');
+  const name = rawName.trim().toLowerCase();
+  const tag = rawTag.trim().toLowerCase();
+  return tag ? `${name}#${tag}` : name;
+};
+
+/**
+ * The alias for a player, by id first and by Riot ID second.
+ *
+ * Two keys because the sources disagree about what a player is. The game client
+ * and Riot's own endpoints both identify an account by UUID, which is exact; but
+ * tracker.gg has no UUID at all and only ever reports the Riot ID, so a library
+ * built from agent select would be unreachable from a scoreboard imported that
+ * way. The Riot ID is the weaker key - people do change them - which is why it
+ * is only consulted second.
+ *
+ * Only records that actually carry an alias can match. Every player the feed has
+ * ever seen is in the library, most of them unnamed, and an unnamed record
+ * matching first would shadow a named one.
+ */
+export function aliasForPlayer(list, { playerId, riotId } = {}) {
+  const records = list ?? [];
+  if (playerId) {
+    const byId = records.find((entry) => entry.id === playerId);
+    if (byId?.alias) return byId.alias;
+  }
+  const key = riotIdKey(riotId);
+  if (!key) return '';
+  return records.find((entry) => entry.alias && riotIdKey(entry.riotId) === key)?.alias ?? '';
+}
 
 /**
  * What to call a player.

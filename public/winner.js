@@ -16,6 +16,7 @@
  * which is why two browser sources and the dashboard preview stay in step.
  */
 
+import { teamColour } from './teams.js';
 import {
   FACET_COLS,
   FACET_ROWS,
@@ -35,6 +36,7 @@ import {
   isOverlayEntry,
   openingMs,
   resolveWinner,
+  seriesScore,
   stageBands,
   upcomingNotes,
 } from './winner-schema.js';
@@ -266,6 +268,10 @@ function buildView(state) {
     maps: {},
   };
 
+  // Counted from the map rows unless the operator took the count off, so the
+  // number beside the crest and the rows underneath it cannot disagree.
+  const series = seriesScore(state);
+
   for (const half of ['left', 'right']) {
     const team = state[half];
     view[half] = {
@@ -273,12 +279,12 @@ function buildView(state) {
       shortName: team.shortName,
       logo: team.logo,
       region: state.style.showRegion ? team.region : '',
-      score: String(team.score ?? 0),
+      score: String(series[half]),
     };
   }
 
-  view.left.ahead = (state.left.score ?? 0) > (state.right.score ?? 0);
-  view.right.ahead = (state.right.score ?? 0) > (state.left.score ?? 0);
+  view.left.ahead = series.left > series.right;
+  view.right.ahead = series.right > series.left;
 
   const notes = upcomingNotes(state);
 
@@ -329,7 +335,10 @@ function applyStyle(style, view) {
   // Scoped to the winner scene on purpose. Recolouring the whole overlay from
   // the champion's palette would mean the map card is already flying their
   // colours two scenes before the result is revealed.
-  const teamAccent = style.useTeamColour ? view.winner.colour : '';
+  // Resolved rather than read straight: a team colour may now be blank, meaning
+  // "wear the side you are on" - and an end-of-series graphic has no sides, so
+  // blank has to land on the fallback rather than on no accent at all.
+  const teamAccent = style.useTeamColour ? teamColour(view.winner.colour, '') : '';
   winnerScene.style.setProperty('--accent', teamAccent || style.accent);
 }
 

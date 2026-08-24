@@ -15,6 +15,10 @@
  * Dependency-free, DOM-only.
  */
 
+// The dashboards all listen for this; fields.js has no toast of its own and
+// should not grow one.
+const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { detail: message }));
+
 export function el(tag, className, attrs = {}, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -151,11 +155,72 @@ export function makeFields(state, onChange) {
     return field(label, select);
   }
 
-  function colourField(label, path) {
+  /**
+   * A colour, and optionally a way to lift one out of the team's own logo.
+   *
+   * `sampleFrom` is a getter rather than a value because the logo can change
+   * after this control is built - the operator drops one in, then reaches for
+   * the colour - and a captured URL would be the old one.
+   */
+  function colourField(label, path, { sampleFrom, clearable = false } = {}) {
     const input = el('input', null, { type: 'color' });
-    input.value = get(path) || '#000000';
+    const stored = get(path);
+    input.value = stored || '#000000';
     input.addEventListener('input', () => set(path, input.value));
-    return field(label, input);
+    if (!sampleFrom && !clearable) return field(label, input);
+
+    /*
+     * Switched off is a real setting, not an empty one - for a team colour it
+     * means "wear whichever side you are on". So the box is disabled rather than
+     * hidden: the operator can see the colour that would come back.
+     */
+    let toggle = null;
+    if (clearable) {
+      toggle = el('input', null, { type: 'checkbox' });
+      toggle.checked = Boolean(stored);
+      input.disabled = !toggle.checked;
+      toggle.addEventListener('change', () => {
+        input.disabled = !toggle.checked;
+        set(path, toggle.checked ? input.value : '');
+      });
+    }
+
+    const button = sampleFrom ? el('button', 'mini-btn', { type: 'button' }, 'From logo') : null;
+    if (button) button.addEventListener('click', async () => {
+      const source = String(sampleFrom() ?? '').trim();
+      if (!source) {
+        toast('No logo on this team yet - add one and try again.');
+        return;
+      }
+      button.disabled = true;
+      try {
+        const { logoColour } = await import('./palette.js');
+        const result = await logoColour(source);
+        if (result.hex) {
+          input.value = result.hex;
+          if (toggle) {
+            toggle.checked = true;
+            input.disabled = false;
+          }
+          set(path, result.hex);
+          toast(`Colour taken from the logo: ${result.hex}`);
+        } else if (result.error === 'blocked') {
+          toast('That logo is hosted elsewhere and the browser will not let the page read its pixels. Upload the file instead.');
+        } else if (result.error === 'empty') {
+          toast('Nothing in that logo reads as a colour - it may be black and white.');
+        } else {
+          toast('That logo could not be loaded.');
+        }
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    const row = el('div', 'colour-row');
+    if (toggle) row.append(toggle);
+    row.append(input);
+    if (button) row.append(button);
+    return field(label, row);
   }
 
   function checkField(label, path) {

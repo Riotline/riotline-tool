@@ -12,6 +12,15 @@
  * do while an audience is watching it.
  */
 
+/*
+ * `inset: 0` is deliberately written out as four longhands everywhere below.
+ * The shorthand is Chromium 87 and vMix 24/25 embed Chromium 86 - one release
+ * short - where it would leave every absolutely positioned box with all four
+ * offsets auto, shrink-wrapped to nothing. The longhands are byte-identical on
+ * every engine that supports either, so this costs nothing and is not a style
+ * preference to be tidied away.
+ */
+
 :root {
   --bg: #0b0f14;
   --bg-opacity: 0.92;
@@ -25,6 +34,11 @@
 
   --pick-opacity: 0.55;
   --pick-scale: 0.88;
+  /* Half the entrance, matching what select.js computes onto the stage. Named
+     here as well so the transition shorthand that reads it can never be left
+     without a value: a var() that fails to substitute invalidates the WHOLE
+     declaration, which would silently turn the lock-in into a jump. */
+  --pick-ms: 310ms;
   --pulse-ms: 1500ms;
 
   --in-ms: 620ms;
@@ -111,7 +125,10 @@ body {
 .strip::before {
   content: "";
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: var(--bg);
   opacity: var(--bg-opacity);
   z-index: 0;
@@ -433,7 +450,10 @@ body {
 
 .card-frame {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: var(--panel);
   overflow: hidden;
   /* Scale rather than width, so ten cards never reflow when one locks in. */
@@ -457,7 +477,10 @@ body {
 
 .card-media {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   opacity: 0;
   transition: opacity var(--pick-ms, 320ms) var(--ease);
 }
@@ -472,7 +495,10 @@ body {
 
 .card-portrait {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -488,7 +514,10 @@ body {
    belonging to that agent even where the artwork is mostly transparent. */
 .card-wash {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: linear-gradient(160deg, var(--wash-a, transparent), var(--wash-b, transparent));
   opacity: 0.55;
 }
@@ -496,7 +525,10 @@ body {
 /* Keeps the names legible over the busiest part of a portrait. */
 .card-scrim {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.35) 34%, transparent 62%);
 }
 
@@ -513,7 +545,10 @@ body {
  */
 .card-pulse {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   opacity: 0;
   pointer-events: none;
   box-shadow:
@@ -633,7 +668,10 @@ body {
    card captioned "waiting" ten times over is noise. */
 .card-seat {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   display: grid;
   place-items: center;
   font-size: 64px;
@@ -664,7 +702,10 @@ body {
 
 .map-splash {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
 }
 
 .map-splash img {
@@ -681,13 +722,19 @@ body {
 .map-card::after {
   content: "";
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.9) 0%, rgba(0, 0, 0, 0.15) 55%, rgba(0, 0, 0, 0.55) 100%);
 }
 
 .map-body {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 1;
   display: flex;
   flex-direction: column;

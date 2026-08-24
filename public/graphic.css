@@ -368,30 +368,22 @@ body {
 /* Stacked above the roster so a sliding row emerges from behind the artwork
    rather than travelling across it. Costs nothing when nothing is moving. */
 .map,
+/* The mirror of the map splash on the other side, in the team's colour. It
+   holds no logo - logos live in the .head blocks - but it keeps its width so
+   the two halves of the board stay symmetrical. */
 .team-art {
   position: relative;
   z-index: 1;
   width: 32%;
   flex: none;
   overflow: hidden;
-}
-
-.team-art {
   background: var(--right-bg);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
 }
 
-.map img,
-.team-art img {
+.map img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.team-art img {
-  object-fit: contain;
 }
 
 .map-name {

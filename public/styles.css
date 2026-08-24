@@ -1268,6 +1268,17 @@ pre {
   border-color: var(--warn);
 }
 
+/* A derived box. It has to read as a readout rather than as an empty field that
+   silently refuses to be typed in - .g-field input paints its own background and
+   colour, so without this a disabled one looks exactly like an editable one. */
+.g-field input:disabled,
+.g-field select:disabled {
+  background: transparent;
+  border-style: dashed;
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+
 .g-field input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
@@ -1281,6 +1292,23 @@ pre {
 .g-field input[type="range"] {
   padding: 0;
   accent-color: var(--accent);
+}
+
+/* A colour box with its sampler beside it. The box keeps the room it had; the
+   button takes only what its own label needs. */
+.colour-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.colour-row input[type="color"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.colour-row .mini-btn {
+  flex: none;
 }
 
 .checkline {

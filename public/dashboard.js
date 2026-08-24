@@ -13,6 +13,8 @@
 
 import { onLookupMatch } from './store.js';
 import { onState } from './live.js';
+import { aliasForPlayer } from './select-schema.js';
+import { applyTeam } from './teams.js';
 import { STATS, STAT_FIELDS, STAT_SLOTS, statDef } from './stats.js';
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
 import { el, field, grid, makeFields, subhead, title } from './fields.js';
@@ -42,10 +44,13 @@ const els = {
     graphic: $('tab-graphic'),
     winner: $('tab-winner'),
     select: $('tab-select'),
+    // No preview and no stream of its own - see index.html.
+    global: $('tab-global'),
   },
   importBtn: $('g-import'),
   importHint: $('g-import-hint'),
   swapBtn: $('g-swap'),
+  namesBtn: $('g-names'),
   sortBtn: $('g-sort'),
   resetBtn: $('g-reset'),
   status: $('g-status'),
@@ -114,6 +119,14 @@ const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { d
 let state = null;
 let catalogue = { agents: [], maps: [] };
 let teamLibrary = [];
+
+/*
+ * Every player the agent select feed has ever seen, with whatever the operator
+ * chose to call them. Held here so an imported scoreboard can put the same names
+ * on air as the agent select strip did - typing a caster-friendly name twice a
+ * series is the thing this removes.
+ */
+let aliasLibrary = [];
 let saveTimer = null;
 let saveGeneration = 0;
 
@@ -245,6 +258,26 @@ function movePlayer(side, from, to) {
   buildSideEditor(side);
 }
 
+/**
+ * The player name, and the promise that comes with typing in it.
+ *
+ * A name written here is the operator's, so the row stops answering to the alias
+ * library: saving or deleting an alias re-resolves every row that still carries
+ * an identity, and without this that correction would be silently undone the
+ * next time somebody edited the library. The cost is that the row no longer
+ * follows later alias changes either - re-import to get the link back.
+ */
+function nameField(side, index, path) {
+  const wrap = textField('Player name', `${path}.name`, { maxlength: 40 });
+  wrap.querySelector('input').addEventListener('input', () => {
+    const player = state[side].players[index];
+    if (!player.playerId && !player.riotId) return;
+    player.playerId = '';
+    player.riotId = '';
+  });
+  return wrap;
+}
+
 function playerRow(side, index) {
   const path = `${side}.players.${index}`;
   const isMvp = index === 0;
@@ -276,7 +309,7 @@ function playerRow(side, index) {
   row.append(
     head,
     grid(2, [
-      textField('Player name', `${path}.name`, { maxlength: 40 }),
+      nameField(side, index, path),
       textField('Tag', `${path}.tag`, { placeholder: 'optional', maxlength: 16 }),
     ]),
     grid(null, [selectField('Agent', `${path}.agent`, agentNames)]),
@@ -310,10 +343,9 @@ function teamPicker(side) {
       queueSave();
       return;
     }
-    // The header has room for the full name; the tricode is the winner
-    // graphic's problem, not this one's.
-    state[side].teamName = team.name;
-    state[side].logo = team.logo;
+    // Only the fields this graphic has: the header takes the full name, and
+    // the tricode is the winner graphic's problem rather than this one's.
+    applyTeam(state[side], team, { name: 'teamName' });
     state[side].teamId = team.id;
     queueSave();
     buildSideEditor(side);
@@ -655,6 +687,30 @@ els.swapBtn.addEventListener('click', () => {
   toast('Sides swapped');
 });
 
+/*
+ * The identity fields, and only those.
+ *
+ * Names and logos are typed once at the top of a series and left alone, but a
+ * match import re-assigns the rosters and scores Blue-left / Red-right on every
+ * map (see teamRank), and which org is Blue flips between maps. So roughly every
+ * other map the typed name ends up sitting over the other team's roster.
+ *
+ * Swap sides moves both halves at once, which keeps them mismatched - that is
+ * why this is a separate button rather than the same one.
+ */
+const IDENTITY_KEYS = ['teamName', 'logo', 'teamId'];
+
+els.namesBtn.addEventListener('click', () => {
+  for (const key of IDENTITY_KEYS) {
+    const held = state.left[key];
+    state.left[key] = state.right[key];
+    state.right[key] = held;
+  }
+  queueSave();
+  for (const side of SIDES) buildSideEditor(side);
+  toast('Names swapped - rosters and scores stayed put');
+});
+
 els.sortBtn.addEventListener('click', () => {
   for (const side of SIDES) {
     state[side].players.sort((a, b) => (b.acs ?? 0) - (a.acs ?? 0) || (b.kills ?? 0) - (a.kills ?? 0));
@@ -699,6 +755,8 @@ const emptyPlayer = () => ({
   name: '',
   tag: '',
   agent: '',
+  playerId: '',
+  riotId: '',
   ...Object.fromEntries(STAT_FIELDS.map((stat) => [stat.key, 0])),
 });
 
@@ -707,10 +765,24 @@ const emptyPlayer = () => ({
  * rather than being dropped - the field still has to exist so the operator can
  * type it in if the source did not report it.
  */
+/*
+ * A UUID and nothing else is allowed into playerId.
+ *
+ * The three sources disagree about what `id` is: Riot and HenrikDev give a
+ * puuid, but tracker.gg has none and puts the Riot ID string there instead, and
+ * Henrik falls back to "name#tag" when a puuid is missing. Writing either of
+ * those into a field meant to hold a puuid would create a key that can never
+ * match an alias record - so the Riot ID is kept separately and matched on its
+ * own terms.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const mapPlayer = (player) => ({
   name: player.name ?? '',
   tag: player.tag ?? '',
   agent: player.agent ?? '',
+  playerId: UUID.test(String(player.id ?? '')) ? String(player.id) : '',
+  riotId: player.tag ? `${player.name ?? ''}#${player.tag}` : String(player.name ?? ''),
   kills: player.kills ?? 0,
   deaths: player.deaths ?? 0,
   assists: player.assists ?? 0,
@@ -775,9 +847,14 @@ function importMatch(match) {
       result: team?.won === true ? 'WIN' : team?.won === false ? 'LOSS' : state[side].result,
       won: team?.won === true,
       roundsWon: team?.roundsWon ?? 0,
-      players: Array.from({ length: SLOTS }, (_, index) =>
-        ranked[index] ? mapPlayer(ranked[index]) : emptyPlayer(),
-      ),
+      players: Array.from({ length: SLOTS }, (_, index) => {
+        if (!ranked[index]) return emptyPlayer();
+        const row = mapPlayer(ranked[index]);
+        // Resolved here rather than at render, exactly as agent select does it:
+        // the output page holds one event stream and no alias channel, and the
+        // name that gets saved should be the name that goes to air.
+        return { ...row, name: aliasForPlayer(aliasLibrary, row) || row.name };
+      }),
     };
   });
 
@@ -809,7 +886,7 @@ async function start() {
   els.obsUrl.textContent = `${location.origin}/output.html`;
   els.openLink.href = '/output.html';
 
-  const [graphic, assetData, presetData, teamData] = await Promise.all([
+  const [graphic, assetData, presetData, teamData, aliasData] = await Promise.all([
     fetch('/api/graphic').then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { agents: [], maps: [] }))
@@ -820,12 +897,28 @@ async function start() {
     fetch('/api/teams')
       .then((r) => r.json())
       .catch(() => ({ teams: [] })),
+    // A plain GET, deliberately not a second event stream: six connections per
+    // origin is the cap that deadlocked the dashboard once already.
+    fetch('/api/aliases')
+      .then((r) => (r.ok ? r.json() : { players: [] }))
+      .catch(() => ({ players: [] })),
   ]);
 
   state = graphic.state;
   catalogue = assetData;
   presetLibrary = presetData.presets ?? [];
   teamLibrary = teamData.teams ?? [];
+  aliasLibrary = aliasData.players ?? [];
+
+  // Same reason as the team library below: aliases are curated on the agent
+  // select tab, so a name saved there has to be available here without a reload.
+  window.addEventListener('app-tab', (event) => {
+    if (event.detail !== 'graphic') return;
+    fetch('/api/aliases')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) aliasLibrary = data.players ?? []; })
+      .catch(() => {});
+  });
 
   // The library is edited on the winner tab; the pickers here have to follow it
   // without a reload, or a team saved on one tab is invisible on the other.

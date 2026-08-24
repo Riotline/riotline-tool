@@ -52,9 +52,11 @@ import {
   inDurationMs,
   isOverlayEntry,
   makeAssetCache,
+  makeGlobalStore,
   makeGraphicStore,
   makeMediaStore,
   makePresetStore,
+  aliasForPlayer,
   displayName,
   isAgentSelectScene,
   makeAliasStore,
@@ -62,6 +64,7 @@ import {
   makeTeamStore,
   makeWinnerStore,
   ingestGame,
+  graphicPatch,
   ingestRoster,
   settleSelect,
   stopTimer,
@@ -140,10 +143,28 @@ const teams = makeTeamStore(path.join(STATE_DIR, 'teams.json'));
 const media = makeMediaStore(path.join(STATE_DIR, 'media'));
 const select = makeSelectStore(path.join(STATE_DIR, 'select.json'));
 const aliases = makeAliasStore(path.join(STATE_DIR, 'aliases.json'));
+const globals = makeGlobalStore(path.join(STATE_DIR, 'global.json'));
 const assets = makeAssetCache(path.join(STATE_DIR, 'valorant-assets.json'));
 const restoredGraphic = await graphics.load();
 const restoredWinner = await winner.load();
 const restoredSelect = await select.load();
+
+/*
+ * Seeded from the scoreboard on the very first run rather than pushed at it.
+ *
+ * A fresh global.json holds the schema's defaults, and pushing those out on boot
+ * would rewrite a map and an event logo the operator had already set up - the
+ * new feature's first act would be to undo their work. Adopting what is already
+ * there instead means switching this on changes nothing until somebody edits it.
+ */
+if (!(await globals.load())) {
+  globals.replace({
+    ...globals.state,
+    mapName: graphics.state.map || globals.state.mapName,
+    mapImage: graphics.state.mapImage,
+    eventLogo: graphics.state.eventLogo || winner.state.eventLogo || select.state.eventLogo,
+  });
+}
 await presets.load();
 await teams.load();
 await aliases.load();
@@ -353,6 +374,9 @@ async function handleApi(pathname, params) {
 
     case '/api/select':
       return { revision: select.revision, state: select.state };
+
+    case '/api/global':
+      return { revision: globals.revision, state: globals.state };
 
     case '/api/aliases':
       return { players: aliases.list() };
@@ -606,6 +630,27 @@ async function handleTeamAction(body) {
  * left exactly as they are - an operator's own words are not the library's to
  * overwrite.
  */
+/**
+ * Copy whatever is shared onto the graphics that are following it.
+ *
+ * Patches only the keys that actually differ, so a save that changed the event
+ * logo does not also re-push a map nobody touched - every push is an SSE frame
+ * to every browser source, and a graphic that repaints for no reason is a
+ * graphic that can flicker on air.
+ *
+ * @returns {string[]} the graphics that changed, for the caller to report.
+ */
+function pushGlobal() {
+  const pushed = [];
+  for (const [name, store] of [['graphic', graphics], ['winner', winner], ['select', select]]) {
+    const patch = graphicPatch(globals.state, name, store.state);
+    if (!patch) continue;
+    store.patch(patch);
+    pushed.push(name);
+  }
+  return pushed;
+}
+
 async function handleAliasAction(body) {
   const action = String(body?.action ?? '');
 
@@ -614,6 +659,34 @@ async function handleAliasAction(body) {
       slot.playerId ? { ...slot, name: displayName(slot.riotId, aliases.aliasFor(slot.playerId)) } : slot,
     );
     if (slots.some((slot, index) => slot.name !== select.state.slots[index].name)) select.patch({ slots });
+
+    /*
+     * And the scoreboard, for the same reason. A post-match board is on air for
+     * minutes rather than seconds, so it is the graphic an operator is most
+     * likely to be looking at when they notice a name is wrong.
+     *
+     * Matched on either key: an imported row may carry a puuid, a Riot ID, or -
+     * from tracker.gg - only the second. A row with neither was typed by hand
+     * and is left alone.
+     */
+    const library = aliases.list();
+    const patch = {};
+    for (const half of ['left', 'right']) {
+      const current = graphics.state[half];
+      const players = current.players.map((player) => {
+        if (!player.playerId && !player.riotId) return player;
+        // displayName is the same rule the strip uses: the alias if there is
+        // one, otherwise the Riot ID without its tagline - so deleting an alias
+        // undoes it rather than leaving the old name behind.
+        const next = displayName(player.riotId, aliasForPlayer(library, player)) || player.name;
+        return next === player.name ? player : { ...player, name: next };
+      });
+      if (players.some((player, index) => player !== current.players[index])) {
+        // patch is a shallow merge of top-level keys, so the whole side goes.
+        patch[half] = { ...current, players };
+      }
+    }
+    if (Object.keys(patch).length) graphics.patch(patch);
   };
 
   switch (action) {
@@ -745,6 +818,7 @@ const server = createServer(async (req, res) => {
           ['graphic', graphics],
           ['winner', winner],
           ['select', select],
+          ['global', globals],
         ],
         req,
         res,
@@ -768,6 +842,23 @@ const server = createServer(async (req, res) => {
           const body = await readJsonBody(req);
           const state = body?.reset === true ? winner.reset() : winner.replace(body?.state ?? body);
           return { revision: winner.revision, state };
+        });
+
+      /*
+       * The production's own settings, and the push that keeps the graphics in
+       * step with them.
+       *
+       * One way on purpose. The Global tab owns the value and the graphics
+       * follow it while their sync is on; a graphic never pushes back. Two-way
+       * would mean an operator correcting the winner sequence's map silently
+       * rewriting the scoreboard that is on air behind it, and there would be no
+       * way to tell which of the two had won.
+       */
+      case '/api/global':
+        return handleWrite(res, async () => {
+          const body = await readJsonBody(req);
+          const state = globals.replace(body?.state ?? body);
+          return { revision: globals.revision, state, pushed: pushGlobal() };
         });
 
       case '/api/select':
@@ -843,7 +934,13 @@ const server = createServer(async (req, res) => {
           // written-down table covers.
           const catalogue = await assets.get().catch(() => null);
           const result = ingestGame(select.state, body, { catalogue });
+          // The feed knowing the map is the whole reason to share one: the game
+          // says it once and every graphic gets it.
+          if (result.state.mapName && result.state.mapName !== select.state.mapName) {
+            globals.patch({ mapName: result.state.mapName });
+          }
           if (result.applied) select.replace(result.state);
+          pushGlobal();
           return {
             applied: result.applied,
             scene: select.state.scene,

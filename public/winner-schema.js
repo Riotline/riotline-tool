@@ -518,6 +518,23 @@ const emptyTeam = () => ({ teamId: '', name: '', shortName: '', region: '', logo
 
 const emptyMapRow = () => ({ name: '', left: 0, right: 0 });
 
+/**
+ * Where the series score comes from.
+ *
+ * On - the default - it is counted from the map rows below it, because the rows
+ * already say who won each map and a number typed beside them can only ever
+ * disagree. Off hands the two boxes back, for the series that started before
+ * the app was open, the forfeit, or the map awarded with no round score.
+ *
+ * Schema rather than a loose key, so graphics.js and the dashboard read one
+ * definition - see CLAUDE.md.
+ */
+export const WINNER_SCORE_FIELDS = [
+  { key: 'autoSeriesScore', type: 'bool', label: 'Count the series score from the map rows', default: true },
+];
+
+export const WINNER_SCORE_KEYS = WINNER_SCORE_FIELDS.map((field) => field.key);
+
 export const DEFAULT_WINNER = {
   version: 1,
   eventLogo: '',
@@ -532,15 +549,21 @@ export const DEFAULT_WINNER = {
   upcomingLabel: 'UPCOMING',
   deciderLabel: 'DECIDER',
 
-  left: { ...emptyTeam(), name: 'Team A', shortName: 'TMA', colour: '#4ea8de', score: 2 },
-  right: { ...emptyTeam(), name: 'Team B', shortName: 'TMB', colour: '#ff4655', score: 1 },
+  // No demo series score: with the count switched on the rows below decide it,
+  // and shipping 2-1 over five blank rows would put a number on screen that
+  // nothing on the graphic supports.
+  left: { ...emptyTeam(), name: 'Team A', shortName: 'TMA', colour: '#4ea8de', score: 0 },
+  right: { ...emptyTeam(), name: 'Team B', shortName: 'TMB', colour: '#ff4655', score: 0 },
 
   // Always exactly WINNER_MAP_ROWS. Blank-named rows are skipped at render, so
   // a Bo3 is a Bo5 with two rows left empty rather than a different shape.
   maps: Array.from({ length: WINNER_MAP_ROWS }, emptyMapRow),
 
-  // 'auto' reads the series score. An explicit side is an override for the case
-  // where the trophy does not follow the number on screen.
+  ...Object.fromEntries(WINNER_SCORE_FIELDS.map((field) => [field.key, field.default])),
+
+  // 'auto' reads the series score - which, with the count switched on, is the
+  // map rows. An explicit side is an override for the case where the trophy
+  // does not follow the number on screen.
   winner: 'auto',
 
   seq: { ...DEFAULT_SEQ },
@@ -558,6 +581,44 @@ export const WINNER_SIDE_CHOICES = [
 
 /** Map rows an operator has actually filled in - a blank name means "unused". */
 export const activeMaps = (state) => (state?.maps ?? []).filter((row) => String(row?.name ?? '').trim());
+
+/**
+ * How many maps each side has actually won.
+ *
+ * A row both sides finished level on counts for neither, which is the same
+ * invariant `isUpcomingMap` below rests on: 0-0 is a map that has not happened,
+ * and there is no VALORANT scoreline where a played map ends tied. So filling in
+ * the round scores is the single act that marks a map played AND awards it -
+ * there is no second field for an operator to keep in step.
+ */
+export function mapWins(state) {
+  let left = 0;
+  let right = 0;
+  for (const row of activeMaps(state)) {
+    const rowLeft = row?.left ?? 0;
+    const rowRight = row?.right ?? 0;
+    if (rowLeft > rowRight) left += 1;
+    else if (rowRight > rowLeft) right += 1;
+  }
+  return { left, right };
+}
+
+/**
+ * The series score as it should appear, counted or typed.
+ *
+ * Derived at read rather than written back into the state on save, so switching
+ * the count off hands the operator back the exact number they typed instead of
+ * whatever the rows last computed. The cost is that `.state/winner.json` holds a
+ * series score the graphic may be ignoring; the benefit is that the toggle is
+ * reversible, which a destructive write would not be.
+ *
+ * `!== false` rather than a truthiness test, so a state written before this
+ * setting existed counts rather than reading a missing key as "off".
+ */
+export const seriesScore = (state) =>
+  state?.autoSeriesScore === false
+    ? { left: state?.left?.score ?? 0, right: state?.right?.score ?? 0 }
+    : mapWins(state);
 
 /**
  * A listed map nobody has played yet.
@@ -610,7 +671,11 @@ export function upcomingNotes(state) {
  */
 export function resolveWinner(state) {
   if (state?.winner === 'left' || state?.winner === 'right') return state.winner;
-  return (state?.right?.score ?? 0) > (state?.left?.score ?? 0) ? 'right' : 'left';
+  // Reads the series score rather than the stored number, so with the count
+  // switched on the trophy follows the map rows without needing a fourth choice
+  // in the dropdown that would mean the same thing as this one.
+  const { left, right } = seriesScore(state);
+  return right > left ? 'right' : 'left';
 }
 
 /**

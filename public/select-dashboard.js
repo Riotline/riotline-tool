@@ -15,6 +15,7 @@
 import { FONT_CHOICES } from './preset-schema.js';
 import { onState } from './live.js';
 import { mediaControl } from './media-field.js';
+import { SIDE_CHOICES, applyTeam } from './teams.js';
 import { mapDisplayName } from './maps.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import {
@@ -291,7 +292,7 @@ function teamPicker(half) {
     }
     // Copied, not linked - same reasoning as everywhere else: editing a team
     // next week must not rewrite a graphic that already went to air.
-    for (const key of ['name', 'shortName', 'logo', 'colour']) state[half][key] = team[key];
+    applyTeam(state[half], team);
     state[half].teamId = team.id;
     queueSave();
     buildTeamsEditor();
@@ -325,8 +326,14 @@ function sideBlock(half) {
     ]),
     grid(2, [
       textField('Side label', `${half}.label`, { maxlength: 8, placeholder: half === 'left' ? 'DEF' : 'ATK' }),
-      colourField('Colour', `${half}.colour`),
+      choiceField('Playing as', `${half}.side`, SIDE_CHOICES),
     ]),
+    grid(null, [colourField('Colour', `${half}.colour`, { sampleFrom: () => state[half].logo, clearable: true })]),
+    help(
+      'Leave the colour switched off and this side wears the colour of whichever half it is playing - which is ' +
+        'also what the Global page forces on both sides when it is set to attack / defence only. The side label ' +
+        'above is just the words on screen and can say anything.',
+    ),
     logoField('Logo', `${half}.logo`),
   ]);
 }
@@ -615,7 +622,9 @@ function buildAnimEditor() {
     help(
       'Driven by the scene webhook: the game says which screen it is on, and agent select starting is what trips ' +
         'all of this. With nothing posting to that hook none of it happens and the buttons above are the only ' +
-        'thing that moves the graphic.',
+        'thing that moves the graphic. Taking it off air is the one thing left to you, because agent select ' +
+        'ending is the loading screen - the moment the locked-in agents are most worth reading. The next lobby ' +
+        'empties the cards on its own, so leaving it up costs nothing.',
     ),
   );
 }
