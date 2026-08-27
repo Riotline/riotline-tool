@@ -141,3 +141,91 @@ async function start() {
 }
 
 start().catch((error) => toast(`Global settings unavailable: ${error.message}`));
+
+// ------------------------------------------------- tracker.gg login ---
+
+/**
+ * Clear the Cloudflare challenge from any browser.
+ *
+ * The solve has to happen in the server's own Chrome - the clearance is bound
+ * to the address and user agent that earned it - so what this offers is a view
+ * of that browser, not a local one. The server starts it; every dashboard sees
+ * the progress on the shared stream, so two operators cannot both think it is
+ * their job.
+ */
+{
+  const startBtn = document.getElementById('tracker-login-start');
+  const doneBtn = document.getElementById('tracker-login-done');
+  const statusEl = document.getElementById('tracker-login-status');
+  const passwordEl = document.getElementById('tracker-login-password');
+  const viewEl = document.getElementById('tracker-login-view');
+
+  if (startBtn) {
+    /*
+     * Same-origin, so this works over the Cloudflare tunnel as well as on the
+     * LAN: gfx.maahir.dev maps to the app's port and nothing else, and a viewer
+     * pointing at a second port would simply not resolve from outside.
+     *
+     * `path` tells noVNC where to open its websocket, which has to carry the
+     * same prefix or it would connect to this origin's root. The password is
+     * filled in for the operator rather than typed - it exists to keep the
+     * viewer off a stray scanner, and making three people copy it by hand
+     * mid-broadcast buys nothing.
+     */
+    const viewerUrl = (password) => {
+      const params = new URLSearchParams({
+        autoconnect: '1',
+        resize: 'scale',
+        reconnect: '1',
+        path: 'tracker-login/websockify',
+      });
+      if (password) params.set('password', password);
+      return `/tracker-login/vnc.html?${params}`;
+    };
+
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      try {
+        const response = await fetch('/api/tracker/login', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
+
+        // The viewer and the password both arrive on the stream, for every
+        // dashboard rather than just this one - see the onState below.
+      } catch (error) {
+        startBtn.disabled = false;
+        toast(`Could not start the login: ${error.message}`);
+      }
+    });
+
+    // The viewer has no window manager, so there is no title bar to close the
+    // browser with - this is how a solve ends.
+    doneBtn.addEventListener('click', () => {
+      fetch('/api/tracker/login/cancel', { method: 'POST' }).catch(() => {});
+    });
+
+    onState('trackerLogin', (next) => {
+      startBtn.disabled = next.active;
+      doneBtn.hidden = !next.active;
+      statusEl.className = `save-status${next.phase === 'failed' ? ' failed' : next.active ? ' saving' : ''}`;
+      statusEl.textContent = next.message || (next.active ? 'Starting...' : 'Not running');
+
+      // An operator who did not start it gets the viewer and the password too,
+      // so whoever is actually at a keyboard can finish the solve.
+      if (next.active && next.phase === 'ready' && viewEl.hidden) {
+        viewEl.hidden = false;
+        viewEl.src = viewerUrl(next.password);
+        passwordEl.hidden = false;
+        passwordEl.textContent = 'Clear the Cloudflare challenge in the window below, then press Done.';
+      }
+
+      if (!next.active) {
+        // Torn down server-side the moment the solve ends, so a viewer left
+        // pointing at it would just show a dead connection.
+        viewEl.hidden = true;
+        viewEl.removeAttribute('src');
+        passwordEl.hidden = true;
+      }
+    });
+  }
+}
