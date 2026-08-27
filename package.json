@@ -7,7 +7,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tools/test-watch.js && node tools/test-tracker.js",
+    "test": "node tools/test-watch.js && node tools/test-tracker.js && node tools/test-profile-lock.js",
     "dev": "node --watch server.js",
     "setup:tracker": "npm install playwright && npx playwright install chromium",
     "tracker:login": "node tools/tracker-login.js",
