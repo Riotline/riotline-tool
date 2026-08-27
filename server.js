@@ -132,6 +132,71 @@ const TRACKER_LOGIN_TIMEOUT_MS = Number(process.env.TRACKER_LOGIN_TIMEOUT_MS ?? 
 const TRACKER_CONFIG = { browser };
 
 /**
+ * Who is looking something up right now, shared with every open dashboard.
+ *
+ * Deliberately not a makeStateStore: this is the state of a request in flight,
+ * so it is meaningless across a restart and must never touch the disk. It only
+ * has to satisfy the shape streamStores reads - a revision, a state, and a way
+ * to subscribe.
+ *
+ * ponytail: one slot, not a list. Lookups are slow enough (35-80s against
+ * tracker.gg) and operators few enough that "who is busy" is the whole
+ * question; give it a keyed map if concurrent lookups ever need telling apart.
+ */
+const lookups = (() => {
+  let revision = 0;
+  let state = {
+    active: false,
+    handle: '',
+    type: '',
+    startedAt: 0,
+    finishedAt: 0,
+    outcome: '',
+    message: '',
+    // The list itself, so every dashboard shows what was just fetched rather
+    // than only the operator who asked for it.
+    matches: null,
+  };
+  const listeners = new Set();
+
+  const publish = (next) => {
+    state = { ...state, ...next };
+    revision += 1;
+    for (const listener of listeners) {
+      try {
+        listener({ revision, state });
+      } catch {
+        /* a dead connection must not take the lookup down with it */
+      }
+    }
+  };
+
+  return {
+    get revision() {
+      return revision;
+    },
+    get state() {
+      return state;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    started(handle, type) {
+      publish({ active: true, handle, type, startedAt: Date.now(), finishedAt: 0, outcome: '', message: '' });
+    },
+    /**
+     * @param {object[]|null} matches the list to share, or null to leave the
+     *   last one standing - a match-detail lookup has no list of its own, and
+     *   blanking it would clear the dashboards mid-broadcast.
+     */
+    finished(outcome, message = '', matches = null) {
+      publish({ active: false, finishedAt: Date.now(), outcome, message, ...(matches ? { matches } : {}) });
+    },
+  };
+})();
+
+/**
  * A tracker.gg Cloudflare solve any operator can drive from their own browser.
  *
  * The clearance is bound to the IP and user agent that earned it, so the solve
@@ -287,6 +352,30 @@ const trackerLogin = (() => {
   };
 })();
 
+/**
+ * Announce a tracker lookup so the other dashboards can show it, and make sure
+ * the "finished" always fires - an operator staring at a spinner that a thrown
+ * error left running is worse than no indicator at all.
+ */
+async function announceLookup(handle, type, run) {
+  // A lookup here would relaunch the browser on the profile the solve is using,
+  // taking it back mid-challenge and losing both.
+  if (trackerLogin.state.active) {
+    throw new ProviderError(409, 'A tracker login is in progress - try again once it finishes.');
+  }
+
+  lookups.started(handle, type);
+  try {
+    const result = await run();
+    // Only a match list is worth sharing; a detail lookup answers a question
+    // the asking dashboard already has open.
+    lookups.finished('ok', '', Array.isArray(result?.matches) ? result.matches : null);
+    return result;
+  } catch (error) {
+    lookups.finished('failed', error?.message ?? 'Lookup failed');
+    throw error;
+  }
+}
 const PORT = Number(process.env.PORT ?? 8080);
 const DEFAULT_REGION = pick(process.env.RIOT_REGION, PLATFORM_HOSTS, 'na');
 const DEFAULT_ROUTING = pick(process.env.RIOT_ROUTING, ROUTING_HOSTS, 'americas');
@@ -588,7 +677,7 @@ async function handleApi(pathname, params) {
       if (provider === 'tracker') {
         const handle = (params.get('handle') ?? '').trim();
         if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
-        return trackerMatchList(TRACKER_CONFIG, { handle, type });
+        return announceLookup(handle, type, () => trackerMatchList(TRACKER_CONFIG, { handle, type }));
       }
 
       const puuid = (params.get('puuid') ?? '').trim();
@@ -607,7 +696,7 @@ async function handleApi(pathname, params) {
       if (provider === 'tracker') {
         const handle = (params.get('handle') ?? '').trim();
         if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
-        return trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type });
+        return announceLookup(handle, type, () => trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type }));
       }
 
       return riotMatchDetail(riotGet, { matchId, region });
@@ -1061,6 +1150,7 @@ const server = createServer(async (req, res) => {
           ['winner', winner],
           ['select', select],
           ['global', globals],
+          ['lookup', lookups],
           ['trackerLogin', trackerLogin],
         ],
         req,
