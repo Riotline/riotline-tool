@@ -129,6 +129,7 @@ let teamLibrary = [];
 let aliasLibrary = [];
 let saveTimer = null;
 let saveGeneration = 0;
+let saveInFlight = false;
 
 function setStatus(kind, label) {
   els.status.className = `save-status ${kind}`.trim();
@@ -155,6 +156,7 @@ function saveNow() {
 
 async function save() {
   const generation = ++saveGeneration;
+  saveInFlight = true;
   try {
     const response = await fetch('/api/graphic', {
       method: 'POST',
@@ -171,6 +173,11 @@ async function save() {
   } catch (error) {
     setStatus('failed', 'Not saved');
     toast(`Graphic not saved: ${error.message}`);
+  } finally {
+    // Only the newest save reopens the dashboard to incoming state: an older
+    // one finishing late must not let a remote update land on top of edits a
+    // newer save is still carrying.
+    if (generation === saveGeneration) saveInFlight = false;
   }
 }
 
@@ -189,6 +196,7 @@ const {
   checkField,
   rangeField,
   optionalColourField,
+  syncFields,
 } = makeFields(() => state, queueSave);
 
 // ------------------------------------------------------- editor: match ---
@@ -465,15 +473,37 @@ els.hideBtn.addEventListener('click', () => cue('hide'));
 els.replayBtn.addEventListener('click', () => cue('replay'));
 
 /**
- * Auto-hide happens on the server, so the graphic can come down without the
- * dashboard having asked. Only visibility is taken from the stream - adopting
- * the whole state would overwrite whatever is being typed.
+ * What another operator changed, arriving live.
+ *
+ * Visibility is taken from the stream unconditionally: auto-hide happens on the
+ * server, so the graphic can come down without this dashboard having asked, and
+ * being wrong about what is on air is the one error that shows.
+ *
+ * The rest of the state is somebody else's editing, and is adopted only while
+ * this dashboard has nothing of its own outstanding. Between the debounce and
+ * the POST, `state` here is ahead of the server - taking the server's copy in
+ * that window would undo what was just typed. `syncFields` additionally skips
+ * whatever holds focus, so a field being typed in is never rewritten under the
+ * caret.
+ *
+ * ponytail: only controls built by makeFields re-read themselves. The panels
+ * assembled by hand here - roster rows, stat pickers, the preset list - still
+ * need a reload to show a remote structural change; wire them through
+ * makeFields (or give them their own bind) if that starts to bite.
  */
 onState('graphic', (next) => {
-  if (!state || !next.anim) return;
-  state.anim.visible = next.anim.visible;
-  state.anim.cue = next.anim.cue;
+  if (!state || !next) return;
+
+  if (next.anim) {
+    state.anim.visible = next.anim.visible;
+    state.anim.cue = next.anim.cue;
+  }
   syncCueUi();
+
+  if (saveTimer || saveInFlight) return;
+  state = next;
+  syncFields();
+  markModified();
 });
 
 // -------------------------------------------------------- editor: style ---
