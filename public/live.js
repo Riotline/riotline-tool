@@ -14,6 +14,8 @@
  * single connection, which was never the problem.
  */
 
+import { api } from './session.js';
+
 /** @type {Map<string, Set<(state: object) => void>>} */
 const handlers = new Map();
 
@@ -21,7 +23,7 @@ let stream = null;
 
 function connect() {
   if (stream) return;
-  stream = new EventSource('/api/events');
+  stream = new EventSource(api('/api/events'));
   stream.addEventListener('error', () => console.warn('dashboard stream dropped - reconnecting'));
 }
 

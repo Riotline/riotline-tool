@@ -31,6 +31,7 @@ import {
 } from './public/animation.js';
 import { EMPTY_TEAM, TEAM_FIELDS, TEAM_REGIONS, teamSlug } from './public/teams.js';
 import { mapCodeFromUrl, mapDisplayName } from './public/maps.js';
+import { DEFAULT_SETTINGS, sanitiseSettings } from './public/settings-schema.js';
 import {
   COLOUR_SOURCE_KEYS,
   DEFAULT_GLOBAL,
@@ -1299,6 +1300,12 @@ export function sanitiseGlobal(input, base = DEFAULT_GLOBAL) {
 }
 
 export const makeGlobalStore = (filePath) => makeStateStore(filePath, sanitiseGlobal, DEFAULT_GLOBAL);
+
+/**
+ * The administrator switches. Server-wide, so this one lives beside the media
+ * store rather than inside a session bundle - see public/settings-schema.js.
+ */
+export const makeSettingsStore = (filePath) => makeStateStore(filePath, sanitiseSettings, DEFAULT_SETTINGS);
 
 export { graphicPatch };
 

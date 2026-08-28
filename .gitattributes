@@ -1,0 +1,9 @@
+# Shell scripts must reach the container with LF endings.
+#
+# This checkout is on Windows with core.autocrlf=true, so without this a .sh
+# committed here arrives in the build context with CRLF - and a shebang whose
+# line ends in \r fails to exec with ENOENT. The only symptom is the tracker
+# login panel reporting "failed" with no other trace anywhere.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf

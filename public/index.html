@@ -26,7 +26,26 @@
         <button type="button" class="tab" role="tab" data-tab="winner" aria-selected="false">Winner graphic</button>
         <button type="button" class="tab" role="tab" data-tab="select" aria-selected="false">Agent select</button>
         <button type="button" class="tab" role="tab" data-tab="global" aria-selected="false">Global</button>
+        <button type="button" class="tab" role="tab" data-tab="account" aria-selected="false">Account</button>
+        <!-- Shown only to administrators; see account.js. -->
+        <button type="button" class="tab" role="tab" data-tab="admin" aria-selected="false" hidden>Admin</button>
       </nav>
+
+      <!--
+        Who is signed in, and whose production is on screen.
+
+        In the topbar rather than on the Account tab because it answers a
+        question an operator has to be able to answer at a glance, mid-show:
+        "am I about to put this on somebody else's stream?" The whole page gets
+        a border when the answer is yes - see .is-guest in styles.css.
+      -->
+      <div class="whoami" id="whoami" hidden>
+        <label class="whoami-target">
+          <span>Production</span>
+          <select id="session-target"></select>
+        </label>
+        <span class="whoami-user" id="whoami-user"></span>
+      </div>
 
       <div class="lookup-live" id="lookup-live" role="status" aria-live="polite" hidden></div>
 
@@ -441,9 +460,137 @@
       </div>
     </main>
 
+    <!--
+      Account. Your own password, your own OBS key, and who you have let in.
+
+      Everything on this tab is about the signed-in account only - there is no
+      way to name somebody else from here, which is what keeps it separate from
+      the Admin tab below.
+    -->
+    <main class="graphic-tab" id="tab-account" role="tabpanel" hidden>
+      <div class="editor-grid">
+        <section class="panel">
+          <h2 class="panel-title">Your account</h2>
+          <dl class="account-facts" id="account-facts"></dl>
+
+          <h3 class="panel-subhead">Change your password</h3>
+          <div class="account-form">
+            <label class="login-field">
+              <span>Current password</span>
+              <input type="password" id="acc-current" autocomplete="current-password" />
+            </label>
+            <label class="login-field">
+              <span>New password</span>
+              <input type="password" id="acc-new" autocomplete="new-password" />
+            </label>
+            <label class="login-field">
+              <span>New password again</span>
+              <input type="password" id="acc-again" autocomplete="new-password" />
+            </label>
+            <button type="button" class="btn btn-primary" id="acc-save">Change password</button>
+            <p class="field-help" id="acc-note"></p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Your OBS key</h2>
+          <p class="field-help">
+            Every OBS browser source and both game webhooks carry this key - it is what
+            tells the server which production they belong to, since OBS cannot sign in.
+            Treat it as a password that happens to live in a URL: anyone holding it can
+            watch your graphics and feed your agent select.
+          </p>
+          <p class="obs-url"><code id="acc-key">-</code></p>
+          <div class="tracker-login-row">
+            <button type="button" class="btn" id="acc-copy-key">Copy</button>
+            <button type="button" class="btn btn-danger" id="acc-rotate">Make a new key</button>
+          </div>
+          <p class="field-help">
+            A new key stops every existing URL working at once. Use it if a key has been
+            on stream - then re-copy the URLs into OBS from the three graphics tabs.
+          </p>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Who can operate your graphics</h2>
+          <p class="field-help">
+            An <strong>editor</strong> can do everything you can on this production,
+            including putting things on air. A <strong>viewer</strong> can watch the
+            dashboard and change nothing. Neither can see your account or anybody else's.
+          </p>
+          <div class="access-list" id="acc-grants"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Administration. Rendered only for admins, and gated again on the server. -->
+    <main class="graphic-tab" id="tab-admin" role="tabpanel" hidden>
+      <div class="editor-grid">
+        <section class="panel">
+          <h2 class="panel-title">Accounts</h2>
+          <div class="admin-new">
+            <input type="text" id="adm-username" placeholder="username" autocomplete="off" spellcheck="false" />
+            <input type="password" id="adm-password" placeholder="password" autocomplete="new-password" />
+            <label class="admin-role"><input type="checkbox" id="adm-admin" /> <span>Administrator</span></label>
+            <button type="button" class="btn btn-primary" id="adm-create">Create</button>
+          </div>
+          <p class="field-help" id="adm-note"></p>
+          <div class="admin-list" id="adm-users"></div>
+        </section>
+
+        <!--
+          Server settings. Switches for the whole machine, not for one show -
+          which is why they live here and not on the Global tab, where every
+          operator would be able to reach them.
+        -->
+        <section class="panel">
+          <h2 class="panel-title">Server settings</h2>
+          <div class="setting-list" id="adm-settings"></div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Server</h2>
+          <dl class="account-facts" id="adm-health"></dl>
+          <button type="button" class="btn" id="adm-refresh">Refresh</button>
+        </section>
+
+        <!--
+          The log.
+
+          Held in memory on the server, not in a file: the person who needs it
+          is at a desk with OBS open and cannot reach a shell, and a broadcast
+          tool that fills a disk with request logs mid-tournament is one that
+          stops. Anything older than the buffer is in `docker logs`.
+        -->
+        <section class="panel panel-wide">
+          <h2 class="panel-title">Log</h2>
+          <div class="log-controls">
+            <label class="whoami-target">
+              <span>Level</span>
+              <select id="adm-log-level"></select>
+            </label>
+            <label class="admin-role">
+              <input type="checkbox" id="adm-log-follow" checked />
+              <span>Follow</span>
+            </label>
+            <input type="text" id="adm-log-filter" placeholder="filter" autocomplete="off" spellcheck="false" />
+            <span class="admin-meta" id="adm-log-count"></span>
+            <button type="button" class="btn btn-small" id="adm-log-copy">Copy</button>
+          </div>
+          <p class="field-help">
+            Raising the level takes effect at once, with no restart - which matters, because
+            the moment you want verbose output is the moment you cannot afford to take every
+            graphic off air to get it. Session keys and passwords are never written here.
+          </p>
+          <pre class="log-view" id="adm-log"></pre>
+        </section>
+      </div>
+    </main>
+
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <script src="/app.js" type="module"></script>
+    <script src="/account.js" type="module"></script>
     <script src="/dashboard.js" type="module"></script>
     <script src="/winner-dashboard.js" type="module"></script>
     <script src="/select-dashboard.js" type="module"></script>

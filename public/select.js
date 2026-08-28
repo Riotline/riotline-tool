@@ -26,6 +26,7 @@ import {
 } from './select-schema.js';
 import { mapDisplayName } from './maps.js';
 import { teamColour } from './teams.js';
+import { api } from './session.js';
 
 const STAGE_W = 1920;
 const STAGE_H = 1080;
@@ -585,7 +586,7 @@ let latestState = null;
 
 // Subscribe first so the first frame is not held up by the catalogue fetch;
 // names paint immediately and the portraits fill in after.
-const stream = new EventSource('/api/select/events');
+const stream = new EventSource(api('/api/select/events'));
 
 stream.addEventListener('select', (event) => {
   try {

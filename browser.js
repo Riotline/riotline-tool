@@ -23,7 +23,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PROFILE_DIR = path.join(ROOT, '.playwright-profile');
+
+/*
+ * Where Chromium keeps the profile that holds the Cloudflare clearance.
+ *
+ * Beside the code by default, which is right for a checkout. A container points
+ * it into a volume instead, because the clearance is the whole reason the noVNC
+ * login exists and losing it on every redeploy would make that feature pointless.
+ *
+ * Read here rather than passed in by server.js, so that `npm run tracker:login`
+ * and the in-app solve write to the same place. Two callers with two profiles is
+ * a solve that appears to work and then does nothing.
+ *
+ * One rule for whoever sets it: this directory is deleted and recreated by
+ * `resetProfile()`, so it must be a subdirectory *inside* a mount and never the
+ * mount point itself - removing a mount point returns EBUSY, and `force: true`
+ * suppresses only ENOENT. The recovery from a poisoned clearance would fail
+ * silently, which is the one failure this code cannot see.
+ */
+const PROFILE_DIR = path.resolve(ROOT, (process.env.PROFILE_DIR ?? '').trim() || '.playwright-profile');
 
 // Channels tried in order when none is forced. Real Chrome first: it reports
 // a "Google Chrome" brand in its client hints, which the bundled Chromium

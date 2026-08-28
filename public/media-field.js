@@ -13,6 +13,7 @@
  */
 
 import { el } from './fields.js';
+import { api } from './session.js';
 
 const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { detail: message }));
 
@@ -61,7 +62,18 @@ export function mediaControl(label, get, set, { accept = 'image/*', placeholder 
     if (!file) return;
     try {
       // No multipart envelope: one file per request, so the body is the file.
-      const response = await fetch('/api/media', { method: 'POST', body: file });
+      //
+      // The type is declared rather than left to the browser, and it is a lie
+      // on purpose - the server sniffs the format out of the bytes and ignores
+      // this entirely. What it is for is the CSRF check, which refuses a write
+      // whose Content-Type an HTML form could have produced. A file dropped
+      // from a folder the OS has no type for would otherwise arrive with no
+      // Content-Type at all, and be refused.
+      const response = await fetch(api('/api/media'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
       set(payload.url);

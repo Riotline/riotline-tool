@@ -18,6 +18,17 @@ import { mediaControl } from './media-field.js';
 import { onState } from './live.js';
 import { mapDisplayName } from './maps.js';
 import { COLOUR_SOURCES, SYNC_FIELDS } from './global-schema.js';
+import { account, api } from './session.js';
+
+/**
+ * A POST with no body still has to look like one.
+ *
+ * The server refuses a cookie-authenticated write whose Content-Type is one a
+ * cross-site HTML form could have set - that is the CSRF check. These two
+ * requests carry nothing but their own URL, so without a declared type they
+ * were indistinguishable from exactly the attack the rule exists to stop.
+ */
+const POST_JSON = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' };
 
 const $ = (id) => document.getElementById(id);
 const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { detail: message }));
@@ -39,7 +50,7 @@ function queueSave() {
 async function save() {
   const generation = ++saveGeneration;
   try {
-    const response = await fetch('/api/global', {
+    const response = await fetch(api('/api/global'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -117,7 +128,7 @@ async function start() {
   if (!host) return;
 
   const [global, assetData] = await Promise.all([
-    fetch('/api/global').then((r) => r.json()),
+    fetch(api('/api/global')).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { maps: [] }))
       .catch(() => ({ maps: [] })),
@@ -160,6 +171,26 @@ start().catch((error) => toast(`Global settings unavailable: ${error.message}`))
   const passwordEl = document.getElementById('tracker-login-password');
   const viewEl = document.getElementById('tracker-login-view');
 
+  /*
+   * The whole panel goes if the source is off, or if this account may not open
+   * a solve.
+   *
+   * Not merely the button in either case: everything it explains is about
+   * something the reader cannot do, and a page carrying three paragraphs on
+   * clearing a Cloudflare challenge is a page that costs an operator time to
+   * read past. The server refuses both ways regardless - this is the courtesy,
+   * not the lock.
+   */
+  void Promise.all([
+    fetch('/api/config').then((response) => (response.ok ? response.json() : null)),
+    account(),
+  ])
+    .then(([config, me]) => {
+      const panel = document.getElementById('tracker-login-panel');
+      if (panel) panel.hidden = !config?.trackerEnabled || !me?.user?.mayOpenTrackerLogin;
+    })
+    .catch(() => {});
+
   if (startBtn) {
     /*
      * Same-origin, so this works over the Cloudflare tunnel as well as on the
@@ -186,7 +217,7 @@ start().catch((error) => toast(`Global settings unavailable: ${error.message}`))
     startBtn.addEventListener('click', async () => {
       startBtn.disabled = true;
       try {
-        const response = await fetch('/api/tracker/login', { method: 'POST' });
+        const response = await fetch('/api/tracker/login', POST_JSON);
         const payload = await response.json();
         if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
 
@@ -201,7 +232,7 @@ start().catch((error) => toast(`Global settings unavailable: ${error.message}`))
     // The viewer has no window manager, so there is no title bar to close the
     // browser with - this is how a solve ends.
     doneBtn.addEventListener('click', () => {
-      fetch('/api/tracker/login/cancel', { method: 'POST' }).catch(() => {});
+      fetch('/api/tracker/login/cancel', POST_JSON).catch(() => {});
     });
 
     onState('trackerLogin', (next) => {

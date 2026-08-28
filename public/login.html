@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in - Riotline Tool</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Gabarito:wght@400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+
+  <!--
+    The only page served without a login, so it is deliberately the only page
+    that knows nothing: no state, no stream, no catalogue. It posts a username
+    and a password and reloads.
+  -->
+  <body class="login-body">
+    <main class="login-card">
+      <div class="login-mark"></div>
+      <h1>Riotline Tool</h1>
+      <p class="login-sub">Broadcast graphics control</p>
+
+      <form id="login-form" autocomplete="on">
+        <label class="login-field">
+          <span>Username</span>
+          <input
+            type="text"
+            id="login-username"
+            name="username"
+            autocomplete="username"
+            spellcheck="false"
+            autocapitalize="none"
+            required
+          />
+        </label>
+
+        <label class="login-field">
+          <span>Password</span>
+          <input type="password" id="login-password" name="password" autocomplete="current-password" required />
+        </label>
+
+        <p class="login-error" id="login-error" hidden role="alert"></p>
+
+        <button type="submit" class="btn btn-primary" id="login-submit">Sign in</button>
+      </form>
+
+      <p class="login-note" id="login-note" hidden></p>
+    </main>
+
+    <script src="/login.js" type="module"></script>
+  </body>
+</html>

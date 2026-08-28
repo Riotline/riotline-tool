@@ -1,0 +1,78 @@
+# Riotline Tool.
+#
+#   cp .env.example .env     and fill it in - ADMIN_USERNAME and ADMIN_PASSWORD
+#                            at minimum, or nobody can sign in
+#   docker compose up -d --build
+#
+# See deployment.md.
+
+services:
+  riotline:
+    build: .
+    image: riotline-tool
+    container_name: riotline-tool
+    restart: unless-stopped
+
+    # Published on loopback only. Put a reverse proxy or a Cloudflare tunnel in
+    # front of it and terminate TLS there - the app speaks plain HTTP and the
+    # login cookie is only as private as the transport under it.
+    #
+    # To reach it from the LAN instead, change this to "8080:8080" and read the
+    # note about COOKIE_SECURE below before you do.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    env_file:
+      - .env
+
+    environment:
+      # Every interface *inside the container*. Docker's published port forwards
+      # to the container's eth0, not to its loopback, so a server bound to
+      # 127.0.0.1 in here is unreachable from outside no matter what is
+      # published. The line above is what actually limits exposure.
+      HOST: 0.0.0.0
+      PORT: 8080
+      STATE_DIR: /data/state
+      PROFILE_DIR: /data/profile
+      NODE_ENV: production
+
+      # Set this to true once you are behind HTTPS. It makes the login cookie
+      # refuse to travel over plain HTTP, which is right behind a tunnel and
+      # fatal on http://127.0.0.1 - a Secure cookie there is silently dropped
+      # and nobody can sign in.
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+
+      # error | warn | info | debug. `debug` is the verbose mode. An admin can
+      # change it live from the Admin tab without restarting, which is what you
+      # want mid-show - a restart takes every graphic off air.
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+
+    volumes:
+      # One volume, two subdirectories.
+      #
+      #   state/    graphics, accounts, uploaded media. Irreplaceable - the
+      #             media store is content-addressed and has no delete route,
+      #             so every logo an operator ever uploaded is in here.
+      #   profile/  the Chromium profile holding the tracker.gg Cloudflare
+      #             clearance. Losing it means solving the challenge again;
+      #             keeping it is the whole reason the noVNC login exists.
+      - riotline-data:/data
+
+    # Chromium's default 64 MB of shared memory is not enough and it crashes in
+    # ways that look like anything but memory - blank screenshots, dead tabs.
+    # Raising it is cheaper and less blunt than --disable-dev-shm-usage.
+    shm_size: 1gb
+
+    # Xvfb, x11vnc and websockify are started per solve and torn down after.
+    # A hard SIGKILL would skip their cleanup and leave an X lock behind, which
+    # stops the *next* solve - so give the trap time to run.
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  riotline-data:

@@ -18,6 +18,7 @@ import { mediaControl } from './media-field.js';
 import { SIDE_CHOICES, applyTeam } from './teams.js';
 import { mapDisplayName } from './maps.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
+import { api, outputUrl, targetKey } from './session.js';
 import {
   SELECT_ANIM_FIELDS,
   SELECT_ANIM_GROUPS,
@@ -110,7 +111,7 @@ async function save() {
   const generation = ++saveGeneration;
   saveInFlight = true;
   try {
-    const response = await fetch('/api/select', {
+    const response = await fetch(api('/api/select'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -472,7 +473,7 @@ function buildRosterEditor() {
 // ------------------------------------------------------- editor: aliases ---
 
 async function aliasAction(body) {
-  const response = await fetch('/api/aliases', {
+  const response = await fetch(api('/api/aliases'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -554,7 +555,7 @@ function refreshAliases() {
   clearTimeout(aliasRefresh);
   aliasRefresh = setTimeout(async () => {
     try {
-      const payload = await fetch('/api/aliases').then((response) => response.json());
+      const payload = await fetch(api('/api/aliases')).then((response) => response.json());
       const next = payload.players ?? [];
       const nextPending = payload.pending ?? [];
       // Compared before rebuilding: this fires on every roster change, and
@@ -824,7 +825,7 @@ els.checker.addEventListener('change', () => {
 els.resetBtn.addEventListener('click', async () => {
   if (!window.confirm('Reset agent select to defaults? Every field will be cleared. Aliases are kept.')) return;
 
-  const response = await fetch('/api/select', {
+  const response = await fetch(api('/api/select'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reset: true }),
@@ -848,21 +849,26 @@ function buildAll() {
 }
 
 async function start() {
-  els.obsUrl.textContent = `${location.origin}/select.html`;
-  els.hookUrl.textContent = `${location.origin}/api/roster`;
-  els.gameUrl.textContent = `${location.origin}/api/game`;
-  els.openLink.href = '/select.html';
+  // Both webhook URLs carry the key too. A game client cannot sign in, so the
+  // key in the URL is the whole of what tells the server which production the
+  // lobby it is watching belongs to.
+  void targetKey().then((key) => {
+    els.obsUrl.textContent = outputUrl('/select.html', key);
+    els.hookUrl.textContent = outputUrl('/api/roster', key);
+    els.gameUrl.textContent = outputUrl('/api/game', key);
+    els.openLink.href = outputUrl('/select.html', key);
+  });
   els.frame.style.setProperty('--hide-note', '"Off air - press Show"');
 
   const [selectData, assetData, teamData, aliasData] = await Promise.all([
-    fetch('/api/select').then((r) => r.json()),
+    fetch(api('/api/select')).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { maps: [], agents: [] }))
       .catch(() => ({ maps: [], agents: [] })),
-    fetch('/api/teams')
+    fetch(api('/api/teams'))
       .then((r) => r.json())
       .catch(() => ({ teams: [] })),
-    fetch('/api/aliases')
+    fetch(api('/api/aliases'))
       .then((r) => r.json())
       .catch(() => ({ players: [] })),
   ]);

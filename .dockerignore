@@ -1,0 +1,38 @@
+# Everything the image must not carry.
+#
+# The two that matter are .state and .env. .state is live operator config - the
+# logos, the team names, the accounts and their password hashes - and baking it
+# into an image would put one production's credentials inside every container
+# built from it. .env holds the API keys.
+
+.git
+.gitattributes
+.github
+
+node_modules
+npm-debug.log*
+
+# Live operator state and secrets. Never in an image.
+.state/
+.state-backup*/
+.env
+.env.*
+!.env.example
+
+# The Chromium profile holds a Cloudflare clearance bound to the machine that
+# earned it. Copying one into an image guarantees it is wrong everywhere.
+.playwright-profile/
+
+# Local notes and scratch output.
+CLAUDE.md
+.claude/
+deployment.md
+tools/probe-output/
+*.log
+*.hidden
+
+Dockerfile
+.dockerignore
+docker-compose.yml
+deployment.md
+README.md

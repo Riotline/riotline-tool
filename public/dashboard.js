@@ -18,6 +18,7 @@ import { applyTeam } from './teams.js';
 import { STATS, STAT_FIELDS, STAT_SLOTS, resultText, statDef } from './stats.js';
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
+import { api, outputUrl, pageUrl, targetKey } from './session.js';
 import {
   FONT_CHOICES,
   PRESET_FIELDS,
@@ -46,6 +47,8 @@ const els = {
     select: $('tab-select'),
     // No preview and no stream of its own - see index.html.
     global: $('tab-global'),
+    account: $('tab-account'),
+    admin: $('tab-admin'),
   },
   importBtn: $('g-import'),
   importHint: $('g-import-hint'),
@@ -90,7 +93,10 @@ const els = {
  */
 function loadPreview(panel) {
   for (const frame of panel?.querySelectorAll('iframe[data-src]') ?? []) {
-    frame.src = frame.dataset.src;
+    // Through pageUrl, so a preview of somebody else's production shows theirs.
+    // An output page reads its target out of its own URL and has no other way
+    // to learn it - there is no cross-document call anywhere in this dashboard.
+    frame.src = pageUrl(frame.dataset.src);
     delete frame.dataset.src;
   }
 }
@@ -159,7 +165,7 @@ async function save() {
   const generation = ++saveGeneration;
   saveInFlight = true;
   try {
-    const response = await fetch('/api/graphic', {
+    const response = await fetch(api('/api/graphic'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -583,7 +589,7 @@ function markModified() {
 }
 
 async function presetAction(body) {
-  const response = await fetch('/api/presets', {
+  const response = await fetch(api('/api/presets'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -594,7 +600,7 @@ async function presetAction(body) {
   presetLibrary = payload.presets;
 
   // Applying and saving both rewrite the live styling, so pull it back in.
-  const graphic = await fetch('/api/graphic').then((r) => r.json());
+  const graphic = await fetch(api('/api/graphic')).then((r) => r.json());
   state = graphic.state;
   buildAll();
   setStatus('', 'Saved');
@@ -800,7 +806,7 @@ els.sortBtn.addEventListener('click', () => {
 els.resetBtn.addEventListener('click', async () => {
   if (!window.confirm('Reset the graphic to defaults? Every field will be cleared.')) return;
 
-  const response = await fetch('/api/graphic', {
+  const response = await fetch(api('/api/graphic'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reset: true }),
@@ -958,23 +964,29 @@ els.importBtn.addEventListener('click', () => {
 // ----------------------------------------------------------------- start ---
 
 async function start() {
-  els.obsUrl.textContent = `${location.origin}/output.html`;
-  els.openLink.href = '/output.html';
+  // The URL an operator copies into OBS. It has to carry a session key: a
+  // browser source has no login, and without one it would reach a 401 and show
+  // nothing at all. Filled in asynchronously because the key comes from the
+  // account, so the markup holds a placeholder until this resolves.
+  void targetKey().then((key) => {
+    els.obsUrl.textContent = outputUrl('/output.html', key);
+    els.openLink.href = outputUrl('/output.html', key);
+  });
 
   const [graphic, assetData, presetData, teamData, aliasData] = await Promise.all([
-    fetch('/api/graphic').then((r) => r.json()),
+    fetch(api('/api/graphic')).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { agents: [], maps: [] }))
       .catch(() => ({ agents: [], maps: [] })),
-    fetch('/api/presets')
+    fetch(api('/api/presets'))
       .then((r) => r.json())
       .catch(() => ({ presets: [] })),
-    fetch('/api/teams')
+    fetch(api('/api/teams'))
       .then((r) => r.json())
       .catch(() => ({ teams: [] })),
     // A plain GET, deliberately not a second event stream: six connections per
     // origin is the cap that deadlocked the dashboard once already.
-    fetch('/api/aliases')
+    fetch(api('/api/aliases'))
       .then((r) => (r.ok ? r.json() : { players: [] }))
       .catch(() => ({ players: [] })),
   ]);
@@ -989,7 +1001,7 @@ async function start() {
   // select tab, so a name saved there has to be available here without a reload.
   window.addEventListener('app-tab', (event) => {
     if (event.detail !== 'graphic') return;
-    fetch('/api/aliases')
+    fetch(api('/api/aliases'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (data) aliasLibrary = data.players ?? []; })
       .catch(() => {});

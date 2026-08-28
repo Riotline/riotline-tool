@@ -15,6 +15,7 @@
 import { onState } from './live.js';
 import { setLookupMatch } from './store.js';
 import { WATCH_MAX, isPermanentFailure, mapLimit, parseHandles, scoreboardReady } from './watch-core.js';
+import { SESSION_ID } from './session.js';
 
 // ------------------------------------------------------------ elements ---
 
@@ -112,6 +113,10 @@ async function api(path, params = {}) {
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value);
   }
+  // A lookup announces itself to the dashboards watching this production, so it
+  // has to say which one - otherwise operating a shared session would spin the
+  // spinner on your own.
+  if (SESSION_ID) url.searchParams.set('session', SESSION_ID);
 
   const response = await fetch(url);
   const payload = await response.json().catch(() => ({}));
@@ -172,6 +177,7 @@ async function loadConfig() {
     if (radio) radio.checked = true;
 
     syncProviderUi();
+    syncFeatureUi();
   } catch {
     els.matchList.replaceChildren(el('p', { class: 'empty', text: 'Could not reach the local server.' }));
   }
@@ -217,8 +223,43 @@ function syncProviderUi() {
 
   if (!hasKey) {
     const [lead, body] = KEY_WARNINGS[current];
-    els.keyWarning.replaceChildren(el('strong', { text: lead }), document.createTextNode(body));
+    // An administrator's switch and a missing Playwright both leave tracker
+    // unusable, and the operator can do nothing about either - but they can ask
+    // the right person, and only if they are told which it is.
+    const off = current === 'tracker' && config.trackerAvailable;
+    els.keyWarning.replaceChildren(
+      el('strong', { text: off ? 'tracker.gg is switched off. ' : lead }),
+      document.createTextNode(
+        off ? 'An administrator can turn it back on under Admin > Server settings.' : body,
+      ),
+    );
   }
+}
+
+/**
+ * Hide what the server will refuse anyway.
+ *
+ * Both of these are enforced on the server - see the two guards in handleApi -
+ * so this is not the control, it is the courtesy. Offering a button that comes
+ * back 403 is worse than not offering it.
+ */
+function syncFeatureUi() {
+  const config = state.config;
+  if (!config) return;
+
+  const trackerRadio = document.querySelector('input[name="provider"][value="tracker"]');
+  if (trackerRadio) {
+    trackerRadio.disabled = !config.trackerEnabled;
+    trackerRadio.closest('label')?.classList.toggle('is-off', !config.trackerEnabled);
+    // Nobody should be left on a source that has just gone away.
+    if (!config.trackerEnabled && trackerRadio.checked) {
+      const fallback = document.querySelector(`input[name="provider"][value="${config.provider}"]`);
+      if (fallback) fallback.checked = true;
+    }
+  }
+
+  const panel = document.querySelector('.watch');
+  if (panel) panel.hidden = !config.watchEnabled;
 }
 
 for (const radio of document.querySelectorAll('input[name="provider"]')) {
@@ -694,6 +735,11 @@ function setStatus(handle, text, tone = '') {
 }
 
 const watchParams = (extra = {}) => ({
+  // Marked so the server can refuse it when the administrator has switched the
+  // multi-account watch off. There is no route of its own to gate - a watch is
+  // ordinary lookups, five at a time, and five at a time is the thing being
+  // switched off - so it has to say what it is.
+  watch: '1',
   provider: watch.provider,
   affinity: els.affinity.value,
   platform: els.platform.value,

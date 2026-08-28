@@ -15,6 +15,7 @@
 
 import { STAT_SLOTS, resultText, statDef } from './stats.js';
 import { ANIM_TIER_COUNT, easingCurve } from './animation.js';
+import { api } from './session.js';
 
 const STAGE_W = 1920;
 const STAGE_H = 1080;
@@ -478,7 +479,7 @@ let reconnectMs = RECONNECT_MIN_MS;
  * names and numbers paint immediately and the art fills in a moment later.
  */
 function connect() {
-  const stream = new EventSource('/api/graphic/events');
+  const stream = new EventSource(api('/api/graphic/events'));
 
   stream.addEventListener('open', () => {
     reconnectMs = RECONNECT_MIN_MS;

@@ -19,6 +19,7 @@ import { onState } from './live.js';
 import { mediaControl } from './media-field.js';
 import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, applyTeam, teamLabel } from './teams.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
+import { api, outputUrl, targetKey } from './session.js';
 import {
   AUDIO_FIELDS,
   AUDIO_GROUPS,
@@ -110,7 +111,7 @@ async function save() {
   const generation = ++saveGeneration;
   saveInFlight = true;
   try {
-    const response = await fetch('/api/winner', {
+    const response = await fetch(api('/api/winner'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -647,7 +648,7 @@ function buildStyleEditor() {
 // -------------------------------------------------- editor: team library ---
 
 async function teamAction(body) {
-  const response = await fetch('/api/teams', {
+  const response = await fetch(api('/api/teams'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -814,7 +815,7 @@ els.checker.addEventListener('change', () => {
 els.resetBtn.addEventListener('click', async () => {
   if (!window.confirm('Reset the winner graphic to defaults? Every field will be cleared.')) return;
 
-  const response = await fetch('/api/winner', {
+  const response = await fetch(api('/api/winner'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reset: true }),
@@ -841,18 +842,20 @@ function buildAll() {
 }
 
 async function start() {
-  els.obsUrl.textContent = `${location.origin}/winner.html`;
-  els.openLink.href = '/winner.html';
+  void targetKey().then((key) => {
+    els.obsUrl.textContent = outputUrl('/winner.html', key);
+    els.openLink.href = outputUrl('/winner.html', key);
+  });
   // The shared overlay points at whichever button would fix an empty preview,
   // and on this tab that is Activate rather than Show.
   els.frame.style.setProperty('--hide-note', '"Off air - press Activate to play the sequence"');
 
   const [winner, assetData, teamData] = await Promise.all([
-    fetch('/api/winner').then((r) => r.json()),
+    fetch(api('/api/winner')).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { maps: [] }))
       .catch(() => ({ maps: [] })),
-    fetch('/api/teams')
+    fetch(api('/api/teams'))
       .then((r) => r.json())
       .catch(() => ({ teams: [] })),
   ]);
