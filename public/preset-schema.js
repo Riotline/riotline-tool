@@ -193,6 +193,41 @@ export const BUILT_IN_PRESETS = [
       showRoleIcon: true,
     },
   },
+  {
+    /*
+     * Fortress's Touch Grass series, read off the event page's own design
+     * tokens: #141529 behind everything, #00bf65 on top of it, white for the
+     * words. Poppins because the site sets Montserrat, which is not a face the
+     * output pages load - it is the nearest geometric sans of the three that
+     * are.
+     *
+     * The two sides are one indigo a shade apart rather than two colours. This
+     * is a single event's branding, so a scoreboard wearing it should read as
+     * that event rather than as a fixture between two orgs - which is what the
+     * shipped Attack / Defence look is for.
+     */
+    id: 'touch-grass',
+    name: 'Fortress Touch Grass',
+    preset: {
+      font: 'Poppins',
+      leftBg: '#141529',
+      leftBigText: '#ffffff',
+      leftSmallText: '#00bf65',
+      rightBg: '#111823',
+      rightBigText: '#ffffff',
+      rightSmallText: '#00bf65',
+      globalText: '#00bf65',
+      mvpBannerBg: '#00bf65',
+      mvpBannerText: '#141529',
+      mvpName: '#6effbb',
+      mvpAgent: '#ffffff',
+      panelOpacity: 0.55,
+      pageBackground: '',
+      uppercase: true,
+      showMvpPortrait: true,
+      showRoleIcon: true,
+    },
+  },
 ];
 
 export const BUILT_IN_IDS = new Set(BUILT_IN_PRESETS.map((entry) => entry.id));
