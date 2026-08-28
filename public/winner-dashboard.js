@@ -843,8 +843,10 @@ function buildAll() {
 
 async function start() {
   void targetKey().then((key) => {
-    els.obsUrl.textContent = outputUrl('/winner.html', key);
-    els.openLink.href = outputUrl('/winner.html', key);
+    const url = outputUrl('/winner.html', key);
+    els.obsUrl.textContent = url;
+    els.obsUrl.title = url;
+    els.openLink.href = url;
   });
   // The shared overlay points at whichever button would fix an empty preview,
   // and on this tab that is Activate rather than Show.

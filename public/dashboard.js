@@ -969,8 +969,12 @@ async function start() {
   // nothing at all. Filled in asynchronously because the key comes from the
   // account, so the markup holds a placeholder until this resolves.
   void targetKey().then((key) => {
-    els.obsUrl.textContent = outputUrl('/output.html', key);
-    els.openLink.href = outputUrl('/output.html', key);
+    const url = outputUrl('/output.html', key);
+    // textContent stays whole - the copy button reads it, and the box is
+    // narrowed with an ellipsis in CSS rather than by shortening the string.
+    els.obsUrl.textContent = url;
+    els.obsUrl.title = url;
+    els.openLink.href = url;
   });
 
   const [graphic, assetData, presetData, teamData, aliasData] = await Promise.all([

@@ -853,9 +853,15 @@ async function start() {
   // key in the URL is the whole of what tells the server which production the
   // lobby it is watching belongs to.
   void targetKey().then((key) => {
-    els.obsUrl.textContent = outputUrl('/select.html', key);
-    els.hookUrl.textContent = outputUrl('/api/roster', key);
-    els.gameUrl.textContent = outputUrl('/api/game', key);
+    for (const [node, page] of [
+      [els.obsUrl, '/select.html'],
+      [els.hookUrl, '/api/roster'],
+      [els.gameUrl, '/api/game'],
+    ]) {
+      const url = outputUrl(page, key);
+      node.textContent = url;
+      node.title = url;
+    }
     els.openLink.href = outputUrl('/select.html', key);
   });
   els.frame.style.setProperty('--hide-note', '"Off air - press Show"');

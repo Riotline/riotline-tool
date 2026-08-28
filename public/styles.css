@@ -940,6 +940,26 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 4px;
+
+  /*
+   * One width for every URL box in a toolbar, whatever is in it.
+   *
+   * These sit in .graphic-toolbar, which is a wrapping flex row - so without a
+   * basis each box is as wide as its own contents. That was fine while they read
+   * `/output.html` and unusable once they became a real hostname plus a session
+   * key: one box stretched the toolbar, and the three on the agent select tab no
+   * longer lined up with each other.
+   *
+   * `0 1` rather than `1 1`: they should shrink together on a narrow window and
+   * never grow to eat the space the buttons need. `min-width: 0` is what allows
+   * the shrink at all - a flex item's default minimum is its content size.
+   *
+   * Ignored outside a flex parent, which is why the account tab's key box (a
+   * plain <p class="obs-url">) is untouched by this.
+   */
+  flex: 0 1 340px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .obs-url > span:first-child {
@@ -952,7 +972,9 @@ pre {
 .obs-url-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  /* No wrapping: the URL below shrinks instead, so the Copy button stays on the
+     same line as the thing it copies however long the URL gets. */
+  flex-wrap: nowrap;
   gap: 8px;
   min-width: 0;
 }
@@ -965,6 +987,35 @@ pre {
   border-radius: 6px;
   padding: 5px 9px;
   color: var(--text-dim);
+}
+
+/*
+ * One width for every OBS and webhook URL, whatever is in it.
+ *
+ * These used to be as wide as their contents, which was fine while they read
+ * `/output.html` and unusable once they became a real hostname plus a session
+ * key - one box stretched its panel and the five of them no longer lined up.
+ *
+ * Truncated in CSS rather than in the text, and that distinction is load-bearing:
+ * the copy button reads `textContent` (see app.js), so the element still holds
+ * the whole URL. Shortening the string would copy a broken one.
+ *
+ * `min-width: 0` is what actually allows the shrink - a flex item's default
+ * minimum is its content size, so without it the box refuses to go below the
+ * full URL and pushes the button off the end instead.
+ */
+.obs-url-row code {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Copy and Open keep their size; only the URL gives way. */
+.obs-url-row .btn-copy,
+.obs-url-row .btn {
+  flex: 0 0 auto;
 }
 
 .save-status {
