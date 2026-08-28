@@ -53,8 +53,11 @@ import {
   SELECT_STYLE_FIELDS,
   TIMER_DEFAULT_MS,
   aliasForPlayer,
+  aliasKey,
   displayName,
   emptySlots,
+  pendingLinks,
+  riotIdKey,
   everyoneLocked,
   isAgentSelectScene,
 } from './public/select-schema.js';
@@ -103,10 +106,8 @@ const emptyPlayer = () => ({
   ...Object.fromEntries(STAT_FIELDS.map((stat) => [stat.key, 0])),
 });
 
-const side = (teamName, result, won, roundsWon) => ({
+const side = (teamName, roundsWon) => ({
   teamName,
-  result,
-  won,
   roundsWon,
   logo: '',
   // Which library entry the name and logo were filled from. Informational only,
@@ -126,9 +127,11 @@ export const DEFAULT_STATE = {
   // rows as well; slot 3 only has room on the MVP panel.
   statRows: ['kda', 'acs', 'firstKills'],
   // Blank means "use the stat's own name", so changing a slot relabels itself.
-  labels: { mvp: 'MVP', stat1: '', stat2: '', stat3: '' },
-  left: side('ATK', 'WIN', true, 13),
-  right: side('DEF', 'LOSS', false, 5),
+  // The result line is derived from the two round counts rather than typed, so
+  // only the wording is an operator's business.
+  labels: { mvp: 'MVP', win: 'WIN', loss: 'LOSS', draw: 'DRAW', stat1: '', stat2: '', stat3: '' },
+  left: side('ATK', 13),
+  right: side('DEF', 5),
   // Which saved preset the styling last came from. Purely informational - the
   // preset block below is the truth, so an edit after applying is never lost.
   presetId: BUILT_IN_PRESETS[0].id,
@@ -215,8 +218,6 @@ function sanitiseSide(input, fallback) {
 
   return {
     teamName: text(source.teamName, fallback.teamName, 24),
-    result: text(source.result, fallback.result, 16),
-    won: bool(source.won, fallback.won),
     roundsWon: int(source.roundsWon, fallback.roundsWon, 0, 99),
     logo: imageUrl(source.logo, fallback.logo),
     teamId: text(source.teamId, fallback.teamId ?? '', 48),
@@ -248,6 +249,9 @@ export function sanitiseState(input, base = DEFAULT_STATE) {
     }),
     labels: {
       mvp: text(labels.mvp, fallback.labels.mvp, 16),
+      win: text(labels.win, fallback.labels.win, 16),
+      loss: text(labels.loss, fallback.labels.loss, 16),
+      draw: text(labels.draw, fallback.labels.draw, 16),
       stat1: text(labels.stat1, fallback.labels.stat1, 16),
       stat2: text(labels.stat2, fallback.labels.stat2, 16),
       stat3: text(labels.stat3, fallback.labels.stat3, 16),
@@ -788,7 +792,7 @@ export function ingestRoster(state, payload, aliasFor = () => '') {
     slots[index] = sanitiseSelectSlot({
       playerId,
       riotId,
-      name: displayName(riotId, playerId ? aliasFor(playerId) : ''),
+      name: displayName(riotId, aliasFor(playerId, riotId)),
       character: data.character ?? '',
       locked: data.locked,
       teammate: data.teammate,
@@ -1003,6 +1007,13 @@ export function makeAliasStore(filePath) {
     riotId: text(entry?.riotId, '', 64),
     alias: text(entry?.alias, '', 32),
     seenAt: int(entry?.seenAt, 0, 0, Number.MAX_SAFE_INTEGER),
+    // Account ids this record has been told it is NOT. Only ever grows by an
+    // operator answering the question, and it is what stops the same weak name
+    // match being offered every time that player loads in.
+    rejected: (Array.isArray(entry?.rejected) ? entry.rejected : [])
+      .map((value) => text(value, '', 64))
+      .filter(Boolean)
+      .slice(0, 20),
   });
 
   /** Aliased first, then most recently seen - the two ways an operator looks. */
@@ -1024,7 +1035,9 @@ export function makeAliasStore(filePath) {
       try {
         const parsed = JSON.parse(await readFile(filePath, 'utf8'));
         if (!Array.isArray(parsed)) return false;
-        players = parsed.map(clean).filter((entry) => entry.id);
+        // A record needs one key or the other: an account id from the feed, or a
+        // Riot ID it was written down under before the event.
+        players = parsed.map(clean).filter((entry) => entry.id || entry.riotId);
         return true;
       } catch {
         return false;
@@ -1032,12 +1045,17 @@ export function makeAliasStore(filePath) {
     },
 
     list() {
-      return sorted().map((entry) => ({ ...entry }));
+      return sorted().map((entry) => ({ ...entry, key: aliasKey(entry) }));
     },
 
-    /** '' when there is no alias, which `displayName` reads as "use the Riot ID". */
-    aliasFor(playerId) {
-      return players.find((entry) => entry.id === playerId)?.alias ?? '';
+    /**
+     * '' when there is no alias, which `displayName` reads as "use the Riot ID".
+     *
+     * Takes the Riot ID as well so an alias typed in before the event - which
+     * has no account id to match on yet - still reaches the card.
+     */
+    aliasFor(playerId, riotId = '') {
+      return aliasForPlayer(players, { playerId, riotId });
     },
 
     /**
@@ -1059,7 +1077,7 @@ export function makeAliasStore(filePath) {
           if (riotId) existing.riotId = riotId;
           existing.seenAt = at;
         } else {
-          players.push({ id, riotId, alias: '', seenAt: at });
+          players.push({ id, riotId, alias: '', seenAt: at, rejected: [] });
         }
         changed = true;
       }
@@ -1071,17 +1089,31 @@ export function makeAliasStore(filePath) {
       return changed;
     },
 
-    /** Set or clear one alias. An unknown id creates the record. */
+    /**
+     * Set or clear one alias, on a player the feed has seen or on one it has not.
+     *
+     * With an account id this is the ordinary case: name somebody in the lobby.
+     * With only a Riot ID it is the preparation case - writing the roster down
+     * the day before, when nothing has reported an account id yet. Those records
+     * match on the Riot ID until the feed turns up somebody who looks like them,
+     * at which point `link` can make the match exact.
+     */
     save({ id, alias = '', riotId = '' }) {
       const key = text(id, '', 64);
-      if (!key) throw new Error('A player alias needs a player id.');
+      const name = text(riotId, '', 64);
+      if (!key && !riotIdKey(name)) {
+        throw new Error('A player alias needs either a player id or a Riot ID.');
+      }
 
-      const existing = players.find((entry) => entry.id === key);
+      const existing = key
+        ? players.find((entry) => entry.id === key)
+        : players.find((entry) => !entry.id && riotIdKey(entry.riotId) === riotIdKey(name));
+
       if (existing) {
         existing.alias = text(alias, '', 32);
-        if (riotId) existing.riotId = text(riotId, existing.riotId, 64);
+        if (name) existing.riotId = name;
       } else {
-        players.push({ id: key, riotId: text(riotId, '', 64), alias: text(alias, '', 32), seenAt: Date.now() });
+        players.push({ id: key, riotId: name, alias: text(alias, '', 32), seenAt: Date.now(), rejected: [] });
       }
 
       trim();
@@ -1089,11 +1121,66 @@ export function makeAliasStore(filePath) {
       return this.list();
     },
 
-    remove(id) {
+    remove(key) {
+      const wanted = text(key, '', 64);
       const before = players.length;
-      players = players.filter((entry) => entry.id !== text(id, '', 64));
+      players = players.filter((entry) => aliasKey(entry) !== wanted);
       if (players.length !== before) persist();
       return this.list();
+    },
+
+    /**
+     * Say that a hand-written alias and an account the feed has seen are the
+     * same person.
+     *
+     * The alias moves onto the account record rather than the other way round,
+     * because the account id is the key that cannot go stale - the operator's
+     * work survives the player renaming themselves afterwards. The hand-written
+     * record is then gone: leaving it would match the same person twice.
+     */
+    link(key, playerId) {
+      const wanted = text(key, '', 64);
+      const account = text(playerId, '', 64);
+      const manual = players.find((entry) => aliasKey(entry) === wanted && !entry.id);
+      if (!manual || !account) throw new Error('Nothing to link.');
+
+      const target = players.find((entry) => entry.id === account);
+      if (target) {
+        target.alias = manual.alias;
+        if (!target.riotId) target.riotId = manual.riotId;
+      } else {
+        players.push({ id: account, riotId: manual.riotId, alias: manual.alias, seenAt: Date.now(), rejected: [] });
+      }
+      players = players.filter((entry) => entry !== manual);
+
+      trim();
+      persist();
+      return this.list();
+    },
+
+    /** Say that they are different people, and stop being asked. */
+    reject(key, playerId) {
+      const wanted = text(key, '', 64);
+      const account = text(playerId, '', 64);
+      const manual = players.find((entry) => aliasKey(entry) === wanted && !entry.id);
+      if (!manual || !account) throw new Error('Nothing to separate.');
+
+      if (!manual.rejected.includes(account)) manual.rejected.push(account);
+      persist();
+      return this.list();
+    },
+
+    /** Hand-written aliases that now look like somebody the feed has reported. */
+    pending() {
+      return pendingLinks(players).map(({ manual, candidate }) => ({
+        key: aliasKey(manual),
+        alias: manual.alias,
+        riotId: manual.riotId,
+        playerId: candidate.id,
+        candidateRiotId: candidate.riotId,
+        candidateAlias: candidate.alias,
+        seenAt: candidate.seenAt,
+      }));
     },
 
     /** Drop everyone nobody has bothered to name. */

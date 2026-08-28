@@ -412,7 +412,53 @@ export function aliasForPlayer(list, { playerId, riotId } = {}) {
   }
   const key = riotIdKey(riotId);
   if (!key) return '';
-  return records.find((entry) => entry.alias && riotIdKey(entry.riotId) === key)?.alias ?? '';
+  const byName = records.find(
+    (entry) =>
+      entry.alias &&
+      riotIdKey(entry.riotId) === key &&
+      // An operator who has looked at this pair and said they are different
+      // people is not asked twice, and their answer is not quietly ignored the
+      // next time the same Riot ID turns up.
+      !(playerId && (entry.rejected ?? []).includes(playerId)),
+  );
+  return byName?.alias ?? '';
+}
+
+/**
+ * The record a list entry is addressed by.
+ *
+ * A player the feed has reported is keyed by their account id, which is exact.
+ * One typed in before the event has no account id yet - only the Riot ID they
+ * were written down under - so that is the key, namespaced so the two kinds can
+ * never collide.
+ */
+export const aliasKey = (entry) =>
+  entry?.id ? String(entry.id) : `riot:${riotIdKey(entry?.riotId)}`;
+
+/**
+ * Aliases typed in ahead of time that now look like somebody the feed has seen.
+ *
+ * Only a suggestion, never applied on its own. Riot IDs are not unique over
+ * time - people change them, and two events can have a "Jett" who are not the
+ * same person - so promoting a name match to an account link is a decision for
+ * somebody who knows the players, not for a string comparison.
+ */
+export function pendingLinks(list) {
+  const records = list ?? [];
+  const seen = records.filter((entry) => entry.id && riotIdKey(entry.riotId));
+  const pending = [];
+
+  for (const manual of records) {
+    if (manual.id || !manual.alias) continue;
+    const key = riotIdKey(manual.riotId);
+    if (!key) continue;
+    for (const candidate of seen) {
+      if (riotIdKey(candidate.riotId) !== key) continue;
+      if ((manual.rejected ?? []).includes(candidate.id)) continue;
+      pending.push({ manual, candidate });
+    }
+  }
+  return pending;
 }
 
 /**

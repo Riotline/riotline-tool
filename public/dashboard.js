@@ -15,9 +15,9 @@ import { onLookupMatch } from './store.js';
 import { onState } from './live.js';
 import { aliasForPlayer } from './select-schema.js';
 import { applyTeam } from './teams.js';
-import { STATS, STAT_FIELDS, STAT_SLOTS, statDef } from './stats.js';
+import { STATS, STAT_FIELDS, STAT_SLOTS, resultText, statDef } from './stats.js';
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
-import { el, field, grid, makeFields, subhead, title } from './fields.js';
+import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import {
   FONT_CHOICES,
   PRESET_FIELDS,
@@ -142,6 +142,7 @@ function queueSave() {
   // rather than at each of the thirty-odd controls.
   markModified();
   syncCueUi();
+  syncResultUi();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
 }
@@ -244,6 +245,17 @@ function buildMatchEditor() {
     ...Array.from({ length: STAT_SLOTS }, (_, slot) => statRowField(slot)),
     subhead('MVP banner'),
     grid(2, [textField('Banner text', 'labels.mvp', { maxlength: 16 })]),
+
+    subhead('Result wording'),
+    grid(3, [
+      textField('Won', 'labels.win', { maxlength: 16, placeholder: 'WIN' }),
+      textField('Lost', 'labels.loss', { maxlength: 16, placeholder: 'LOSS' }),
+      textField('Drawn', 'labels.draw', { maxlength: 16, placeholder: 'DRAW' }),
+    ]),
+    help(
+      'Which side gets which is worked out from the two round counts, so there is nothing to keep in step - only ' +
+        'the words are yours. A board still on 0 - 0 prints nothing at all rather than calling it a draw.',
+    ),
   );
 }
 
@@ -327,6 +339,41 @@ function playerRow(side, index) {
  * rather than a link - the operator is free to edit the name afterwards, and
  * renaming the team later cannot rewrite a scoreboard that is already on air.
  */
+/**
+ * What the graphic will print on this side, shown rather than typed.
+ *
+ * Read-only on purpose: it comes from the two round counts, so there is nothing
+ * here to edit. Shown at all because an operator who has just lost a text box
+ * needs to see where its contents went - and because 0 - 0 printing nothing is
+ * worth being able to see before it is on air.
+ */
+const resultBoxes = { left: null, right: null };
+
+function resultLine(side) {
+  const box = el('div', 'result-readout');
+  resultBoxes[side] = box;
+  paintResult(side);
+  return field('Result', box);
+}
+
+function paintResult(side) {
+  const box = resultBoxes[side];
+  if (!box || !state) return;
+  const value = resultText(state, side);
+  box.textContent = value || 'nothing yet - both sides are on 0';
+  box.classList.toggle('is-empty', !value);
+}
+
+/*
+ * Both sides, because one round count decides both of them - typing into the
+ * left team's score has to move the right team's word too, and neither box is
+ * wired to the other.
+ */
+function syncResultUi() {
+  paintResult('left');
+  paintResult('right');
+}
+
 function teamPicker(side) {
   const select = el('select');
   select.append(el('option', null, { value: '' }, teamLibrary.length ? '- pick a team -' : '- no saved teams -'));
@@ -369,9 +416,9 @@ function buildSideEditor(side) {
     grid(null, [teamPicker(side)]),
     grid(2, [
       textField('Team name', `${side}.teamName`, { placeholder: side === 'left' ? 'ATK' : 'DEF', maxlength: 24 }),
-      textField('Result text', `${side}.result`, { placeholder: 'WIN / LOSS', maxlength: 16 }),
+      numberField('Rounds won', `${side}.roundsWon`, { max: 99 }),
     ]),
-    grid(2, [numberField('Rounds won', `${side}.roundsWon`, { max: 99 }), checkField('Won the match', `${side}.won`)]),
+    resultLine(side),
     grid(null, [urlField('Team logo URL', `${side}.logo`, { placeholder: 'https://...' })]),
     subhead(`Roster - rows show ${state.statRows.slice(0, ROW_STAT_SLOTS).map((key) => statDef(key).label).join(' + ')}`),
     ...Array.from({ length: SLOTS }, (_, index) => playerRow(side, index)),
@@ -844,8 +891,6 @@ function importMatch(match) {
 
     state[side] = {
       ...state[side],
-      result: team?.won === true ? 'WIN' : team?.won === false ? 'LOSS' : state[side].result,
-      won: team?.won === true,
       roundsWon: team?.roundsWon ?? 0,
       players: Array.from({ length: SLOTS }, (_, index) => {
         if (!ranked[index]) return emptyPlayer();

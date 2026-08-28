@@ -1311,6 +1311,44 @@ pre {
   flex: none;
 }
 
+/* A match waiting on a yes or no. Marked rather than merely listed: it is the
+   one row in this panel that is asking the operator a question. */
+.alias-pending {
+  border-left: 3px solid var(--accent);
+  background: rgba(255, 70, 85, 0.06);
+}
+
+.alias-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.alias-draft {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* A derived value where a text box used to be. Sized like an input so the row
+   does not change height, but plainly not one - it is a readout. */
+.result-readout {
+  padding: 6px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  min-height: 31px;
+}
+
+.result-readout.is-empty {
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-faint);
+}
+
 .checkline {
   display: flex;
   align-items: center;

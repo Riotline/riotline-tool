@@ -379,7 +379,10 @@ async function handleApi(pathname, params) {
       return { revision: globals.revision, state: globals.state };
 
     case '/api/aliases':
-      return { players: aliases.list() };
+      // The pending list rides along: it is derived from the same records, and a
+      // second round trip to ask "anything to confirm?" would only ever be made
+      // at exactly the moments this one already is.
+      return { players: aliases.list(), pending: aliases.pending() };
 
     case '/api/presets':
       return { presets: presets.list(), activeId: graphics.state.presetId };
@@ -656,7 +659,7 @@ async function handleAliasAction(body) {
 
   const reresolve = () => {
     const slots = select.state.slots.map((slot) =>
-      slot.playerId ? { ...slot, name: displayName(slot.riotId, aliases.aliasFor(slot.playerId)) } : slot,
+      slot.playerId ? { ...slot, name: displayName(slot.riotId, aliases.aliasFor(slot.playerId, slot.riotId)) } : slot,
     );
     if (slots.some((slot, index) => slot.name !== select.state.slots[index].name)) select.patch({ slots });
 
@@ -693,17 +696,36 @@ async function handleAliasAction(body) {
     case 'save': {
       const players = aliases.save(body?.player ?? {});
       reresolve();
-      return { players };
+      return { players, pending: aliases.pending() };
     }
 
     case 'delete': {
-      const players = aliases.remove(String(body?.id ?? ''));
+      const players = aliases.remove(String(body?.key ?? body?.id ?? ''));
       reresolve();
-      return { players };
+      return { players, pending: aliases.pending() };
+    }
+
+    /*
+     * The two answers to "is this hand-written alias this player?".
+     *
+     * Asked rather than assumed, because a Riot ID is not a stable identity -
+     * people rename themselves, and two events can both have a Jett. A name
+     * match is enough to raise the question and never enough to settle it.
+     */
+    case 'link': {
+      const players = aliases.link(String(body?.key ?? ''), String(body?.playerId ?? ''));
+      reresolve();
+      return { players, pending: aliases.pending() };
+    }
+
+    case 'reject': {
+      const players = aliases.reject(String(body?.key ?? ''), String(body?.playerId ?? ''));
+      reresolve();
+      return { players, pending: aliases.pending() };
     }
 
     case 'clear-unnamed':
-      return { players: aliases.clearUnnamed() };
+      return { players: aliases.clearUnnamed(), pending: aliases.pending() };
 
     default:
       throw new ProviderError(400, `Unknown alias action: ${action || '(none)'}`);
@@ -894,7 +916,7 @@ const server = createServer(async (req, res) => {
        */
       case '/api/roster':
         return handleWrite(res, async () => {
-          const result = ingestRoster(select.state, await readJsonBody(req), (id) => aliases.aliasFor(id));
+          const result = ingestRoster(select.state, await readJsonBody(req), (id, riotId) => aliases.aliasFor(id, riotId));
 
           // Recorded before the state goes out, so a player who has just been
           // seen is already in the library by the time the dashboard repaints.

@@ -79,6 +79,13 @@ let saveTimer = null;
 let saveGeneration = 0;
 let aliasFilter = '';
 
+/*
+ * Hand-written aliases that now look like somebody the feed has reported.
+ * Derived on the server from the same records, so it arrives with them rather
+ * than costing a second request.
+ */
+let pendingAliases = [];
+
 function setStatus(kind, label) {
   els.status.className = `save-status ${kind}`.trim();
   els.status.textContent = label;
@@ -453,6 +460,7 @@ async function aliasAction(body) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
   players = payload.players;
+  if (Array.isArray(payload.pending)) pendingAliases = payload.pending;
   buildAliasEditor();
   return payload;
 }
@@ -471,7 +479,9 @@ function aliasRow(player) {
 
   const who = el('div', 'alias-who');
   who.append(el('div', 'alias-riot', {}, player.riotId || '(unknown Riot ID)'));
-  who.append(el('div', 'alias-id', {}, player.id));
+  // A hand-written alias has no account id yet, and saying so is more use than
+  // an empty line: it tells the operator this one matches on the name.
+  who.append(el('div', 'alias-id', {}, player.id || 'typed in - matches on the Riot ID'));
 
   const input = el('input', null, {
     type: 'text',
@@ -497,7 +507,7 @@ function aliasRow(player) {
 
   const remove = el('button', 'mini-btn', { type: 'button', title: 'Forget this player' }, 'Forget');
   remove.addEventListener('click', () => {
-    aliasAction({ action: 'delete', id: player.id }).catch((error) => toast(`Not removed: ${error.message}`));
+    aliasAction({ action: 'delete', key: player.key }).catch((error) => toast(`Not removed: ${error.message}`));
   });
 
   const controls = el('div', 'alias-controls');
@@ -526,17 +536,100 @@ function refreshAliases() {
     try {
       const payload = await fetch('/api/aliases').then((response) => response.json());
       const next = payload.players ?? [];
+      const nextPending = payload.pending ?? [];
       // Compared before rebuilding: this fires on every roster change, and
       // replacing the panel under somebody typing an alias would take the box
-      // out from under them.
-      if (JSON.stringify(next) === JSON.stringify(players)) return;
+      // out from under them. The pending list is part of the comparison because
+      // a player loading in is exactly what raises a match to confirm.
+      if (JSON.stringify(next) === JSON.stringify(players)
+        && JSON.stringify(nextPending) === JSON.stringify(pendingAliases)) return;
       players = next;
+      pendingAliases = nextPending;
       buildAliasEditor();
     } catch {
       // The library is an aid, not the graphic. A failed refresh is not worth
       // a toast in the middle of a lobby.
     }
   }, 400);
+}
+
+/**
+ * Write somebody down before the event.
+ *
+ * There is nothing to key on yet - nothing has reported an account id for a
+ * player who has not loaded in - so these match on the Riot ID until the feed
+ * turns up somebody who looks like them.
+ */
+function aliasDraftForm() {
+  const riot = el('input', null, { type: 'text', spellcheck: 'false', maxlength: 64, placeholder: 'Name #TAG' });
+  const alias = el('input', null, { type: 'text', spellcheck: 'false', maxlength: 32, placeholder: 'What to call them' });
+
+  const add = el('button', 'btn btn-primary', { type: 'button' }, 'Add alias');
+  const submit = () => {
+    const riotId = riot.value.trim();
+    const name = alias.value.trim();
+    if (!riotId || !name) {
+      toast('A prepared alias needs both a Riot ID and a name.');
+      return;
+    }
+    aliasAction({ action: 'save', player: { riotId, alias: name } })
+      .then(() => {
+        riot.value = '';
+        alias.value = '';
+        toast(`Saved "${name}" against ${riotId}`);
+      })
+      .catch((error) => toast(`Alias not saved: ${error.message}`));
+  };
+  add.addEventListener('click', submit);
+  for (const box of [riot, alias]) {
+    box.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') submit();
+    });
+  }
+
+  return wrapChildren('alias-draft', [
+    subhead('Prepare an alias'),
+    grid(2, [field('Riot ID', riot), field('Alias', alias)]),
+    help(
+      'For a roster you have before anybody has loaded in. The tagline matters here - it is the only thing ' +
+        'telling two players with the same name apart. Once the feed reports somebody who matches, this page ' +
+        'asks whether to tie the two together.',
+    ),
+    wrapChildren('team-form-actions', [add]),
+  ]);
+}
+
+/**
+ * The question a name match is only ever allowed to ask.
+ *
+ * A Riot ID is not a stable identity - people rename themselves, and two events
+ * can each have a Jett - so a match on the name is grounds for asking and never
+ * for deciding. Confirming moves the alias onto the account id, which is the key
+ * that cannot go stale.
+ */
+function pendingRow(entry) {
+  const row = el('div', 'alias-row alias-pending');
+
+  const who = el('div', 'alias-who');
+  who.append(el('div', 'alias-riot', {}, `${entry.alias} - written down as ${entry.riotId}`));
+  who.append(el('div', 'alias-id', {}, `now in the lobby as ${entry.candidateRiotId || entry.playerId}`));
+
+  const link = el('button', 'mini-btn', { type: 'button', title: 'Same person - tie the alias to this account' }, 'Same player');
+  link.addEventListener('click', () => {
+    aliasAction({ action: 'link', key: entry.key, playerId: entry.playerId })
+      .then(() => toast(`"${entry.alias}" is now tied to that account`))
+      .catch((error) => toast(`Not linked: ${error.message}`));
+  });
+
+  const reject = el('button', 'mini-btn', { type: 'button', title: 'Different people - stop asking' }, 'Not them');
+  reject.addEventListener('click', () => {
+    aliasAction({ action: 'reject', key: entry.key, playerId: entry.playerId })
+      .then(() => toast('Left separate'))
+      .catch((error) => toast(`Not saved: ${error.message}`));
+  });
+
+  row.append(who, wrapChildren('alias-actions', [link, reject]));
+  return row;
 }
 
 function buildAliasEditor() {
@@ -571,14 +664,26 @@ function buildAliasEditor() {
   host.replaceChildren(
     title('Player aliases', el('span', 'pill', {}, `${named} named of ${players.length}`)),
     help(
-      'Every player the feed reports is recorded here, whether or not you have named one - you cannot write an ' +
-        'alias for somebody you have no record of having seen. With no alias a card shows their Riot ID without ' +
-        'the tagline. Keyed on the player id rather than the name, so somebody who renames themselves keeps theirs.',
+      'Every player the feed reports is recorded here, whether or not you have named one. With no alias a card ' +
+        'shows their Riot ID without the tagline. Anyone the feed has seen is keyed on their account id, so a ' +
+        'player who renames themselves keeps their alias; one written in below is keyed on the Riot ID until you ' +
+        'confirm which account it belongs to.',
     ),
     grid(null, [field('Search', filter)]),
+    ...(pendingAliases.length
+      ? [
+          subhead(`Confirm ${pendingAliases.length === 1 ? 'a match' : `${pendingAliases.length} matches`}`),
+          help(
+            'These were typed in ahead of the event and now match somebody the feed has reported, by Riot ID ' +
+              'alone. Confirm and the alias moves onto their account, where a rename cannot lose it.',
+          ),
+          wrapChildren('alias-list', pendingAliases.map(pendingRow)),
+        ]
+      : []),
     shown.length
       ? wrapChildren('alias-list', shown.map(aliasRow))
-      : el('p', 'empty', {}, players.length ? 'Nobody matches that.' : 'No players seen yet. Run a lobby with the webhook pointed here.'),
+      : el('p', 'empty', {}, players.length ? 'Nobody matches that.' : 'No players seen yet. Run a lobby with the webhook pointed here, or write one in below.'),
+    aliasDraftForm(),
     wrapChildren('team-form-actions', [tidy]),
   );
 }
@@ -746,6 +851,7 @@ async function start() {
   catalogue = assetData;
   library = teamData.teams ?? [];
   players = aliasData.players ?? [];
+  pendingAliases = aliasData.pending ?? [];
 
   buildAll();
   setStatus('', 'Saved');

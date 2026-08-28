@@ -13,7 +13,7 @@
  *     graphic state can become executable, no matter where it was imported from.
  */
 
-import { STAT_SLOTS, statDef } from './stats.js';
+import { STAT_SLOTS, resultText, statDef } from './stats.js';
 import { ANIM_TIER_COUNT, easingCurve } from './animation.js';
 
 const STAGE_W = 1920;
@@ -298,7 +298,10 @@ function buildView(state) {
 
     view[side] = {
       teamName: data.teamName,
-      result: data.result,
+      // Derived, not typed. The two round counts already say who won, and a
+      // result line an operator has to keep in step with them is a line that
+      // goes on air contradicting the score beside it.
+      result: resultText(state, side),
       roundsWon: String(data.roundsWon ?? 0),
       logo: data.logo,
       mvp: playerView(mvp ?? {}, statRows),

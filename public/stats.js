@@ -44,3 +44,27 @@ export const STAT_FIELDS = [
   { key: 'hsPct', label: 'HS %', max: 100 },
   { key: 'kast', label: 'KAST %', max: 100 },
 ];
+
+/**
+ * WIN, LOSS or DRAW, worked out from the two round counts.
+ *
+ * Derived rather than typed. A result line an operator has to keep in step with
+ * the score beside it is a line that eventually goes to air contradicting it -
+ * and on a post-match board the score is the one number nobody doubts, so it is
+ * the one that should decide.
+ *
+ * A draw is a real VALORANT scoreline once overtime is off, so it gets its own
+ * wording rather than being resolved arbitrarily to one side. All three words
+ * are operator-settable, because "WIN" is not what every broadcast calls it.
+ *
+ * Blank when neither side has a round yet: 0 - 0 is a board being set up, and
+ * announcing a draw over it would be wrong on every screen it reached.
+ */
+export function resultText(state, side) {
+  const mine = state?.[side]?.roundsWon ?? 0;
+  const theirs = state?.[side === 'left' ? 'right' : 'left']?.roundsWon ?? 0;
+  const labels = state?.labels ?? {};
+  if (!mine && !theirs) return '';
+  if (mine === theirs) return labels.draw ?? '';
+  return mine > theirs ? (labels.win ?? '') : (labels.loss ?? '');
+}
