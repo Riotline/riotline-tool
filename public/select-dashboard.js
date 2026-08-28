@@ -77,6 +77,7 @@ let players = [];
 let catalogue = { maps: [], agents: [] };
 let saveTimer = null;
 let saveGeneration = 0;
+let saveInFlight = false;
 let aliasFilter = '';
 
 /*
@@ -107,6 +108,7 @@ function saveNow() {
 
 async function save() {
   const generation = ++saveGeneration;
+  saveInFlight = true;
   try {
     const response = await fetch('/api/select', {
       method: 'POST',
@@ -120,6 +122,11 @@ async function save() {
   } catch (error) {
     setStatus('failed', 'Not saved');
     toast(`Agent select not saved: ${error.message}`);
+  } finally {
+    // Only the newest save reopens this dashboard to incoming state; an older
+    // one finishing late must not let a remote update land on edits a newer
+    // save is still carrying.
+    if (generation === saveGeneration) saveInFlight = false;
   }
 }
 
@@ -244,9 +251,14 @@ els.endClockBtn.addEventListener('click', endClock);
  * adopted rather than ignored - unlike the other two tabs, where it only carries
  * the command channel.
  *
- * Everything an editor on this page owns is left alone: adopting the whole state
- * would overwrite a team name halfway through being typed. What comes from the
- * feed is the slots, the game id and the on-air flag, and that is what is taken.
+ * The feed-owned parts - slots, game id, on-air flag - are taken from every
+ * frame, because they move without anybody here typing.
+ *
+ * What an editor on this page owns is taken too, but only while this dashboard
+ * has nothing outstanding of its own: between the debounce and the POST `state`
+ * is ahead of the server, and adopting then would undo what was just typed.
+ * `syncFields` additionally skips whatever holds focus, so a team name being
+ * typed is never rewritten under the caret.
  */
 onState('select', (next) => {
   if (!state) return;
@@ -276,6 +288,14 @@ onState('select', (next) => {
     refreshAliases();
   }
   syncCueUi();
+
+  if (saveTimer || saveInFlight) return;
+  state = next;
+  // Re-resolved after the swap: the frame carries whatever the feed wrote, so
+  // adopting it wholesale would put a raw code name back in the dropdown that
+  // the block above just turned into a real map name.
+  state.mapName = mapDisplayName(catalogue, state.mapName);
+  fields.syncFields();
 });
 
 // --------------------------------------------------------- editor: teams ---

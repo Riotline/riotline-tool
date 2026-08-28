@@ -12,6 +12,7 @@
  * either source without branching on the provider.
  */
 
+import { onState } from './live.js';
 import { setLookupMatch } from './store.js';
 import { WATCH_MAX, isPermanentFailure, mapLimit, parseHandles, scoreboardReady } from './watch-core.js';
 
@@ -1073,3 +1074,77 @@ document.addEventListener('click', async (event) => {
 });
 
 loadConfig();
+
+// ------------------------------------------------------- lookups, shared ---
+
+/**
+ * Who else is mid-lookup, so two operators do not sit waiting on the same
+ * 60-second tracker.gg page without knowing the other started it.
+ *
+ * Read-only on purpose: this reports, it does not block. Deciding for an
+ * operator that they may not run a lookup is a worse failure on air than two
+ * lookups running at once.
+ */
+const liveLookup = $('lookup-live');
+
+if (liveLookup) {
+  const RESULT_LINGER_MS = 8000;
+  let clearTimer = null;
+
+  onState('lookup', (next) => {
+    clearTimeout(clearTimer);
+
+    if (next.active) {
+      liveLookup.hidden = false;
+      liveLookup.className = 'lookup-live busy';
+      liveLookup.textContent = `Looking up ${next.handle}...`;
+      return;
+    }
+
+    // Nothing has run yet this session - no point announcing an idle state.
+    if (!next.finishedAt) {
+      liveLookup.hidden = true;
+      return;
+    }
+
+    liveLookup.hidden = false;
+    liveLookup.className = `lookup-live ${next.outcome === 'ok' ? 'done' : 'failed'}`;
+    liveLookup.textContent =
+      next.outcome === 'ok' ? `${next.handle} loaded` : `${next.handle} failed: ${next.message}`;
+
+    /*
+     * Adopt the list itself, so a fetch on one dashboard fills in every other
+     * one - including a dashboard opened afterwards, since the stream replays
+     * the current state to whoever connects.
+     *
+     * Keyed on the list itself, not the handle: re-checking the same player is
+     * the whole point of the watch, and a handle comparison would treat the
+     * arrival of a new game as nothing to do.
+     *
+     * A selection that survives the update is kept. Clearing it would pull the
+     * scoreboard out from under whoever is mid-lookup on another dashboard,
+     * which is worse than a slightly stale detail pane.
+     */
+    const incoming = Array.isArray(next.matches) ? next.matches : null;
+    const key = (list) => list.map((match) => match.id).join(',');
+
+    if (next.outcome === 'ok' && incoming && key(incoming) !== key(state.matches)) {
+      const held = state.selectedMatchId;
+
+      state.handle = next.handle;
+      state.matches = incoming;
+      els.playerName.textContent = next.handle;
+      els.playerPuuidRow.hidden = true;
+      els.playerCard.hidden = false;
+
+      if (held && !incoming.some((match) => match.id === held)) resetDetails();
+      renderMatchList();
+    }
+
+    // The outcome is worth seeing, but a stale one reading "loaded" ten minutes
+    // later is just noise beside whatever is on air now.
+    clearTimer = setTimeout(() => {
+      liveLookup.hidden = true;
+    }, RESULT_LINGER_MS);
+  });
+}

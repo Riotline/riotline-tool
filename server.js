@@ -17,7 +17,10 @@
  * Zero npm dependencies - Node 18+ built-ins only.
  */
 
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { connect as netConnect } from 'node:net';
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -124,7 +127,255 @@ const browser = TRACKER_ENABLED
       channel: TRACKER_CHANNEL,
     })
   : null;
+const TRACKER_LOGIN_PORT = Number(process.env.TRACKER_LOGIN_PORT ?? 6080);
+const TRACKER_LOGIN_TIMEOUT_MS = Number(process.env.TRACKER_LOGIN_TIMEOUT_MS ?? 6 * 60 * 1000);
 const TRACKER_CONFIG = { browser };
+
+/**
+ * Who is looking something up right now, shared with every open dashboard.
+ *
+ * Deliberately not a makeStateStore: this is the state of a request in flight,
+ * so it is meaningless across a restart and must never touch the disk. It only
+ * has to satisfy the shape streamStores reads - a revision, a state, and a way
+ * to subscribe.
+ *
+ * ponytail: one slot, not a list. Lookups are slow enough (35-80s against
+ * tracker.gg) and operators few enough that "who is busy" is the whole
+ * question; give it a keyed map if concurrent lookups ever need telling apart.
+ */
+const lookups = (() => {
+  let revision = 0;
+  let state = {
+    active: false,
+    handle: '',
+    type: '',
+    startedAt: 0,
+    finishedAt: 0,
+    outcome: '',
+    message: '',
+    // The list itself, so every dashboard shows what was just fetched rather
+    // than only the operator who asked for it.
+    matches: null,
+  };
+  const listeners = new Set();
+
+  const publish = (next) => {
+    state = { ...state, ...next };
+    revision += 1;
+    for (const listener of listeners) {
+      try {
+        listener({ revision, state });
+      } catch {
+        /* a dead connection must not take the lookup down with it */
+      }
+    }
+  };
+
+  return {
+    get revision() {
+      return revision;
+    },
+    get state() {
+      return state;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    started(handle, type) {
+      publish({ active: true, handle, type, startedAt: Date.now(), finishedAt: 0, outcome: '', message: '' });
+    },
+    /**
+     * @param {object[]|null} matches the list to share, or null to leave the
+     *   last one standing - a match-detail lookup has no list of its own, and
+     *   blanking it would clear the dashboards mid-broadcast.
+     */
+    finished(outcome, message = '', matches = null) {
+      publish({ active: false, finishedAt: Date.now(), outcome, message, ...(matches ? { matches } : {}) });
+    },
+  };
+})();
+
+/**
+ * A tracker.gg Cloudflare solve any operator can drive from their own browser.
+ *
+ * The clearance is bound to the IP and user agent that earned it, so the solve
+ * has to happen in this container's Chrome. docker/tracker-login-session.sh
+ * puts that browser on a throwaway X display and serves it over noVNC; all
+ * this has to do is start one at a time, relay the progress, and make sure the
+ * viewer does not outlive the solve.
+ *
+ * ponytail: state lives in this one object, so a restart mid-solve forgets the
+ * session. The script's own EXIT trap still tears the browser down, which is
+ * the part that matters.
+ */
+const trackerLogin = (() => {
+  let revision = 0;
+  let state = { active: false, phase: 'idle', message: '', webPort: TRACKER_LOGIN_PORT, startedAt: 0, password: '' };
+  let child = null;
+  let timer = null;
+  const listeners = new Set();
+
+  const publish = (next) => {
+    state = { ...state, ...next };
+    revision += 1;
+    for (const listener of listeners) {
+      try {
+        listener({ revision, state });
+      } catch {
+        /* a dead dashboard must not take the solve down with it */
+      }
+    }
+  };
+
+  const stop = () => {
+    clearTimeout(timer);
+    timer = null;
+    if (child) {
+      // Negative pid: the whole group, not just the script. SIGTERM so the
+      // script's own trap still gets to run - it is what removes the X lock
+      // that would otherwise stop the next session starting.
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        // Already gone, or never made it into a group of its own.
+        child.kill('SIGTERM');
+      }
+      child = null;
+    }
+  };
+
+  return {
+    get revision() {
+      return revision;
+    },
+    get state() {
+      return state;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+
+    async start() {
+      if (state.active) throw new ProviderError(409, 'A tracker login is already running.');
+      if (!TRACKER_ENABLED) throw new ProviderError(400, 'The tracker source is disabled.');
+
+      /*
+       * Hand the profile over before starting.
+       *
+       * The server keeps its own browser warm on the very same profile
+       * directory, and Chromium allows exactly one browser per profile. Leave
+       * it running and the login's Chrome cannot open the profile at all: the
+       * solve dies within seconds, and its teardown closes the viewer while the
+       * operator is still watching it connect. The lookup browser reopens by
+       * itself on the next request.
+       */
+      await browser?.close().catch(() => {});
+
+      // Broadcast rather than returned only to whoever pressed the button: the
+      // point of this panel is that any operator can finish the solve, and one
+      // watching the viewer appear without the password cannot. It guards the
+      // noVNC port against a stray scanner, not against the operators - the
+      // dashboard itself has no login, so anyone who can see this could start
+      // a session of their own anyway.
+      const password = randomBytes(6).toString('base64url').slice(0, 8);
+
+      // Its own process group, so a cancel can take the whole tree down. The
+      // script starts Xvfb, x11vnc and websockify as children: signalling only
+      // the script leaves those three running if it dies without its trap.
+      child = spawn(path.join(ROOT, 'docker', 'tracker-login-session.sh'), [], {
+        env: { ...process.env, VNC_PASSWORD: password, WEB_PORT: String(TRACKER_LOGIN_PORT) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      });
+
+      publish({ active: true, phase: 'starting', message: 'Starting the browser...', startedAt: Date.now(), password });
+
+      const readLines = (stream) => {
+        let buffered = '';
+        stream.setEncoding('utf8');
+        stream.on('data', (chunk) => {
+          buffered += chunk;
+          const lines = buffered.split(/\r?\n/);
+          buffered = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('STATUS ')) continue;
+            const [phase, ...rest] = line.slice('STATUS '.length).split(' ');
+            publish({ phase, message: rest.join(' ') });
+          }
+        });
+      };
+      readLines(child.stdout);
+      readLines(child.stderr);
+
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        timer = null;
+        child = null;
+
+        /*
+         * The script reports its own outcome, so this only has to cover the
+         * case where it died without saying anything.
+         *
+         * "closed" counts as a proper ending: pressing Done signals the browser
+         * to shut down, which surfaces here as exit 143 (SIGTERM). Reporting
+         * that as a failure told operators their solve had not worked when it
+         * very likely had.
+         */
+        const TERMINAL = new Set(['passed', 'failed', 'closed']);
+        if (TERMINAL.has(state.phase)) publish({ active: false, password: '' });
+        else publish({ active: false, phase: 'failed', message: `the login exited with code ${code}`, password: '' });
+      });
+
+      child.on('error', (error) => {
+        child = null;
+        publish({ active: false, phase: 'failed', message: error.message, password: '' });
+      });
+
+      // tracker-login.js waits five minutes for a human; this is that plus room
+      // to start up, after which the viewer is not left open indefinitely.
+      timer = setTimeout(() => {
+        publish({ phase: 'failed', message: 'nobody cleared the challenge in time' });
+        stop();
+      }, TRACKER_LOGIN_TIMEOUT_MS);
+
+      return { password, webPort: TRACKER_LOGIN_PORT };
+    },
+
+    cancel() {
+      if (!state.active) return { cancelled: false };
+      stop();
+      publish({ active: false, phase: 'closed', message: 'browser closed - run a lookup to confirm it took', password: '' });
+      return { cancelled: true };
+    },
+  };
+})();
+
+/**
+ * Announce a tracker lookup so the other dashboards can show it, and make sure
+ * the "finished" always fires - an operator staring at a spinner that a thrown
+ * error left running is worse than no indicator at all.
+ */
+async function announceLookup(handle, type, run) {
+  // A lookup here would relaunch the browser on the profile the solve is using,
+  // taking it back mid-challenge and losing both.
+  if (trackerLogin.state.active) {
+    throw new ProviderError(409, 'A tracker login is in progress - try again once it finishes.');
+  }
+
+  lookups.started(handle, type);
+  try {
+    const result = await run();
+    // Only a match list is worth sharing; a detail lookup answers a question
+    // the asking dashboard already has open.
+    lookups.finished('ok', '', Array.isArray(result?.matches) ? result.matches : null);
+    return result;
+  } catch (error) {
+    lookups.finished('failed', error?.message ?? 'Lookup failed');
+    throw error;
+  }
+}
 const PORT = Number(process.env.PORT ?? 8080);
 const DEFAULT_REGION = pick(process.env.RIOT_REGION, PLATFORM_HOSTS, 'na');
 const DEFAULT_ROUTING = pick(process.env.RIOT_ROUTING, ROUTING_HOSTS, 'americas');
@@ -429,7 +680,7 @@ async function handleApi(pathname, params) {
       if (provider === 'tracker') {
         const handle = (params.get('handle') ?? '').trim();
         if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
-        return trackerMatchList(TRACKER_CONFIG, { handle, type });
+        return announceLookup(handle, type, () => trackerMatchList(TRACKER_CONFIG, { handle, type }));
       }
 
       const puuid = (params.get('puuid') ?? '').trim();
@@ -448,7 +699,7 @@ async function handleApi(pathname, params) {
       if (provider === 'tracker') {
         const handle = (params.get('handle') ?? '').trim();
         if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
-        return trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type });
+        return announceLookup(handle, type, () => trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type }));
       }
 
       return riotMatchDetail(riotGet, { matchId, region });
@@ -812,8 +1063,88 @@ async function handleWrite(res, work) {
   }
 }
 
+/**
+ * noVNC, served through this origin instead of its own port.
+ *
+ * websockify listens inside the container only. Publishing it would put the
+ * viewer on a second port, and a second port is exactly what a Cloudflare
+ * tunnel cannot carry - gfx.maahir.dev maps to this port and nothing else. So
+ * the page and its websocket are proxied under /tracker-login/, which means
+ * the viewer works over the tunnel, on the LAN, and on localhost without the
+ * client having to know where it really lives.
+ */
+const TRACKER_LOGIN_PREFIX = '/tracker-login';
+
+function proxyTrackerLogin(req, res) {
+  if (!trackerLogin.state.active) {
+    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('No tracker login is running.');
+    return;
+  }
+
+  // Trailing path only: websockify serves noVNC from its own root, and the
+  // page's asset links are relative to wherever it was served from.
+  const upstreamPath = req.url.slice(TRACKER_LOGIN_PREFIX.length) || '/';
+
+  const upstream = httpRequest(
+    {
+      host: '127.0.0.1',
+      port: TRACKER_LOGIN_PORT,
+      method: req.method,
+      path: upstreamPath,
+      headers: { ...req.headers, host: `127.0.0.1:${TRACKER_LOGIN_PORT}` },
+    },
+    (response) => {
+      res.writeHead(response.statusCode ?? 502, response.headers);
+      response.pipe(res);
+    },
+  );
+
+  upstream.on('error', () => {
+    if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('The login viewer is not reachable.');
+  });
+
+  req.pipe(upstream);
+}
+
+/**
+ * The viewer's websocket, forwarded raw.
+ *
+ * Nothing here understands the VNC protocol - the handshake is replayed
+ * upstream and the two sockets are then piped together, which is all a
+ * websocket proxy has to be when both ends already agree on the protocol.
+ */
+function proxyTrackerLoginSocket(req, socket, head) {
+  if (!trackerLogin.state.active) {
+    socket.destroy();
+    return;
+  }
+
+  const upstreamPath = req.url.slice(TRACKER_LOGIN_PREFIX.length) || '/';
+  const upstream = netConnect(TRACKER_LOGIN_PORT, '127.0.0.1', () => {
+    const headers = { ...req.headers, host: `127.0.0.1:${TRACKER_LOGIN_PORT}` };
+    const lines = Object.entries(headers).map(([key, value]) => `${key}: ${value}`);
+    upstream.write(`GET ${upstreamPath} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`);
+    if (head?.length) upstream.write(head);
+    socket.pipe(upstream);
+    upstream.pipe(socket);
+  });
+
+  const drop = () => {
+    socket.destroy();
+    upstream.destroy();
+  };
+  upstream.on('error', drop);
+  socket.on('error', drop);
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? '127.0.0.1'}`);
+
+  if (url.pathname === TRACKER_LOGIN_PREFIX || url.pathname.startsWith(`${TRACKER_LOGIN_PREFIX}/`)) {
+    return proxyTrackerLogin(req, res);
+  }
 
   if (req.method === 'GET') {
     if (url.pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res);
@@ -841,6 +1172,8 @@ const server = createServer(async (req, res) => {
           ['winner', winner],
           ['select', select],
           ['global', globals],
+          ['lookup', lookups],
+          ['trackerLogin', trackerLogin],
         ],
         req,
         res,
@@ -852,6 +1185,14 @@ const server = createServer(async (req, res) => {
   // the writable routes; everything else stays read-only.
   if (req.method === 'POST') {
     switch (url.pathname) {
+      // Starting a login is a POST because it launches a browser; the progress
+      // comes back on the same event stream as everything else.
+      case '/api/tracker/login':
+        return handleWrite(res, async () => trackerLogin.start());
+
+      case '/api/tracker/login/cancel':
+        return handleWrite(res, async () => trackerLogin.cancel());
+
       case '/api/graphic':
         return handleWrite(res, async () => {
           const body = await readJsonBody(req);
@@ -1027,6 +1368,11 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
       .finally(() => process.exit(0));
   });
 }
+
+server.on('upgrade', (req, socket, head) => {
+  if (req.url?.startsWith(`${TRACKER_LOGIN_PREFIX}/`)) return proxyTrackerLoginSocket(req, socket, head);
+  socket.destroy();
+});
 
 server.listen(PORT, '127.0.0.1', () => {
   const line = '='.repeat(64);

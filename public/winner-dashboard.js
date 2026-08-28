@@ -81,6 +81,7 @@ let library = [];
 let catalogue = { maps: [] };
 let saveTimer = null;
 let saveGeneration = 0;
+let saveInFlight = false;
 
 function setStatus(kind, label) {
   els.status.className = `save-status ${kind}`.trim();
@@ -107,6 +108,7 @@ function saveNow() {
 
 async function save() {
   const generation = ++saveGeneration;
+  saveInFlight = true;
   try {
     const response = await fetch('/api/winner', {
       method: 'POST',
@@ -128,6 +130,11 @@ async function save() {
   } catch (error) {
     setStatus('failed', 'Not saved');
     toast(`Winner graphic not saved: ${error.message}`);
+  } finally {
+    // Only the newest save reopens this dashboard to incoming state; an older
+    // one finishing late must not let a remote update land on edits a newer
+    // save is still carrying.
+    if (generation === saveGeneration) saveInFlight = false;
   }
 }
 
@@ -247,17 +254,33 @@ els.backBtn.addEventListener('click', () => step(-1));
 els.musicBtn.addEventListener('click', () => setMusic(!state.seq.music));
 
 /**
+ * What another operator changed, arriving live.
+ *
  * Auto-advance happens on the server, so the sequence moves without this
- * dashboard having asked. Only the command channel is taken from the stream -
- * adopting the whole state would overwrite whatever is being typed.
+ * dashboard having asked - the command channel is therefore taken from every
+ * frame, mid-edit or not.
+ *
+ * The rest is somebody else's editing, adopted only while this dashboard has
+ * nothing outstanding of its own: between the debounce and the POST, `state`
+ * here is ahead of the server, and taking the server's copy then would undo
+ * what was just typed. `syncFields` also skips whatever holds focus, so a
+ * field being typed in is never rewritten under the caret.
  */
 onState('winner', (next) => {
-  if (!state || !next.seq) return;
-  state.seq.active = next.seq.active;
-  state.seq.stage = next.seq.stage;
-  state.seq.restart = next.seq.restart;
-  state.seq.cue = next.seq.cue;
+  if (!state || !next) return;
+
+  if (next.seq) {
+    state.seq.active = next.seq.active;
+    state.seq.stage = next.seq.stage;
+    state.seq.restart = next.seq.restart;
+    state.seq.cue = next.seq.cue;
+  }
   syncCueUi();
+
+  if (saveTimer || saveInFlight) return;
+  state = next;
+  fields.syncFields();
+  syncDerivedUi();
 });
 
 // ------------------------------------------------------- editor: content ---

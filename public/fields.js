@@ -77,10 +77,47 @@ export function makeFields(state, onChange) {
     onChange();
   };
 
+  /**
+   * Controls that can re-read their value when the state changes underneath
+   * them - which is what makes another operator's edit show up in this
+   * dashboard rather than only on the output page.
+   *
+   * Each entry keeps the node it owns so `syncFields` can leave alone whatever
+   * has focus. Writing into the box someone is mid-word in moves their caret to
+   * the end, and with two operators on one field it becomes a fight neither
+   * can win.
+   */
+  const bound = [];
+
+  const bind = (node, apply) => {
+    apply();
+    bound.push({ node, apply });
+  };
+
+  /**
+   * Re-apply the current state to every control built here.
+   *
+   * One control that throws must not take the rest of the form with it: a
+   * half-synced dashboard is recoverable mid-broadcast, a blank one is not.
+   */
+  function syncFields() {
+    const active = document.activeElement;
+    for (const { node, apply } of bound) {
+      if (node === active || node.contains?.(active)) continue;
+      try {
+        apply();
+      } catch (error) {
+        console.warn(`a field could not re-read its state: ${error.message}`);
+      }
+    }
+  }
+
   /** Text/URL input bound to a dotted path in the state. */
   function textField(label, path, { placeholder = '', maxlength = 120 } = {}) {
     const input = el('input', null, { type: 'text', spellcheck: 'false', placeholder, maxlength });
-    input.value = get(path) ?? '';
+    bind(input, () => {
+      input.value = get(path) ?? '';
+    });
     input.addEventListener('input', () => set(path, input.value));
     return field(label, input);
   }
@@ -113,13 +150,18 @@ export function makeFields(state, onChange) {
     };
 
     input.addEventListener('input', mark);
-    mark();
+    // Registered after textField's own binding, so the value is already in
+    // place when this re-checks it - otherwise a synced URL keeps the previous
+    // value's invalid mark.
+    bind(input, mark);
     return wrap;
   }
 
   function numberField(label, path, { min = 0, max = 999 } = {}) {
     const input = el('input', null, { type: 'number', min, max, step: '1' });
-    input.value = String(get(path) ?? 0);
+    bind(input, () => {
+      input.value = String(get(path) ?? 0);
+    });
     input.addEventListener('input', () => {
       // A cleared box means zero, not "keep the old number" - otherwise the
       // graphic silently keeps a stale score while the field looks empty.
@@ -136,7 +178,9 @@ export function makeFields(state, onChange) {
   function choiceField(label, path, options) {
     const select = el('select');
     for (const option of options) select.append(el('option', null, { value: option.key }, option.label));
-    select.value = String(get(path) ?? '');
+    bind(select, () => {
+      select.value = String(get(path) ?? '');
+    });
     select.addEventListener('change', () => set(path, select.value));
     return field(label, select);
   }
@@ -144,12 +188,19 @@ export function makeFields(state, onChange) {
   /** A select over plain strings, with a blank "none" entry. */
   function selectField(label, path, options, { allowUnknown = true, none = '- none -' } = {}) {
     const select = el('select');
-    const current = String(get(path) ?? '');
-    const values = options.includes(current) || !current || !allowUnknown ? options : [current, ...options];
 
-    select.append(el('option', null, { value: '' }, none));
-    for (const value of values) select.append(el('option', null, { value }, value));
-    select.value = current;
+    // Rebuilt rather than just re-assigned, because the value arriving from
+    // another operator may be one this list never had - a team saved on their
+    // machine, say. Without the option present the assignment silently selects
+    // nothing and the field reads as empty.
+    bind(select, () => {
+      const current = String(get(path) ?? '');
+      const values = options.includes(current) || !current || !allowUnknown ? options : [current, ...options];
+
+      select.replaceChildren(el('option', null, { value: '' }, none));
+      for (const value of values) select.append(el('option', null, { value }, value));
+      select.value = current;
+    });
 
     select.addEventListener('change', () => set(path, select.value));
     return field(label, select);
@@ -165,9 +216,16 @@ export function makeFields(state, onChange) {
   function colourField(label, path, { sampleFrom, clearable = false } = {}) {
     const input = el('input', null, { type: 'color' });
     const stored = get(path);
+    if (!sampleFrom && !clearable) {
+      bind(input, () => {
+        input.value = get(path) || '#000000';
+      });
+      input.addEventListener('input', () => set(path, input.value));
+      return field(label, input);
+    }
+
     input.value = stored || '#000000';
     input.addEventListener('input', () => set(path, input.value));
-    if (!sampleFrom && !clearable) return field(label, input);
 
     /*
      * Switched off is a real setting, not an empty one - for a team colour it
@@ -184,6 +242,18 @@ export function makeFields(state, onChange) {
         set(path, toggle.checked ? input.value : '');
       });
     }
+
+    // Bound on the row rather than the picker: the "From logo" button below is
+    // async, and a sync landing mid-sample would fight the colour it is about
+    // to write back.
+    const rebind = () => {
+      const value = get(path);
+      if (toggle) {
+        toggle.checked = Boolean(value);
+        input.disabled = !toggle.checked;
+      }
+      input.value = value || '#000000';
+    };
 
     const button = sampleFrom ? el('button', 'mini-btn', { type: 'button' }, 'From logo') : null;
     if (button) button.addEventListener('click', async () => {
@@ -220,12 +290,15 @@ export function makeFields(state, onChange) {
     if (toggle) row.append(toggle);
     row.append(input);
     if (button) row.append(button);
+    bind(row, rebind);
     return field(label, row);
   }
 
   function checkField(label, path) {
     const input = el('input', null, { type: 'checkbox' });
-    input.checked = Boolean(get(path));
+    bind(input, () => {
+      input.checked = Boolean(get(path));
+    });
     input.addEventListener('change', () => set(path, input.checked));
     const wrap = el('label', 'checkline');
     wrap.append(input, el('span', null, {}, label));
@@ -234,7 +307,9 @@ export function makeFields(state, onChange) {
 
   function rangeField(label, path, { min = 0, max = 1, step = 0.05 } = {}) {
     const input = el('input', null, { type: 'range', min, max, step });
-    input.value = String(get(path) ?? 0);
+    bind(input, () => {
+      input.value = String(get(path) ?? 0);
+    });
     input.addEventListener('input', () => set(path, Number.parseFloat(input.value)));
     return field(label, input);
   }
@@ -252,6 +327,13 @@ export function makeFields(state, onChange) {
     picker.value = current || '#000000';
     picker.disabled = !toggle.checked;
 
+    const rebind = () => {
+      const value = get(path);
+      toggle.checked = Boolean(value);
+      picker.value = value || '#000000';
+      picker.disabled = !toggle.checked;
+    };
+
     const push = () => {
       picker.disabled = !toggle.checked;
       set(path, toggle.checked ? picker.value : '');
@@ -265,12 +347,14 @@ export function makeFields(state, onChange) {
 
     const wrap = el('div', 'g-field');
     wrap.append(line, picker);
+    bind(wrap, rebind);
     return wrap;
   }
 
   return {
     get,
     set,
+    syncFields,
     textField,
     urlField,
     numberField,

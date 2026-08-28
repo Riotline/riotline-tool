@@ -28,6 +28,8 @@
         <button type="button" class="tab" role="tab" data-tab="global" aria-selected="false">Global</button>
       </nav>
 
+      <div class="lookup-live" id="lookup-live" role="status" aria-live="polite" hidden></div>
+
       <div class="routing" id="henrik-routing">
         <label>
           <span>Region</span>
@@ -417,6 +419,25 @@
         <section class="panel" id="ged-shared"></section>
         <section class="panel" id="wed-teams"></section>
         <section class="panel" id="sed-aliases"></section>
+
+        <section class="panel" id="tracker-login-panel">
+          <h2 class="panel-title">tracker.gg access</h2>
+          <p class="field-help">
+            tracker.gg puts a Cloudflare challenge in front of match data. It has to be
+            cleared in the browser <em>on the server</em>, because the pass is tied to the
+            server's address - solving it here in your own browser would not count. This
+            opens that browser in a window below so you can click the challenge from
+            anywhere, without needing access to the server itself. Press Done once the page
+            has loaded past the challenge - the window has no title bar to close.
+          </p>
+          <div class="tracker-login-row">
+            <button type="button" class="btn" id="tracker-login-start">Open the login</button>
+            <button type="button" class="btn" id="tracker-login-done" hidden>Done - I cleared it</button>
+            <span class="save-status" id="tracker-login-status">Not running</span>
+          </div>
+          <p class="field-help" id="tracker-login-password" hidden></p>
+          <iframe class="tracker-login-view" id="tracker-login-view" title="Server browser" hidden></iframe>
+        </section>
       </div>
     </main>
 

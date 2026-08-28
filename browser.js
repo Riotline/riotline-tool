@@ -17,7 +17,8 @@
  * a persistent profile also keeps the Cloudflare clearance cookie between runs.
  */
 
-import { rm } from 'node:fs/promises';
+import { readlink, rm } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -84,6 +85,53 @@ export function extractEmbeddedJson(html) {
  */
 const WARM_UP_URL = 'https://tracker.gg/valorant';
 
+/**
+ * Clear a singleton lock left behind by a browser that is no longer running.
+ *
+ * Chromium marks a profile as in use with a SingletonLock symlink pointing at
+ * "<hostname>-<pid>". A process killed hard never removes it, and a container
+ * that gets recreated leaves one naming a host that no longer exists.
+ *
+ * That matters far more than it looks. Real Chrome refuses a profile locked by
+ * someone else, so launchPersistentContext throws and the channel search falls
+ * through to bundled Chromium - which reports a different user agent, which
+ * invalidates every clearance a Chrome solve earned, which is a permanent 403
+ * with nothing in any log to explain it. Measured against tracker.gg: one stale
+ * lock is the difference between working and never working again.
+ *
+ * Only removed when it is provably stale - a different host, or a pid that is
+ * gone. A live lock is left alone, because two browsers sharing one profile
+ * corrupts it.
+ */
+export async function clearStaleSingletonLock(profileDir) {
+  const lockPath = path.join(profileDir, 'SingletonLock');
+
+  let target;
+  try {
+    target = await readlink(lockPath);
+  } catch {
+    return; // no lock, or not a symlink - nothing to do either way
+  }
+
+  const at = target.lastIndexOf('-');
+  const owner = at === -1 ? '' : target.slice(0, at);
+  const pid = Number(target.slice(at + 1));
+
+  if (owner === hostname() && Number.isFinite(pid) && pid > 0) {
+    try {
+      // Signal 0 tests for existence without touching the process.
+      process.kill(pid, 0);
+      return; // still running, and genuinely ours
+    } catch {
+      /* gone - fall through and clear it */
+    }
+  }
+
+  for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    await rm(path.join(profileDir, name), { force: true }).catch(() => {});
+  }
+}
+
 export function makeTrackerBrowser(options = {}) {
   const {
     headless = true,
@@ -126,6 +174,10 @@ export function makeTrackerBrowser(options = {}) {
         'Run: npm install playwright && npx playwright install chromium',
       );
     }
+
+    // Before the channel search, or a lock from a dead browser silently costs
+    // us real Chrome - see clearStaleSingletonLock.
+    await clearStaleSingletonLock(profileDir);
 
     // Persistent so the Cloudflare clearance cookie survives between lookups.
     const candidates = channel === 'auto' ? CHANNEL_ORDER : [channel, null];

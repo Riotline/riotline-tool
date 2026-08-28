@@ -984,6 +984,49 @@ pre {
   color: var(--accent);
 }
 
+/* A lookup somebody else started. Lives in the topbar rather than beside the
+   search box, because the operator who needs it most is the one on another tab
+   about to start the same 60-second lookup. */
+.lookup-live {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 4px 10px;
+  border: 1px solid var(--line, currentColor);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.lookup-live.busy {
+  color: var(--warn);
+}
+
+.lookup-live.done {
+  color: var(--text-faint);
+}
+
+.lookup-live.failed {
+  color: var(--accent);
+}
+
+/* The server's own browser, embedded. Tall enough that a Cloudflare challenge
+   is clickable without scrolling the frame. */
+.tracker-login-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.tracker-login-view {
+  width: 100%;
+  height: 560px;
+  border: 1px solid var(--line, currentColor);
+  border-radius: 6px;
+  background: #000;
+}
+
 /* ------------------------------------------------------------- cueing --- */
 
 /* Sits directly above the preview: these are the controls an operator reaches
