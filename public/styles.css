@@ -330,6 +330,34 @@ button:focus-visible {
   background: #ff5f6c;
 }
 
+/* Discord's blurple, and the only brand colour in this file other than the
+   accent. Scoped to the button so it cannot leak into the graphics, which are
+   VALORANT-styled and have nothing to do with it. */
+.btn-discord {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #5865f2;
+  border-color: #5865f2;
+  color: #fff;
+}
+
+.btn-discord:hover:not(:disabled) {
+  background: #4752c4;
+  border-color: #4752c4;
+}
+
+/* Sized in the same units as the text it sits beside, so it scales with the
+   row rather than needing a rule per surface. `currentColor` in the path means
+   it is whatever colour its neighbour is. */
+.discord-mark {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  vertical-align: -0.18em;
+}
+
 .btn-ghost {
   background: var(--bg-raised);
   border-color: var(--border-strong);
@@ -2038,6 +2066,13 @@ body.tab-graphic #key-warning {
   padding: 10px;
 }
 
+.login-card .btn-discord {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  text-decoration: none;
+}
+
 .login-error {
   margin: 0 0 14px;
   padding: 9px 11px;
@@ -2193,6 +2228,19 @@ body.is-guest .topbar::after {
 .admin-meta {
   font-size: 12px;
   color: var(--text-faint);
+}
+
+.admin-discord {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #8891f2;
+}
+
+/* An account with no password and no link cannot sign in at all. Worth the eye
+   catching it, because nothing else on the row says so. */
+.admin-meta.is-warn {
+  color: var(--warn, #ffb648);
 }
 
 .admin-row.is-off .admin-name {

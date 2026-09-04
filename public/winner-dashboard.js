@@ -33,9 +33,11 @@ import {
   WINNER_STYLE_FIELDS,
   WINNER_STYLE_GROUPS,
   WINNER_TEXT_FIELDS,
+  latestPlayedMap,
   resolveWinner,
   seriesScore,
   sequenceRunMs,
+  winnerSource,
 } from './winner-schema.js';
 
 const SAVE_DEBOUNCE_MS = 180;
@@ -366,14 +368,44 @@ function seriesField(half) {
   return wrap;
 }
 
-/** What the winner scene's note should say, given how the winner is decided. */
+/**
+ * What the winner scene's note should say, given how the winner is decided.
+ *
+ * It names the rule that answered, not just the answer. Mid-series the trophy
+ * comes from the last map played rather than from the series score, and an
+ * operator who reads "the series score makes X the winner" while the score says
+ * 1-1 has been told something that is not true - which is exactly the confusion
+ * this whole change is about.
+ */
 function winnerNoteText() {
   const decided = resolveWinner(state);
   const who = state[decided].name || (decided === 'left' ? 'the left team' : 'the right team');
-  if (state.winner !== 'auto') return 'Overridden by hand - the series score is being ignored.';
-  return state.autoSeriesScore === false
-    ? `The series score makes ${who} the winner.`
-    : `The map rows make it ${seriesScore(state).left} - ${seriesScore(state).right}, so ${who} wins.`;
+  const { left, right } = seriesScore(state);
+
+  switch (winnerSource(state)) {
+    case 'override':
+      return 'Overridden by hand - the series score is being ignored.';
+
+    /*
+     * It says which map, and never that the series is over.
+     *
+     * Nothing here knows the best-of - a Bo3 at 2-1 and a Bo5 at 2-1 are the
+     * same state - so any claim about the series being finished would be a
+     * guess presented as a fact. Naming the map is true either way: at 2-1 in a
+     * Bo3 it is the map that won the series, and at 2-1 in a Bo5 it is the map
+     * that was just played.
+     */
+    case 'map': {
+      const latest = latestPlayedMap(state);
+      const name = String(latest?.name ?? '').trim() || 'the last map';
+      return `Series ${left} - ${right}. Showing ${who}, who won ${name}.`;
+    }
+
+    default:
+      return state.autoSeriesScore === false
+        ? `The series score makes ${who} the winner.`
+        : `Nothing played yet - the map rows make it ${left} - ${right}, so ${who} wins.`;
+  }
 }
 
 /**

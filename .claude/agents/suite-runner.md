@@ -18,7 +18,8 @@ session scratchpad has been wiped mid-task before and six suites were lost.
 | `auth-e2e.mjs` | 8123 | 79 | the gate, session isolation, grants, key rotation, the `%ZZ` crash, traversal, the last-admin lock |
 | `settings-e2e.mjs` | 8125 | 57 | both admin switches enforced server-side, the tracker-login permission, schema defaults |
 | `log-e2e.mjs` | 8126 | 43 | levels, the admin log routes, and that no key, password, hash or cookie reaches the buffer or stdout |
-| `ui-e2e.mjs` | 8124 | 56 | Playwright: login, topbar, a cookie-less OBS URL that really renders, uploads, admin panel, the log panel |
+| `ui-e2e.mjs` | 8124 | 61 | Playwright: login, topbar, a cookie-less OBS URL that really renders, uploads, admin panel, the log panel |
+| `discord-e2e.mjs` | 8127 (+8128) | 88 | the whole Discord OAuth flow against a fake Discord on 8128: the role gate, replay, the link-cookie check, never-born-an-admin, and that no secret or code reaches a log |
 
 Run each from the project directory:
 
@@ -28,9 +29,10 @@ node "d:/Projects/Local VAL Prod App/.claude-tests/auth-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/settings-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/log-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/ui-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/discord-e2e.mjs"
 ```
 
-Each spawns its own server on its own port against a throwaway
+Each spawns its own server on its own port (discord-e2e also starts a fake Discord on 8128) against a throwaway
 `STATE_DIR`, prints `N passed, M failed`, and exits non-zero on failure. Run them
 one at a time, not in parallel — Windows has run out of socket buffer space
 (`ERR_NO_BUFFER_SPACE`) when too many servers were started in one session, and that
@@ -38,7 +40,7 @@ is an environment fault that will look like a test failure if you let it happen.
 
 ## What you must protect
 
-**`.state/` is live operator config.** The four suites above are safe — each uses
+**`.state/` is live operator config.** The five suites above are safe — each uses
 `STATE_DIR` pointed at a temp directory. Any *older* suite, or anything you are
 asked to run that talks to a server on port 8080, is not. Before running anything
 that touches the default state directory, copy `.state/` somewhere outside the

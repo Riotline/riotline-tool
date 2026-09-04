@@ -34,6 +34,23 @@ export const SETTING_FIELDS = [
       'browser to switch on. Set it and restart the server.',
   },
   {
+    key: 'discord',
+    label: 'Signing in with Discord',
+    default: true,
+    requires: 'discord',
+    help:
+      'Lets anyone holding the configured Discord role sign in, and makes an account for ' +
+      'them if they have none. Turning it off hides the button, refuses the two Discord ' +
+      'routes and stops anyone linking an account - without touching the credentials, so ' +
+      'it can be turned straight back on. Existing sessions are not ended; use Disable on ' +
+      'an account for that. Password sign-in is unaffected.',
+    off: 'The button is hidden and both Discord routes answer as though they do not exist.',
+    missing:
+      'This deployment has no Discord application configured, so there is nothing to switch ' +
+      'on. Set DISCORD_ENABLED and the five values beside it in the environment, then ' +
+      'restart the server. The boot banner names whichever one is missing.',
+  },
+  {
     key: 'watch',
     label: 'Post-match lookup across several accounts',
     default: true,

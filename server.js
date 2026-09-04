@@ -20,7 +20,7 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -46,7 +46,10 @@ import {
   PASSWORD_MIN,
   SESSION_TTL_MS,
   accessLevel,
+  adminCounts,
   canOpenTrackerLogin,
+  isSnowflake,
+  usernameProblem,
   canEdit,
   canView,
   makeSessionStore,
@@ -230,6 +233,152 @@ const trackerOffReason = () =>
  */
 const HOST = (process.env.HOST ?? '127.0.0.1').trim() || '127.0.0.1';
 const COOKIE_SECURE = /^(1|true|yes)$/i.test((process.env.COOKIE_SECURE ?? '').trim());
+
+// --------------------------------------------------------- discord sign-in ---
+
+/*
+ * Signing in with Discord, where a guild role is the roster.
+ *
+ * The same two-part shape as tracker.gg above, for the same reason: the switch
+ * says whether this server SHOULD offer it, and the five required values say
+ * whether it CAN. Both must hold. Collapsing them would mean either a switch
+ * that reports "on" while every sign-in fails, or - worse - no way to close the
+ * door without deleting the credentials that describe it.
+ *
+ * Everything here is a deployment fact: an OAuth application, one guild, the
+ * roles inside it, and the name this server answers to. None of it is
+ * meaningfully typeable into a panel, and sanitiseSettings is boolean-only, so
+ * none of it could live in settings.json even if it wanted to.
+ */
+const DISCORD_SWITCH = /^(1|true|yes)$/i.test((process.env.DISCORD_ENABLED ?? '').trim());
+const DISCORD_CLIENT_ID = (process.env.DISCORD_CLIENT_ID ?? '').trim();
+const DISCORD_CLIENT_SECRET = (process.env.DISCORD_CLIENT_SECRET ?? '').trim();
+const DISCORD_GUILD_ID = (process.env.DISCORD_GUILD_ID ?? '').trim();
+const DISCORD_ROLE_NAME = (process.env.DISCORD_ROLE_NAME ?? '').trim() || 'the production role';
+const DISCORD_ALLOW_SIGNUP = !/^(0|false|no)$/i.test((process.env.DISCORD_ALLOW_SIGNUP ?? 'true').trim());
+
+/*
+ * Role ids, plural.
+ *
+ * An organisation with two eligible roles - Production and Casters, say - has
+ * to be able to say so, and the natural way to try is a comma-separated list.
+ * Parsed here rather than matched as one string, because
+ * `roles.includes('111...,222...')` is false for every member alive: the whole
+ * org would be refused with the same message a correct denial gives, and
+ * nothing anywhere would say why.
+ */
+const parseRoleIds = (raw) =>
+  String(raw ?? '')
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+const DISCORD_ROLES = parseRoleIds(process.env.DISCORD_ROLE_OPERATOR);
+const DISCORD_ADMIN_ROLES = parseRoleIds(process.env.DISCORD_ROLE_ADMIN);
+
+/**
+ * The public name this server answers to - declared, never derived.
+ *
+ * Validated hard at boot, because every other way of learning it is wrong here.
+ * `Host` and the `X-Forwarded-*` family are set by the caller, and neither
+ * documented front end strips them: cloudflared sends no headers at all and the
+ * nginx block sets only Host, Upgrade and Connection. Trusting one would hand
+ * an attacker the redirect target. HOST and PORT are provably not it either -
+ * HOST is 0.0.0.0 in the container and the port is published on the host's
+ * loopback, which is why the boot banner already refuses to print the bind
+ * address as a URL.
+ *
+ * @returns {string} the normalised origin, or '' if it cannot be used
+ */
+function validPublicOrigin(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    // A local studio on a laptop is a real deployment for this tool, so plain
+    // http is allowed there and nowhere else.
+    const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) return '';
+    // A path, query or fragment means somebody pasted the wrong thing, and the
+    // redirect URI has to match Discord's allowlist byte for byte.
+    if (url.pathname !== '/' || url.search || url.hash) return '';
+    return url.origin;
+  } catch {
+    return '';
+  }
+}
+
+const DISCORD_PUBLIC_ORIGIN = validPublicOrigin(process.env.DISCORD_PUBLIC_ORIGIN);
+const DISCORD_REDIRECT_URI = DISCORD_PUBLIC_ORIGIN ? `${DISCORD_PUBLIC_ORIGIN}/api/auth/discord/callback` : '';
+
+/*
+ * Where the two Discord endpoints live. A seam for the test suite, which runs a
+ * fake authorization server on loopback - the same `config.baseUrl ?? CONSTANT`
+ * shape providers.js already uses. Honoured only for https or loopback http,
+ * and whoever can set an environment variable already owns the machine.
+ */
+function validEndpoint(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    // A path is expected here - the real one is /api/v10 - so unlike the public
+    // origin only the scheme is constrained.
+    const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) return '';
+    return url.href.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+const DISCORD_API_BASE = validEndpoint(process.env.DISCORD_API_BASE) || 'https://discord.com/api/v10';
+const DISCORD_AUTHORIZE_URL = validEndpoint(process.env.DISCORD_AUTHORIZE_URL) || 'https://discord.com/oauth2/authorize';
+
+/**
+ * The first required value that is absent or unusable, for the boot banner and
+ * the health panel. Naming it is the difference between "Discord is off" and
+ * twenty minutes of guessing.
+ *
+ * The role and guild ids get the same validation the origin does, because the
+ * alternative is that every misconfiguration - a typo'd guild, a role id with a
+ * stray character - collapses into the same "you do not have the role" the
+ * gate gives a genuine outsider.
+ */
+function discordMissing() {
+  if (!DISCORD_CLIENT_ID) return 'DISCORD_CLIENT_ID';
+  if (!DISCORD_CLIENT_SECRET) return 'DISCORD_CLIENT_SECRET';
+  if (!isSnowflake(DISCORD_GUILD_ID)) return 'DISCORD_GUILD_ID';
+  if (!DISCORD_ROLES.length || !DISCORD_ROLES.every(isSnowflake)) return 'DISCORD_ROLE_OPERATOR';
+  if (DISCORD_ADMIN_ROLES.length && !DISCORD_ADMIN_ROLES.every(isSnowflake)) return 'DISCORD_ROLE_ADMIN';
+  if (!DISCORD_PUBLIC_ORIGIN) return 'DISCORD_PUBLIC_ORIGIN';
+  return '';
+}
+
+const DISCORD_CONFIGURED = discordMissing() === '';
+
+/*
+ * Three things have to agree, not two.
+ *
+ * DISCORD_CONFIGURED  the deployment has an app, a guild, roles and a name
+ * DISCORD_SWITCH      the environment says this machine may offer it
+ * settings.discord    an administrator has not turned it off just now
+ *
+ * The first two are fixed at boot and together make the capability; the third
+ * is live, because the moment you need the door shut is the moment a restart
+ * would take every graphic off air. Same split as tracker.gg, one layer deeper.
+ */
+const DISCORD_AVAILABLE = DISCORD_SWITCH && DISCORD_CONFIGURED;
+const discordOn = () => DISCORD_AVAILABLE && settings.state.discord;
+
+/*
+ * The key that signs the flow cookie, minted fresh at boot and never stored.
+ *
+ * A restart invalidates every sign-in half way through Discord, which is right:
+ * they are ten minutes old at most, and the alternative is another secret to
+ * keep somewhere.
+ */
+const DISCORD_HMAC_KEY = randomBytes(32);
 
 const TRACKER_LOGIN_PORT = Number(process.env.TRACKER_LOGIN_PORT ?? 6080);
 const TRACKER_LOGIN_TIMEOUT_MS = Number(process.env.TRACKER_LOGIN_TIMEOUT_MS ?? 6 * 60 * 1000);
@@ -1398,7 +1547,11 @@ async function handleWrite(res, work) {
     return sendJson(res, 200, await work());
   } catch (error) {
     const status = error instanceof ProviderError ? error.status : 400;
-    return sendJson(res, status, { error: { status, message: error.message } });
+    // The hint travels too. ProviderError has carried one since it was written
+    // and the read path at the bottom of this file sends it, but this - the
+    // path every write takes - dropped it, so the half of the message that says
+    // what to do about it never reached anybody.
+    return sendJson(res, status, { error: { status, message: error.message, hint: error.hint ?? '' } });
   }
 }
 
@@ -1451,6 +1604,98 @@ const sessionCookie = (token, { maxAgeSec = Math.floor(SESSION_TTL_MS / 1000) } 
   ].join('; ');
 
 const clearedCookie = () => `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+
+// ------------------------------------------------- the discord flow cookie ---
+
+const FLOW_COOKIE = 'rl_oauth';
+const FLOW_TTL_MS = 10 * 60 * 1000;
+
+/*
+ * The fourth secret in this system, and the shortest-lived.
+ *
+ * A sign-in leaves this origin, spends time on discord.com and comes back, so
+ * something has to survive the round trip and say what the flow was for. It
+ * carries the CSRF state, the PKCE verifier, where to go afterwards, and - for
+ * a link - which account asked. It is HttpOnly, path-scoped to the callback,
+ * ten minutes old at most, and never written to disk.
+ *
+ * Signed rather than stored, so that an anonymous GET to /start allocates
+ * nothing on the server and cannot be used to exhaust anything. What it CANNOT
+ * do is enforce its own single use - clearing a cookie is an instruction to a
+ * browser, and a script that ignores Set-Cookie keeps a working flow for the
+ * full ten minutes. That is what `spentFlows` below is for, and the ordering
+ * matters: the record is only allocated once a caller has proved they hold a
+ * cookie this server signed.
+ */
+const signFlow = (body) => createHmac('sha256', DISCORD_HMAC_KEY).update(body).digest('base64url');
+
+function discordFlowCookie(payload) {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  return [
+    `${FLOW_COOKIE}=${body}.${signFlow(body)}`,
+    'Path=/api/auth/discord',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(FLOW_TTL_MS / 1000)}`,
+    ...(COOKIE_SECURE ? ['Secure'] : []),
+  ].join('; ');
+}
+
+const clearedFlowCookie = () => `${FLOW_COOKIE}=; Path=/api/auth/discord; HttpOnly; SameSite=Lax; Max-Age=0`;
+
+/** Constant-time, and length-checked first because unequal buffers throw. */
+function sameSecret(a, b) {
+  const left = Buffer.from(String(a ?? ''), 'utf8');
+  const right = Buffer.from(String(b ?? ''), 'utf8');
+  // `timingSafeEqual` raises RangeError on a length mismatch, and the received
+  // side's length is chosen by the caller. Inside an async handler that became
+  // a 500 with the whole query string logged at error level. Comparing lengths
+  // of two random nonces first discloses nothing.
+  if (left.length === 0 || left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+/** The flow this request is part of, or null if it has none we signed. */
+function readDiscordFlow(req) {
+  const raw = readCookie(req, FLOW_COOKIE);
+  if (!raw) return null;
+
+  const at = raw.lastIndexOf('.');
+  if (at <= 0) return null;
+
+  const body = raw.slice(0, at);
+  if (!sameSecret(raw.slice(at + 1), signFlow(body))) return null;
+
+  try {
+    const flow = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    // An expiry inside the signed payload as well as on the cookie: the cookie's
+    // Max-Age is enforced by the browser, and a browser is exactly what an
+    // attacker is not obliged to be.
+    if (!flow || typeof flow !== 'object' || !Number.isFinite(flow.exp) || flow.exp < Date.now()) return null;
+    return flow;
+  } catch {
+    return null;
+  }
+}
+
+/*
+ * Flows that have already been answered.
+ *
+ * Keyed on a random `jti` from inside the signed payload, so an entry can only
+ * be created by somebody who already completed a /start and is holding the
+ * cookie it returned. That is the whole difference from the pending-flow table
+ * this replaced: there, an anonymous GET allocated; here, allocating costs a
+ * full round trip, and the entry self-expires within ten minutes.
+ */
+const spentFlows = new Map();
+
+function burnFlow(jti) {
+  const now = Date.now();
+  for (const [key, exp] of spentFlows) if (exp < now) spentFlows.delete(key);
+  if (spentFlows.has(jti)) return false;
+  spentFlows.set(jti, now + FLOW_TTL_MS);
+  return true;
+}
 
 /** The signed-in account behind a request, or null. */
 function userFor(req) {
@@ -1622,6 +1867,34 @@ const looksCrossSite = (req) => {
  * exit. An unauthenticated stranger could stop the broadcast server with one
  * request and nothing in the log would say why.
  */
+/**
+ * Where a sign-in may send the browser afterwards. Same-origin paths only.
+ *
+ * Parsed rather than string-tested, and what comes back is the parser's own
+ * serialisation rather than the caller's string. Both halves are load-bearing,
+ * and both were verified against the real parser:
+ *
+ *   `/\evil.com`      passes `startsWith('/') && !startsWith('//')` and then
+ *                     resolves to http://evil.com/, because a backslash is a
+ *                     slash to the URL parser for http and https.
+ *   `/a\r\nX: 1`      passes an origin check, because CR and LF are stripped
+ *                     from the path only after the origin has been computed.
+ *                     Handed back raw and written into a Location header, that
+ *                     throws ERR_INVALID_CHAR - after the login token has been
+ *                     minted and Set-Cookie is already on the response.
+ *
+ * Serialising neutralises both: the first becomes '/', the second '/aX:%201'.
+ */
+function safeNext(raw) {
+  try {
+    const url = new URL(String(raw ?? '/'), 'http://next.invalid');
+    if (url.origin !== 'http://next.invalid') return '/';
+    return (url.pathname + url.search + url.hash).slice(0, 256) || '/';
+  } catch {
+    return '/';
+  }
+}
+
 function safeUrl(req) {
   try {
     const url = new URL(req.url, `http://${req.headers.host ?? '127.0.0.1'}`);
@@ -1702,6 +1975,154 @@ const grantableUsers = (user) =>
 
 // ---------------------------------------------------------------- routes ---
 
+// ------------------------------------------------------- the discord flow ---
+
+/*
+ * How much Discord work may be in progress at once.
+ *
+ * A count of work, not of identity, and that distinction is why it is safe
+ * where a per-address FAILURE counter would not be. Behind the documented
+ * Cloudflare tunnel every remote caller shares one `remoteAddress`, so a rule
+ * that locks an address out for fifteen minutes is a rule a stranger can use to
+ * lock out the whole organisation. A concurrency limit drains by itself in
+ * seconds: the worst a flood achieves is that its own requests queue.
+ *
+ * The per-address limit sits alongside the global one so that one caller cannot
+ * take all eight slots and leave a real operator with `e=busy`.
+ */
+const DISCORD_INFLIGHT_MAX = 8;
+const DISCORD_INFLIGHT_PER_ADDRESS = 2;
+let discordInFlight = 0;
+const discordInFlightBy = new Map();
+
+function takeDiscordSlot(from) {
+  const mine = discordInFlightBy.get(from) ?? 0;
+  if (discordInFlight >= DISCORD_INFLIGHT_MAX || mine >= DISCORD_INFLIGHT_PER_ADDRESS) return null;
+
+  discordInFlight += 1;
+  discordInFlightBy.set(from, mine + 1);
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    discordInFlight -= 1;
+    const left = (discordInFlightBy.get(from) ?? 1) - 1;
+    if (left > 0) discordInFlightBy.set(from, left);
+    else discordInFlightBy.delete(from);
+  };
+}
+
+/** A 302 that always carries whatever cookies the flow needs to settle. */
+function bounce(res, cookies, location) {
+  res.writeHead(302, { Location: location, 'Set-Cookie': cookies, 'Cache-Control': 'no-store' });
+  return res.end();
+}
+
+const pkceChallenge = (verifier) => createHash('sha256').update(verifier).digest('base64url');
+
+/** Exchange the one-shot code for an access token. Null on any refusal. */
+async function discordExchange(code, verifier, signal) {
+  const response = await fetch(`${DISCORD_API_BASE}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: DISCORD_CLIENT_ID,
+      client_secret: DISCORD_CLIENT_SECRET,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: DISCORD_REDIRECT_URI,
+      code_verifier: verifier,
+    }),
+    signal,
+  }).catch(() => null);
+
+  if (!response?.ok) return null;
+  const body = await response.json().catch(() => null);
+  return typeof body?.access_token === 'string' ? body.access_token : null;
+}
+
+/**
+ * The caller's membership of the one configured guild.
+ *
+ * The guild id comes from a boot constant and goes into the PATH; it is never
+ * read back out of a response, so nothing Discord returns can move the check to
+ * a guild somebody else controls.
+ *
+ * `reachable` separates "Discord answered, and the answer is no" from "Discord
+ * did not answer", because those need different words from a person at 3am and
+ * only one of them is worth clicking again.
+ */
+async function discordMember(token, signal) {
+  const url = `${DISCORD_API_BASE}/users/@me/guilds/${encodeURIComponent(DISCORD_GUILD_ID)}/member`;
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal }).catch(() => null);
+
+  if (!response) return { member: null, reachable: false };
+  // Not a member, or the scope was declined: a real answer, and it is no.
+  if (response.status === 403 || response.status === 404) return { member: null, reachable: true };
+  if (!response.ok) return { member: null, reachable: false };
+
+  return { member: await response.json().catch(() => null), reachable: true };
+}
+
+/*
+ * Roles, read strictly. A body that is not the shape we expect is a denial, not
+ * an empty list to be waved through - the whole access decision rests here.
+ */
+const rolesOf = (member) => (Array.isArray(member?.roles) ? member.roles.map(String) : null);
+const holdsAny = (roles, permitted) => roles.some((role) => permitted.includes(role));
+
+const DISCORD_NAME_MAX = 32;
+
+/**
+ * A Discord name, reduced to something `usernameProblem` will accept.
+ *
+ * Absence was never the only failure: an on-air nick like `Riot | Xander`, or a
+ * non-ASCII one, is present and still unusable, and handing it to
+ * `createFromDiscord` would throw inside the callback with a spent code.
+ */
+function sanitiseHandle(raw) {
+  return String(raw ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[^a-z0-9]+/, '')
+    .replace(/[^a-z0-9]+$/, '')
+    .slice(0, DISCORD_NAME_MAX);
+}
+
+const withSuffix = (base, n) => `${base.slice(0, DISCORD_NAME_MAX - `-${n}`.length)}-${n}`;
+
+/**
+ * A username nobody else has.
+ *
+ * `member.user.username` first, not `member.nick`: the handle is globally
+ * unique and rate-limited by Discord, while a nick is free-form and
+ * self-chosen. The Access panel picks an operator to hand a live production to
+ * BY NAME, so somebody nicking themselves `boss` and landing beside the real
+ * `boss` is a manufactured mis-click, and no ergonomics are worth that.
+ *
+ * ADMIN_USERNAME is excluded so a sign-in cannot squat the emergency admin name
+ * and quietly break the documented recovery path.
+ */
+function discordUsernameFor(member, snowflake) {
+  const fallback = `op-${String(snowflake).slice(-6)}`;
+  const bases = [sanitiseHandle(member?.user?.username), sanitiseHandle(member?.nick), fallback].filter(Boolean);
+
+  for (const base of bases) {
+    for (let n = 1; n <= 99; n += 1) {
+      const candidate = n === 1 ? base : withSuffix(base, n);
+      if (usernameProblem(candidate)) continue;
+      if (ADMIN_USERNAME && candidate.toLowerCase() === ADMIN_USERNAME.toLowerCase()) continue;
+      if (users.byName(candidate)) continue;
+      return candidate;
+    }
+  }
+  return '';
+}
+
 async function handleAuth(pathname, req, res) {
   switch (pathname) {
     /*
@@ -1713,7 +2134,247 @@ async function handleAuth(pathname, req, res) {
      * is not a secret, who is on it is.
      */
     case '/api/auth/state':
-      return sendJson(res, 200, { empty: users.count === 0, secure: COOKIE_SECURE });
+      return sendJson(res, 200, {
+        empty: users.count === 0,
+        secure: COOKIE_SECURE,
+        // One nullable object carrying a display string. No client id, no guild
+        // id, no role id - the route's ethic is that whether the server has
+        // been set up is not a secret but who is on it is, and a role NAME is
+        // what the refusal message has to say out loud anyway.
+        discord: discordOn() ? { role: DISCORD_ROLE_NAME, signup: DISCORD_ALLOW_SIGNUP } : null,
+      });
+
+    /*
+     * Begin a Discord flow.
+     *
+     * Anonymous by necessity - somebody signed out has to be able to start one.
+     * It authenticates nobody and allocates nothing on the server, which is why
+     * it carries no rate limit: a per-address counter here would be a remote
+     * off-switch for the whole organisation's sign-in, because behind the
+     * tunnel every remote caller shares one address.
+     */
+    case '/api/auth/discord/start': {
+      if (!discordOn()) return unauthorised(res, 404, `No such route: ${pathname}`);
+      if (req.method !== 'GET') return unauthorised(res, 405, 'Use GET.');
+
+      /*
+       * A sign-in has to begin on our own page.
+       *
+       * Without this, a link posted in a Discord channel navigates a signed-in
+       * producer through an app they have already authorised and lands them
+       * somewhere they never asked to be. An absent header is allowed, because
+       * old browsers do not send one - which is why the callback closes the
+       * same attack twice more, by never destroying an existing login and by
+       * refusing to swap accounts.
+       */
+      if (req.headers['sec-fetch-site'] === 'cross-site') {
+        return bounce(res, [clearedFlowCookie()], '/login.html?e=start');
+      }
+
+      const asked = new URL(req.url, 'http://internal.invalid');
+      const verifier = randomBytes(32).toString('base64url');
+      const flow = {
+        mode: 'signin',
+        state: randomBytes(32).toString('base64url'),
+        verifier,
+        jti: randomBytes(16).toString('base64url'),
+        next: safeNext(asked.searchParams.get('next')),
+        exp: Date.now() + FLOW_TTL_MS,
+      };
+
+      const authorize = new URL(DISCORD_AUTHORIZE_URL);
+      authorize.searchParams.set('client_id', DISCORD_CLIENT_ID);
+      authorize.searchParams.set('redirect_uri', DISCORD_REDIRECT_URI);
+      authorize.searchParams.set('response_type', 'code');
+      authorize.searchParams.set('scope', 'identify guilds.members.read');
+      authorize.searchParams.set('state', flow.state);
+      authorize.searchParams.set('code_challenge', pkceChallenge(verifier));
+      authorize.searchParams.set('code_challenge_method', 'S256');
+      // Ask every time rather than bouncing silently through an already-granted
+      // authorisation. It costs one click on a sign-in that happens at most
+      // monthly, and it means no navigation can complete a flow unattended.
+      authorize.searchParams.set('prompt', 'consent');
+
+      return bounce(res, [discordFlowCookie(flow)], authorize.href);
+    }
+
+    /*
+     * Come back from Discord.
+     *
+     * Anonymous by necessity too - it is a top-level navigation arriving from
+     * discord.com, so `looksCrossSite` cannot help and is not used. What stands
+     * in its place: the state is bound to this browser by a signed HttpOnly
+     * cookie that also holds the PKCE verifier, the flow is burned server-side
+     * once its signature checks out, no redirect target is accepted from the
+     * query string, and an existing login is never destroyed or swapped.
+     */
+    case '/api/auth/discord/callback': {
+      if (!discordOn()) return unauthorised(res, 404, `No such route: ${pathname}`);
+      if (req.method !== 'GET') return unauthorised(res, 405, 'Use GET.');
+
+      // First, before any branch: every exit below burns the flow cookie, so no
+      // failure can be retried with the one that produced it.
+      const cookies = [clearedFlowCookie()];
+      const refuse = (code) => bounce(res, cookies, `/login.html?e=${code}`);
+
+      const back = new URL(req.url, 'http://internal.invalid');
+      const flow = readDiscordFlow(req);
+      if (!flow) return refuse('expired');
+      if (back.searchParams.get('error')) return refuse('cancelled');
+      if (!sameSecret(back.searchParams.get('state'), flow.state)) return refuse('expired');
+
+      /*
+       * Only now, once the caller has proved they hold a cookie this server
+       * signed, is a server-side record allocated. Clearing a cookie is an
+       * instruction to a browser, and a script that ignores Set-Cookie would
+       * otherwise keep one working flow - and unlimited outbound token
+       * exchanges - for the full ten minutes.
+       */
+      if (!burnFlow(flow.jti)) return refuse('expired');
+
+      const code = (back.searchParams.get('code') ?? '').trim();
+      if (!code) return refuse('expired');
+
+      const from = req.socket.remoteAddress ?? 'unknown';
+      const release = takeDiscordSlot(from);
+      if (!release) return refuse('busy');
+
+      try {
+        // One budget for the whole exchange rather than one per leg: two
+        // unbounded fetches under undici's defaults is a blank tab for minutes.
+        const signal = AbortSignal.timeout(9_000);
+
+        const token = await discordExchange(code, flow.verifier, signal);
+        if (!token) {
+          log.warn('auth', 'a Discord token exchange was refused - check the client id, secret and redirect URI');
+          return refuse('misconfigured');
+        }
+
+        const { member, reachable } = await discordMember(token, signal);
+        if (!reachable) {
+          log.warn('auth', 'Discord did not answer the membership check');
+          return refuse('unavailable');
+        }
+
+        const roles = rolesOf(member);
+        if (!roles || !holdsAny(roles, DISCORD_ROLES)) return refuse('norole');
+
+        const snowflake = String(member?.user?.id ?? '');
+        if (!isSnowflake(snowflake)) {
+          log.warn('auth', 'Discord returned a member with no usable account id');
+          return refuse('unavailable');
+        }
+        const tag = String(member?.user?.username ?? '').slice(0, 64);
+        const signedIn = userFor(req);
+
+        // ---------------------------------------------------------- link ---
+        if (flow.mode === 'link') {
+          /*
+           * The signed cookie says which account asked; the login cookie says
+           * who is actually here. Both, always. The signed one alone is a
+           * bearer token - it survives a sign-out, and whoever holds it would
+           * otherwise decide which account an identity is bound to for ever.
+           */
+          if (!signedIn || signedIn.id !== flow.linkTo) return bounce(res, cookies, '/?discord=notyours');
+
+          const taken = users.byDiscordId(snowflake);
+          if (taken && taken.id !== signedIn.id) return bounce(res, cookies, '/?discord=taken');
+
+          await users.update(signedIn.id, { discord: { id: snowflake, tag } });
+          log.info('auth', `${signedIn.username} linked a Discord account`);
+          return bounce(res, cookies, '/?discord=linked');
+        }
+
+        // -------------------------------------------------------- sign in ---
+        let user = users.byDiscordId(snowflake);
+
+        /*
+         * Whether this account existed before this request.
+         *
+         * The admin-role sync below is gated on it, and that gate is the whole
+         * point of `createFromDiscord` having no role parameter. Landing the
+         * new record as `user` and then promoting it in the same handler would
+         * be exactly the same thing as creating an admin, and would restore the
+         * hole it exists to close: delete an administrator, and they click the
+         * button and are back, as an administrator, with the delete looking as
+         * though it had worked.
+         */
+        let created = false;
+
+        if (!user) {
+          if (!DISCORD_ALLOW_SIGNUP) return refuse('nosignup');
+
+          const name = discordUsernameFor(member, snowflake);
+          if (!name) return refuse('noname');
+
+          try {
+            user = await users.createFromDiscord({ username: name, discordId: snowflake, discordTag: tag });
+          } catch (error) {
+            log.warn('auth', `could not create an account from a Discord sign-in: ${error.message}`);
+            return refuse('noname');
+          }
+          created = true;
+          log.info('auth', `created "${user.username}" from a Discord sign-in`, { from });
+        }
+
+        // Before any write on their behalf. A disabled account causes exactly
+        // one thing to happen, and no field on that record moves.
+        if (user.disabled) return refuse('disabled');
+
+        /*
+         * Never swap accounts silently. Somebody already signed in as one
+         * person, arriving here as another, keeps the session they have - the
+         * alternative destroys a live desk's login on a navigation.
+         */
+        if (signedIn && signedIn.id !== user.id) return bounce(res, cookies, '/?discord=notswitched');
+
+        const changes = {};
+        if (user.discordTag !== tag) changes.discordTag = tag;
+
+        /*
+         * The admin role, symmetric but only over what it promoted.
+         *
+         * `discordRole` is why the demote arm is safe: one mistyped character
+         * in DISCORD_ROLE_ADMIN matches nobody, and without the flag that typo
+         * would demote every administrator in turn as they signed in, the
+         * server converging on one admin chosen by arrival order. An admin made
+         * by hand is never unmade from Discord.
+         */
+        if (DISCORD_ADMIN_ROLES.length && !created) {
+          const shouldBeAdmin = holdsAny(roles, DISCORD_ADMIN_ROLES);
+          if (shouldBeAdmin && user.role !== 'admin') {
+            changes.role = 'admin';
+            changes.discordRole = true;
+          } else if (!shouldBeAdmin && user.role === 'admin' && user.discordRole) {
+            const counts = adminCounts(users.list());
+            if (counts.enabled > 1 && counts.withPassword > 0) {
+              changes.role = 'user';
+              changes.discordRole = false;
+            } else {
+              log.warn('auth', `kept ${user.username} as an administrator - demoting would leave nobody able to administer`);
+            }
+          }
+        }
+
+        if (Object.keys(changes).length) {
+          await users.update(user.id, changes);
+          if (changes.role) log.warn('auth', `Discord ${changes.role === 'admin' ? 'promoted' : 'demoted'} ${user.username}`);
+          user = users.byId(user.id);
+        }
+
+        await users.noteSignIn(user.id);
+        req.rlUser = user.username;
+        log.info('auth', `${user.username} signed in with Discord`, { role: user.role, from });
+
+        const sessionToken = logins.create(user.id);
+        await sessions.get(user.id);
+        cookies.push(sessionCookie(sessionToken));
+
+        return bounce(res, cookies, safeNext(flow.next));
+      } finally {
+        release();
+      }
+    }
 
     case '/api/auth/login': {
       if (req.method !== 'POST') return unauthorised(res, 405, 'Use POST.');
@@ -1795,17 +2456,105 @@ async function handleAccount(pathname, req, res, ctx) {
         if (!(await users.verify(user.username, body?.current))) {
           throw new ProviderError(403, 'That is not your current password.');
         }
-        await users.update(user.id, { password: String(body?.password ?? '') });
+
+        /*
+         * Taking the password door off, leaving Discord as the only way in.
+         *
+         * Behind the same `current` check as setting one, deliberately: it is
+         * irreversible without an administrator, and somebody walking past an
+         * unlocked dashboard should not be able to do it.
+         */
+        if (body?.clearPassword === true) {
+          if (!user.discordId) throw new ProviderError(400, 'Link a Discord account first, or you could not sign in.');
+
+          const counts = adminCounts(users.list());
+          if (user.role === 'admin' && !user.disabled && counts.withPassword <= 1) {
+            throw new ProviderError(
+              400,
+              'You are the last administrator who can sign in with a password.',
+              'Give another administrator a password first.',
+            );
+          }
+          await users.update(user.id, { clearPassword: true });
+          log.warn('account', `${user.username} removed their password - they now sign in with Discord only`);
+        } else {
+          await users.update(user.id, { password: String(body?.password ?? '') });
+          log.info('account', `${user.username} changed their password`);
+        }
 
         // Every other login for this account goes. A password change that left
         // an intruder's session running would be a password change that did
         // nothing about the reason it was made.
-        log.info('account', `${user.username} changed their password`);
         const token = readCookie(req, COOKIE_NAME);
         logins.destroyFor(user.id);
         const fresh = logins.create(user.id);
         res.setHeader('Set-Cookie', sessionCookie(fresh));
         return { ok: true, signedOutElsewhere: token ? true : false };
+      });
+
+    /*
+     * Attach a Discord identity to the account already signed in here.
+     *
+     * A POST, so it gets the full CSRF treatment - `looksCrossSite` refuses a
+     * Content-Type an HTML form could have set, and an absent one counts as
+     * cross-site. The GET that follows carries only an opaque signed cookie,
+     * and the callback checks that cookie against the login cookie it was
+     * minted for, so holding one alone decides nothing.
+     */
+    case '/api/account/discord/link':
+      return handleWrite(res, async () => {
+        if (!discordOn()) throw new ProviderError(404, 'Discord sign-in is not set up on this server.');
+        if (user.discordId) throw new ProviderError(400, 'This account already has a Discord account linked.');
+
+        const verifier = randomBytes(32).toString('base64url');
+        const flow = {
+          mode: 'link',
+          state: randomBytes(32).toString('base64url'),
+          verifier,
+          jti: randomBytes(16).toString('base64url'),
+          linkTo: user.id,
+          next: '/',
+          exp: Date.now() + FLOW_TTL_MS,
+        };
+
+        const authorize = new URL(DISCORD_AUTHORIZE_URL);
+        authorize.searchParams.set('client_id', DISCORD_CLIENT_ID);
+        authorize.searchParams.set('redirect_uri', DISCORD_REDIRECT_URI);
+        authorize.searchParams.set('response_type', 'code');
+        authorize.searchParams.set('scope', 'identify guilds.members.read');
+        authorize.searchParams.set('state', flow.state);
+        authorize.searchParams.set('code_challenge', pkceChallenge(verifier));
+        authorize.searchParams.set('code_challenge_method', 'S256');
+        authorize.searchParams.set('prompt', 'consent');
+
+        res.setHeader('Set-Cookie', discordFlowCookie(flow));
+        return { authorize: authorize.href };
+      });
+
+    /*
+     * Detach it again. Refused when it is the only way in - an account with no
+     * password and no link is a record nobody can use, including its owner.
+     */
+    case '/api/account/discord/unlink':
+      return handleWrite(res, async () => {
+        if (!user.discordId) throw new ProviderError(400, 'This account has no Discord account linked.');
+        if (!(user.salt && user.hash)) {
+          throw new ProviderError(
+            400,
+            'Set a password first, or you would have no way to sign in.',
+            'An administrator can set one for you if you cannot.',
+          );
+        }
+
+        await users.update(user.id, { discord: null });
+        log.warn('account', `${user.username} unlinked their Discord account`);
+
+        // Same reasoning as a password change: the credential set changed, so
+        // every other session for it goes.
+        logins.destroyFor(user.id);
+        const fresh = logins.create(user.id);
+        res.setHeader('Set-Cookie', sessionCookie(fresh));
+        return { ok: true };
       });
 
     /*
@@ -1878,7 +2627,7 @@ async function handleAdmin(pathname, req, res, ctx) {
   if (pathname === '/api/admin/settings' && req.method === 'GET') {
     return sendJson(res, 200, {
       settings: settings.state,
-      available: { tracker: TRACKER_AVAILABLE },
+      available: { tracker: TRACKER_AVAILABLE, discord: DISCORD_AVAILABLE },
     });
   }
 
@@ -1916,7 +2665,7 @@ async function handleAdmin(pathname, req, res, ctx) {
       if (!state.tracker && trackerLogin.state.active) trackerLogin.cancel();
 
       await settings.flush();
-      return { settings: state, available: { tracker: TRACKER_AVAILABLE } };
+      return { settings: state, available: { tracker: TRACKER_AVAILABLE, discord: DISCORD_AVAILABLE } };
     });
   }
 
@@ -1988,6 +2737,27 @@ async function handleAdmin(pathname, req, res, ctx) {
         browserOpen: Boolean(browser),
       },
       watch: watchOn(),
+      /*
+       * Presence and counts, never a value - the same shape `providers` uses
+       * below. `passwordAdmins: 0` is the row that matters: it means every
+       * administrator depends on Discord, and a rotated client secret would
+       * lock this server out of itself.
+       */
+      discord: (() => {
+        const counts = adminCounts(users.list());
+        return {
+          configured: DISCORD_CONFIGURED,
+          available: DISCORD_AVAILABLE,
+          enabled: discordOn(),
+          missing: discordMissing(),
+          signup: DISCORD_ALLOW_SIGNUP,
+          roles: DISCORD_ROLES.length,
+          adminRole: DISCORD_ADMIN_ROLES.length > 0,
+          linked: users.list().filter((entry) => entry.discordId).length,
+          admins: counts.enabled,
+          passwordAdmins: counts.withPassword,
+        };
+      })(),
       providers: {
         henrik: Boolean(HENRIK_API_KEY),
         riot: Boolean(RIOT_API_KEY),
@@ -2015,8 +2785,23 @@ async function handleAdmin(pathname, req, res, ctx) {
     // policy so much as a locked door with the key inside: there is no route
     // that makes an admin except this one, so a server with none is a server
     // that has to be repaired from a shell.
-    const lastAdmin =
-      target?.role === 'admin' && users.list().filter((user) => user.role === 'admin' && !user.disabled).length <= 1;
+    //
+    // Counted through `adminCounts` in auth.js rather than inline, because the
+    // count now answers two questions and both of them get asked from more than
+    // one place. See the docblock there.
+    const counts = adminCounts(users.list());
+    const targetIsAdmin = target?.role === 'admin' && !target.disabled;
+
+    /** Would this write leave the server with nobody who can administer it? */
+    const wouldStrandAdmins = targetIsAdmin && counts.enabled <= 1;
+
+    /**
+     * Would it leave every remaining administrator unable to sign in without an
+     * external identity provider? A server whose only admin signs in through
+     * Discord is one that a rotated client secret locks out of itself.
+     */
+    const wouldStrandPasswordAdmins =
+      targetIsAdmin && Boolean(target.salt && target.hash) && counts.withPassword <= 1;
 
     switch (action) {
       case 'create': {
@@ -2037,9 +2822,35 @@ async function handleAdmin(pathname, req, res, ctx) {
         if (typeof body?.disabled === 'boolean') changes.disabled = body.disabled;
         if (typeof body?.trackerLogin === 'boolean') changes.trackerLogin = body.trackerLogin;
 
-        if (lastAdmin && (changes.role === 'user' || changes.disabled === true)) {
-          throw new ProviderError(400, 'This is the last administrator.');
+        if (changes.role === 'user' || changes.disabled === true) {
+          if (wouldStrandAdmins) throw new ProviderError(400, 'This is the last administrator.');
+          if (wouldStrandPasswordAdmins) {
+            throw new ProviderError(
+              400,
+              'This is the last administrator who can sign in with a password.',
+              'Give another administrator a password first.',
+            );
+          }
         }
+
+        /*
+         * Giving a password to an account that had none is kept, and said out
+         * loud.
+         *
+         * It is the second door the Discord role does not govern, and the
+         * honest thing is to admit that rather than hide it: an administrator
+         * can grow a password onto an account the Production role was supposed
+         * to control. It stays because it is the only recovery when somebody's
+         * Discord account is deleted or the OAuth app is rotated out from under
+         * you - and refusing it would make that recovery an unlink-and-recreate
+         * that loses their graphics.
+         *
+         * What changes is that the log stops saying merely "password". Reading
+         * `Object.keys(changes)` afterwards could not distinguish a routine
+         * reset from turning a Discord-only account into one with its own way
+         * in, and those are not the same event.
+         */
+        const grewAPassword = Boolean(changes.password) && !(target.salt && target.hash);
 
         await users.update(id, changes);
         // What changed, not the values - `changes` carries a password when one
@@ -2047,6 +2858,13 @@ async function handleAdmin(pathname, req, res, ctx) {
         log.info('admin', `${ctx.user.username} changed the account "${target.username}"`, {
           changed: Object.keys(changes).join(', ') || '(nothing)',
         });
+        if (grewAPassword) {
+          log.warn(
+            'admin',
+            `${ctx.user.username} gave "${target.username}" a password - that account signed in with Discord only until now`,
+            { discordLinked: Boolean(target.discordId) },
+          );
+        }
 
         // A disabled account's dashboards should stop working now, not when
         // their cookie happens to expire.
@@ -2056,7 +2874,14 @@ async function handleAdmin(pathname, req, res, ctx) {
       }
 
       case 'delete': {
-        if (lastAdmin) throw new ProviderError(400, 'This is the last administrator.');
+        if (wouldStrandAdmins) throw new ProviderError(400, 'This is the last administrator.');
+        if (wouldStrandPasswordAdmins) {
+          throw new ProviderError(
+            400,
+            'This is the last administrator who can sign in with a password.',
+            'Give another administrator a password first.',
+          );
+        }
         if (id === ctx.user.id) throw new ProviderError(400, 'Delete your own account from another administrator.');
 
         // At warn, not info: this deletes their graphics, presets, teams and
@@ -2065,6 +2890,35 @@ async function handleAdmin(pathname, req, res, ctx) {
         logins.destroyFor(id);
         await sessions.destroy(id);
         await users.remove(id);
+        return { users: users.list().map((user) => ({ ...publicUser(user), live: sessions.has(user.id) })) };
+      }
+
+      /*
+       * Detach somebody's Discord account, for when they have lost it.
+       *
+       * Only unlink - there is deliberately no `link-discord`. Attaching an
+       * identity to an account an administrator does not own is an
+       * impersonation primitive with no honest use: the recovery path for a
+       * locked-out operator is to set them a password, which is visible to them
+       * the moment they use it.
+       *
+       * Refused when it would leave the account with no way in at all, and
+       * refused by the two admin guards for the same reason `update` is.
+       */
+      case 'unlink-discord': {
+        if (!target.discordId) throw new ProviderError(400, 'That account has no Discord account linked.');
+        if (!(target.salt && target.hash)) {
+          throw new ProviderError(
+            400,
+            `"${target.username}" would have no way to sign in.`,
+            'Set them a password in the same panel first.',
+          );
+        }
+        if (wouldStrandAdmins) throw new ProviderError(400, 'This is the last administrator.');
+
+        await users.update(id, { discord: null });
+        log.warn('admin', `${ctx.user.username} unlinked the Discord account from "${target.username}"`);
+        logins.destroyFor(id);
         return { users: users.list().map((user) => ({ ...publicUser(user), live: sessions.has(user.id) })) };
       }
 
@@ -2280,6 +3134,16 @@ async function route(req, res) {
 
   if (isAdminRoute(pathname)) {
     if (ctx.user?.role !== 'admin') return unauthorised(res, 403, 'Administrators only.');
+    /*
+     * The same CSRF shape the account routes have had.
+     *
+     * These were relying on SameSite=Lax alone, which is a real defence and not
+     * the whole of one. It mattered less when every admin action was a role or
+     * a password an administrator was already in a position to change; it
+     * matters now that unlinking a Discord account is one of them. A
+     * pre-existing gap is a reason not to add to it, not a reason to leave it.
+     */
+    if (req.method === 'POST' && looksCrossSite(req)) return unauthorised(res, 415, 'Send JSON.');
     return handleAdmin(pathname, req, res, ctx);
   }
 
@@ -2663,6 +3527,48 @@ server.listen(PORT, HOST, () => {
     }`,
   );
   console.log(`  Post-match      ${watchOn() ? 'multi-account watch enabled' : 'multi-account watch switched off'}`);
+  /*
+   * Three states, like tracker.gg above, and the middle one names the variable.
+   * "Discord is off" and "Discord is on but DISCORD_GUILD_ID is not a
+   * snowflake" are twenty minutes apart if the banner will not say which.
+   *
+   * Never a value: this goes through `console.log`, which `captureConsole` does
+   * not wrap, so nothing here passes through redaction.
+   */
+  console.log(
+    `  Discord         ${
+      !DISCORD_CONFIGURED
+        ? `not configured (${discordMissing()})`
+        : !DISCORD_SWITCH
+          ? 'off (set DISCORD_ENABLED=true)'
+          : !settings.state.discord
+            ? 'switched off by an administrator'
+            : `enabled (${DISCORD_ROLES.length} role${DISCORD_ROLES.length === 1 ? '' : 's'}, new accounts ${
+                DISCORD_ALLOW_SIGNUP ? 'on' : 'off'
+              })`
+    }`,
+  );
+  {
+    // The one state worth shouting about: every administrator depends on an
+    // external service, so a rotated secret locks this server out of itself.
+    const counts = adminCounts(users.list());
+    if (counts.enabled > 0 && counts.withPassword === 0) {
+      console.warn('  WARNING         no administrator has a password - only Discord can administer this server');
+    }
+
+    /*
+     * An https public name with cookies that are not marked Secure.
+     *
+     * This is the ordinary deployment - a tunnel or a proxy terminating TLS and
+     * forwarding to plain http - so it is worth saying out loud, because
+     * nothing else will. The symptom is not an error: everything works, and the
+     * login cookie and the ten-minute flow cookie simply travel without the one
+     * flag that stops a browser ever sending them over plain http.
+     */
+    if (DISCORD_PUBLIC_ORIGIN.startsWith('https:') && !COOKIE_SECURE) {
+      console.warn('  WARNING         DISCORD_PUBLIC_ORIGIN is https but COOKIE_SECURE is off - set COOKIE_SECURE=true');
+    }
+  }
   console.log(`  Logging         ${log.level}  (LOG_LEVEL; debug is verbose, and the Admin tab can change it live)`);
   console.log('  Ctrl+C to stop');
   console.log(line);

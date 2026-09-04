@@ -56,18 +56,40 @@ export async function hashPassword(password) {
 }
 
 /**
+ * What an account with no password is compared against.
+ *
+ * At module scope because there are two callers now and an inline copy in each
+ * would drift. The hash is the right length by construction, so a comparison
+ * against it reaches `timingSafeEqual` rather than bailing out early on length.
+ */
+const DECOY = { salt: 'decoy', hash: '00'.repeat(SCRYPT.keylen) };
+
+/**
  * Compared in constant time, and never short-circuited on length.
  *
  * A plain `===` on hex strings leaks how much of the hash matched through how
  * long the comparison took. It is a small leak and this is a small deployment,
  * but the fix is one function call.
+ *
+ * An account can now have no password at all - one that signs in through
+ * Discord - and that must not be visible from outside. `if (!salt || !hash)
+ * return false` answered in microseconds where a real account takes ~100ms of
+ * scrypt, so a stopwatch told you which accounts have a password door and which
+ * do not. Absent credentials now cost a full scrypt against the decoy and the
+ * answer is forced false afterwards.
  */
 export async function verifyPassword(password, { salt, hash }) {
-  if (!salt || !hash) return false;
-  const derived = await scrypt(String(password), salt, SCRYPT.keylen, SCRYPT);
-  const stored = Buffer.from(String(hash), 'hex');
+  const usable = Boolean(salt && hash);
+  const target = usable ? { salt, hash } : DECOY;
+
+  const derived = await scrypt(String(password), target.salt, SCRYPT.keylen, SCRYPT);
+  const stored = Buffer.from(String(target.hash), 'hex');
   if (stored.length !== derived.length) return false;
-  return timingSafeEqual(stored, derived);
+
+  // Evaluated before the return rather than short-circuited into it, so the
+  // work is the same either way.
+  const match = timingSafeEqual(stored, derived);
+  return usable && match;
 }
 
 /**
@@ -87,6 +109,20 @@ export function passwordProblem(password) {
 }
 
 const USERNAME = /^[a-z0-9][a-z0-9._-]{1,31}$/i;
+
+/**
+ * A Discord id, which is a snowflake: decimal digits, currently 17-19 of them,
+ * bounded here at 15-20 to leave room in both directions.
+ *
+ * Matched rather than cleaned, and never run through `text()`. `text` slices to
+ * a maximum length before it trims, so a 40-digit value would come back as a
+ * 32-digit one that still looks like a perfectly good id - a silent truncation
+ * that could collide with somebody real. A value either is a snowflake or it is
+ * not linked at all.
+ */
+const SNOWFLAKE = /^[0-9]{15,20}$/;
+
+export const isSnowflake = (value) => SNOWFLAKE.test(String(value ?? ''));
 
 export function usernameProblem(username) {
   const value = String(username ?? '').trim();
@@ -140,11 +176,49 @@ function cleanUser(input) {
      * the production machine, so it is not implied by having an account.
      */
     trackerLogin: source.trackerLogin === true,
+
+    /*
+     * The Discord identity, when there is one.
+     *
+     * `discordId` is the join key and the only stable one: Discord usernames
+     * can be changed and a released handle can be claimed by somebody else, so
+     * matching on a name would be an account-takeover primitive. `discordTag`
+     * exists to be shown to a person and is never matched on.
+     *
+     * Note this whole object is an allowlist - anything not named here is
+     * dropped on the next load and erased on the next write - so a field added
+     * to users.json by hand does not survive, and a field added to the Discord
+     * flow must be added here or it will vanish the first time anybody logs in.
+     */
+    discordId: isSnowflake(source.discordId) ? String(source.discordId) : '',
+    discordTag: text(source.discordTag, '', 64),
+    discordLinkedAt: Number.isFinite(source.discordLinkedAt) ? source.discordLinkedAt : 0,
+
+    /*
+     * Did the Discord admin role make this account an administrator?
+     *
+     * Permission-default-off, and it exists so that losing the role can only
+     * ever demote somebody the role promoted. One mistyped character in
+     * DISCORD_ROLE_ADMIN matches nobody, and without this flag that typo would
+     * demote every administrator in turn as they signed in - the server
+     * converging on a single admin chosen by arrival order.
+     */
+    discordRole: source.discordRole === true,
+
     createdAt: Number.isFinite(source.createdAt) ? source.createdAt : now(),
     lastLoginAt: Number.isFinite(source.lastLoginAt) ? source.lastLoginAt : 0,
     grants,
   };
 }
+
+/**
+ * Can this account be signed into at all?
+ *
+ * A password, a Discord link, or both. An account with neither is a record
+ * nobody can use - which matters because an administrator like that would
+ * otherwise satisfy the last-admin lock while being no administrator at all.
+ */
+export const hasCredential = (user) => Boolean((user?.salt && user?.hash) || user?.discordId);
 
 /**
  * May this account open a tracker.gg login session?
@@ -169,6 +243,26 @@ export const publicUser = (user, { includeKey = false } = {}) => ({
   // two of them end up disagreeing.
   trackerLogin: user.trackerLogin === true,
   mayOpenTrackerLogin: canOpenTrackerLogin(user),
+
+  /*
+   * Which doors this account has. The dashboard needs it to know whether to
+   * offer "turn off my password", and the admin list needs it to show that an
+   * account signs in through Discord.
+   */
+  hasPassword: Boolean(user.salt && user.hash),
+
+  /*
+   * The snowflake rides with the session key rather than with the handle.
+   *
+   * The handle and the date are display, and the admin list wants them. The id
+   * is not a credential - it is public on Discord - but it is the value that
+   * decides which account a sign-in resolves to, and the one screen where a
+   * lookalike handle would be spotted is the admin list, so it goes there too.
+   */
+  discord: user.discordId
+    ? { tag: user.discordTag, linkedAt: user.discordLinkedAt, fromRole: user.discordRole === true, id: user.discordId }
+    : null,
+
   ...(includeKey ? { sessionKey: user.sessionKey } : {}),
 });
 
@@ -212,6 +306,31 @@ export function makeUserStore(filePath) {
     byName,
     bySessionKey: (key) => users.find((user) => user.sessionKey === String(key)) ?? null,
 
+    /**
+     * The account a Discord identity signs into.
+     *
+     * Deliberately not `find`, which is the shape every other lookup here uses.
+     * `find` resolves a duplicate silently to whichever record happens to be
+     * first in the array, and this is the one lookup where a duplicate would
+     * mean two people's accounts answering to one identity. If users.json ever
+     * holds two, the honest answer is to refuse the sign-in and say so, rather
+     * than to pick one and be right half the time.
+     *
+     * The empty string is not an identity: an unlinked account has
+     * `discordId: ''`, and a lookup for '' must not match all of them.
+     */
+    byDiscordId(id) {
+      const wanted = String(id ?? '');
+      if (!isSnowflake(wanted)) return null;
+
+      const found = users.filter((user) => user.discordId === wanted);
+      if (found.length > 1) {
+        console.warn(`  two accounts claim the same Discord id - refusing to guess between them`);
+        return null;
+      }
+      return found[0] ?? null;
+    },
+
     async create({ username, password, role = 'user' }) {
       const nameProblem = usernameProblem(username);
       if (nameProblem) throw new Error(nameProblem);
@@ -235,6 +354,73 @@ export function makeUserStore(filePath) {
     },
 
     /**
+     * An account for somebody who has just proved a Discord identity.
+     *
+     * A sibling of `create` rather than a flag on it, deliberately. `create`'s
+     * twelve-character password floor is what protects the password door, and a
+     * `skipPassword: true` parameter is a thing a later caller passes by
+     * accident. Two functions cannot be confused for one another.
+     *
+     * ALWAYS lands `role: 'user'`, with no parameter to say otherwise. The
+     * Discord admin role promotes an account that already exists, on a
+     * subsequent sign-in - it never creates one. Otherwise deleting an
+     * administrator would not remove them: they would click the button and be
+     * re-created as an administrator, and the delete would read as though it
+     * had worked.
+     *
+     * There is NO await between the uniqueness checks and the push. `create`
+     * has one - it hashes a password in between - so two concurrent creates for
+     * the same name both pass the check. That needs two admins typing at once
+     * today; with just-in-time provisioning it is reachable by a double-click
+     * or a link scanner, and the result would be two accounts and two state
+     * directories for one person.
+     */
+    async createFromDiscord({ username, discordId, discordTag = '' }) {
+      const nameProblem = usernameProblem(username);
+      if (nameProblem) throw new Error(nameProblem);
+      if (!isSnowflake(discordId)) throw new Error('That is not a Discord account id.');
+
+      // Everything from here to the push is synchronous, and must stay so.
+      if (byName(username)) throw new Error('That username is taken.');
+      if (users.some((user) => user.discordId === String(discordId))) {
+        throw new Error('That Discord account is already linked to an account here.');
+      }
+
+      const user = cleanUser({
+        id: randomUUID(),
+        username: String(username).trim(),
+        salt: '',
+        hash: '',
+        role: 'user',
+        sessionKey: randomUUID(),
+        discordId: String(discordId),
+        discordTag,
+        discordLinkedAt: now(),
+        createdAt: now(),
+      });
+      users.push(user);
+
+      await persist();
+      return { ...user };
+    },
+
+    /**
+     * Stamp a sign-in that did not go through `verify`.
+     *
+     * The second writer of `lastLoginAt` - `verify` is the first. The Discord
+     * path never calls `verify`, because there is no password to check, so
+     * without this an account that only ever signs in through Discord would
+     * show "never" in the admin list for ever.
+     */
+    async noteSignIn(id) {
+      const user = users.find((entry) => entry.id === String(id));
+      if (!user) throw new Error('No such user.');
+      user.lastLoginAt = now();
+      await persist();
+      return { ...user };
+    },
+
+    /**
      * Returns the user on success and null on every kind of failure.
      *
      * One answer for "no such account", "wrong password" and "disabled", because
@@ -244,7 +430,7 @@ export function makeUserStore(filePath) {
      */
     async verify(username, password) {
       const user = byName(username);
-      const target = user ?? { salt: 'decoy', hash: '00'.repeat(SCRYPT.keylen) };
+      const target = user ?? DECOY;
       const ok = await verifyPassword(password, target);
       if (!user || !ok || user.disabled) return null;
       user.lastLoginAt = now();
@@ -273,6 +459,65 @@ export function makeUserStore(filePath) {
       if (changes.role !== undefined && ROLES.includes(changes.role)) user.role = changes.role;
       if (changes.disabled !== undefined) user.disabled = changes.disabled === true;
       if (changes.trackerLogin !== undefined) user.trackerLogin = changes.trackerLogin === true;
+
+      /*
+       * The Discord link, as one atomic change.
+       *
+       * `{ id, tag }` links, `null` unlinks, and the three stored fields move
+       * together or not at all. Three separate branches would let a caller
+       * write an id with no date, or clear the handle while leaving the link -
+       * states the sign-in flow can never produce and nothing else knows how to
+       * read.
+       */
+      if (changes.discord !== undefined) {
+        if (changes.discord === null) {
+          user.discordId = '';
+          user.discordTag = '';
+          user.discordLinkedAt = 0;
+          // A link that no longer exists cannot be why somebody is an admin.
+          user.discordRole = false;
+        } else {
+          const wanted = String(changes.discord.id ?? '');
+          if (!isSnowflake(wanted)) throw new Error('That is not a Discord account id.');
+
+          // Checked the same way a username clash is, and for the same reason:
+          // two accounts answering to one identity is the one state byDiscordId
+          // cannot resolve.
+          const clash = users.find((entry) => entry.discordId === wanted && entry.id !== user.id);
+          if (clash) throw new Error('That Discord account is already linked to an account here.');
+
+          user.discordId = wanted;
+          user.discordTag = text(changes.discord.tag, '', 64);
+          user.discordLinkedAt = now();
+        }
+      }
+
+      /*
+       * Take the password door off an account, leaving Discord as the only way
+       * in. Applied after the link above, so linking and clearing in one call
+       * works and the check below sees the new link rather than the old one.
+       */
+      if (changes.clearPassword === true) {
+        if (changes.password !== undefined) throw new Error('Set a password or clear it, not both.');
+        if (!user.discordId) throw new Error('That account would have no way to sign in at all.');
+        user.salt = '';
+        user.hash = '';
+      }
+
+      /*
+       * Refresh the displayed handle, without touching the link.
+       *
+       * Separate from the atomic branch above on purpose: that one stamps
+       * `discordLinkedAt`, and a sign-in is not a linking. Reusing it to keep
+       * the handle current would move the "linked on" date every time somebody
+       * signed in. Ignored for an unlinked account, so it cannot fabricate half
+       * a link.
+       */
+      if (changes.discordTag !== undefined && user.discordId) {
+        user.discordTag = text(changes.discordTag, '', 64);
+      }
+
+      if (changes.discordRole !== undefined) user.discordRole = changes.discordRole === true;
 
       await persist();
       return { ...user };
@@ -333,6 +578,40 @@ export function accessLevel(user, owner) {
 
 export const canEdit = (level) => level === 'owner' || level === 'editor';
 export const canView = (level) => level === 'owner' || level === 'editor' || level === 'viewer';
+
+/**
+ * How many administrators are left, and how many of them can still get in.
+ *
+ * Lives here rather than inline in the admin route because it is about to have
+ * a second caller. It was an expression inside one closure, consulted by two
+ * cases of one switch - which reads as a rule but is not one: any new write
+ * that changes a role or a credential simply would not see it, and would walk
+ * past the lock without anything to notice.
+ *
+ * `enabled` is the existing rule. There is no route that makes an administrator
+ * except the admin route itself, so a server with none is a server that has to
+ * be repaired from a shell.
+ *
+ * `withPassword` is the second count, and it exists because an account can now
+ * have no password at all. An administrator whose only credential is an
+ * external one is an administrator who is locked out the moment that external
+ * thing is misconfigured - a rotated secret, a deleted app, a role removed by
+ * somebody tidying up. The password door is what makes "the server stays usable
+ * with Discord switched off" true rather than merely intended.
+ */
+export const adminCounts = (list) => {
+  const live = list.filter((user) => user.role === 'admin' && !user.disabled);
+  return {
+    /*
+     * Only administrators who can actually get in. An account with no password
+     * and no Discord link is an administrator on paper and nothing in practice,
+     * and counting it would hold the locked door open on a server that has no
+     * working administrator at all.
+     */
+    enabled: live.filter(hasCredential).length,
+    withPassword: live.filter((user) => user.salt && user.hash).length,
+  };
+};
 
 export function makeSessionStore(filePath) {
   /** @type {Map<string, {userId: string, createdAt: number, lastSeen: number}>} */

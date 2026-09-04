@@ -511,6 +511,22 @@
           </p>
         </section>
 
+        <!--
+          Hidden entirely on a server with no Discord configured, rather than
+          shown greyed out: an operator has no way to act on it and no reason to
+          wonder about it.
+        -->
+        <section class="panel" id="acc-discord-panel" hidden>
+          <h2 class="panel-title">Discord</h2>
+          <dl class="facts" id="acc-discord-facts"></dl>
+          <div class="tracker-login-row">
+            <button type="button" class="btn" id="acc-discord-link">Link my Discord account</button>
+            <button type="button" class="btn" id="acc-discord-unlink" hidden>Unlink</button>
+            <button type="button" class="btn btn-danger" id="acc-discord-nopass" hidden>Turn off my password</button>
+          </div>
+          <p class="field-help" id="acc-discord-help"></p>
+        </section>
+
         <section class="panel">
           <h2 class="panel-title">Who can operate your graphics</h2>
           <p class="field-help">

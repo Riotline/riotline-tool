@@ -572,7 +572,10 @@ export const DEFAULT_WINNER = {
 };
 
 export const WINNER_SIDE_CHOICES = [
-  { key: 'auto', label: 'From the series score' },
+  // Not "from the series score" any more: mid-series it is the last map played,
+  // and a label that says otherwise sends an operator looking for a bug in the
+  // number instead of reading the note under it.
+  { key: 'auto', label: 'Series winner, or the last map played' },
   { key: 'left', label: 'Left team' },
   { key: 'right', label: 'Right team' },
 ];
@@ -663,19 +666,87 @@ export function upcomingNotes(state) {
 }
 
 /**
- * Which side lifts the trophy. Ties resolve to the left rather than to nothing:
- * a blank winner scene on air is worse than one the operator can see is wrong
- * and override, and the dashboard shows what 'auto' resolved to.
+ * The last listed map that has actually been played, or null.
+ *
+ * Walked from the end, so a series where the operator has already named the
+ * next map finds the one before it - which is the whole point. A drawn map is
+ * played but awards nobody, and is returned as-is; deciding what to do about
+ * that belongs to the caller.
+ */
+export function latestPlayedMap(state) {
+  const rows = activeMaps(state);
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (!isUpcomingMap(rows[index])) return rows[index];
+  }
+  return null;
+}
+
+/** Which side won one map row, or null for an unplayed or drawn one. */
+const mapWinner = (row) => {
+  if (!row || isUpcomingMap(row)) return null;
+  const left = row.left ?? 0;
+  const right = row.right ?? 0;
+  if (left === right) return null; // a draw awards nobody, exactly as mapWins counts it
+  return right > left ? 'right' : 'left';
+};
+
+/**
+ * Which side lifts the trophy: whoever won the last map played.
+ *
+ * That one rule covers both cases the operator cares about, and it is worth
+ * saying why, because the obvious implementation is to write two.
+ *
+ * A VALORANT series is clinched BY WINNING A MAP. So the map that ends a series
+ * is always won by the side that wins the series, and "the winner of the last
+ * map played" IS the series winner the moment the series is over. A separate
+ * "if the series is finished, use the series score" branch can therefore never
+ * change a correct answer - it can only fire in states where the series is NOT
+ * finished, which is exactly where it is wrong.
+ *
+ * That branch was written, and it was wrong in the way this graphic can least
+ * afford. There is no best-of field, so it inferred series length from how many
+ * map rows had been named - and a Bo3 standing 2-1 (over) is byte-for-byte the
+ * same state as a Bo5 standing 2-1 (not over). It crowned the leader of a live
+ * Bo5, and typing a name into the next map's row flipped the team on screen,
+ * because naming a row changed the count it was reasoning from.
+ *
+ * The bug this fixes: with the score counted from the rows, cueing after map
+ * two of a Bo3 standing 1-1 put the trophy on whoever the tie broke toward
+ * rather than on the side that had just won. Naming the next map first made no
+ * difference, because a named row with no scores is not a result.
+ *
+ * The one case the last map cannot answer is a map awarded rather than played -
+ * a forfeit, where the series score moves and no row does. That is what the
+ * explicit left/right override in WINNER_SIDE_CHOICES is for, and what it has
+ * always been documented as being for.
+ *
+ * Ties resolve to the left rather than to nothing: a blank winner scene on air
+ * is worse than one an operator can see is wrong and override, and the
+ * dashboard says which rule answered.
  *
  * @returns {'left'|'right'}
  */
 export function resolveWinner(state) {
   if (state?.winner === 'left' || state?.winner === 'right') return state.winner;
-  // Reads the series score rather than the stored number, so with the count
-  // switched on the trophy follows the map rows without needing a fourth choice
-  // in the dropdown that would mean the same thing as this one.
+
+  // The map just played. A drawn one awards nobody and falls through, as does a
+  // series where nothing has been played yet.
+  const latest = mapWinner(latestPlayedMap(state));
+  if (latest) return latest;
+
   const { left, right } = seriesScore(state);
   return right > left ? 'right' : 'left';
+}
+
+/**
+ * Which rule answered, so the dashboard can say so rather than claiming the
+ * trophy came from the series score when it came from one map.
+ *
+ * @returns {'override'|'map'|'score'}
+ */
+export function winnerSource(state) {
+  if (state?.winner === 'left' || state?.winner === 'right') return 'override';
+  return mapWinner(latestPlayedMap(state)) ? 'map' : 'score';
 }
 
 /**

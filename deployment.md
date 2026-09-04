@@ -209,6 +209,60 @@ Everything is environment variables. Real environment variables always beat the
 
 The rest are in `.env.example` with a comment each.
 
+### Signing in with Discord
+
+Optional, and off unless all six are set. A guild role becomes the roster: hold
+the role, get an account. Password sign-in stays available beside it, and must —
+see the warning at the end.
+
+| | |
+| --- | --- |
+| `DISCORD_ENABLED` | `true` to offer it. Separate from the five below so you can shut the door without deleting the setup. |
+| `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | From the OAuth2 tab of your app at <https://discord.com/developers/applications>. The **client secret**, not a bot token. |
+| `DISCORD_GUILD_ID` | Your Discord server. |
+| `DISCORD_ROLE_OPERATOR` | The role that grants an account. Several, comma-separated, is fine. |
+| `DISCORD_PUBLIC_ORIGIN` | The public URL this server answers to — scheme and host only. |
+
+In the Discord application, add a redirect URI of exactly
+`<DISCORD_PUBLIC_ORIGIN>/api/auth/discord/callback`. Discord compares it byte for
+byte, so a trailing slash or `http` where you meant `https` fails at the consent
+screen with an error naming the URI.
+
+**`DISCORD_PUBLIC_ORIGIN` cannot be worked out by the server.** Behind the
+tunnel it never learns its own hostname: `HOST` is `0.0.0.0` in the container,
+the published port is on the host's loopback, and the `Host` header is set by
+whoever is calling — trusting that would hand an attacker the redirect target.
+So it is declared. Behind the tunnel it is the tunnel hostname, `https`, and
+`COOKIE_SECURE=true` belongs with it.
+
+Everything is validated at boot. A malformed guild or role id, or an origin with
+a path on it, leaves Discord off, names the offending variable in the banner and
+hides the button — rather than accepting it and then telling every member of
+your org that they lack a role they hold.
+
+Optional: `DISCORD_ROLE_ADMIN` (a second role that also administers here),
+`DISCORD_ROLE_NAME` (what to call the role in the refusal message) and
+`DISCORD_ALLOW_SIGNUP=false` (existing accounts may link, but no new account is
+ever created).
+
+**The role is checked when somebody signs in, and not again.** Removing it in
+Discord stops the next sign-in; it does not end a session already running. To
+remove somebody now, use **Disable** in Admin → Accounts, which signs them out
+immediately. **Delete does not evict anyone** — it deletes their graphics, and
+a role holder can sign straight back in with a fresh empty account. The panel
+says so on the confirmation.
+
+Discord also has a switch in **Admin -> Server settings**, so an administrator can
+shut the door without a restart - the credentials stay in place and it comes
+straight back on. It stops new sign-ins and new links; it does not end sessions
+already running, which is what Disable on an account is for.
+
+**Keep at least one administrator with a password.** If every admin signs in
+through Discord, a rotated client secret or a deleted application locks this
+server out of itself. The server refuses any change that would take the last
+password-holding administrator away, warns on the boot banner, and reports
+`passwordAdmins` in Admin → Health.
+
 ### The two runtime switches
 
 Some settings are not environment variables at all — they live in **Admin →

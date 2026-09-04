@@ -19,6 +19,39 @@ import { SESSION_ID, account, refreshAccount, switchTo } from './session.js';
 const $ = (id) => document.getElementById(id);
 const toast = (message) => window.dispatchEvent(new CustomEvent('app-toast', { detail: message }));
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * The Discord mark, drawn rather than fetched.
+ *
+ * Inline SVG with `fill="currentColor"`, so it takes the colour of whatever it
+ * sits beside and needs no rule of its own beyond a size. Deliberately not an
+ * image, an icon font or a CDN sprite: this dashboard has to render on a
+ * machine with no network - that is most of the point of a local broadcast tool
+ * - and an icon that resolves to a broken-image glyph mid-show is worse than no
+ * icon at all.
+ *
+ * `el()` from fields.js cannot make this: it calls createElement, and an SVG
+ * child built that way is an unknown HTML element that never paints.
+ */
+export function discordMark(title = 'Signs in with Discord') {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'discord-mark');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', title);
+
+  const path = document.createElementNS(SVG_NS, 'path');
+  path.setAttribute('fill', 'currentColor');
+  path.setAttribute(
+    'd',
+    'M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.198.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z',
+  );
+
+  svg.append(path);
+  return svg;
+}
+
 const els = {
   whoami: $('whoami'),
   whoamiUser: $('whoami-user'),
@@ -36,6 +69,13 @@ const els = {
   copyKey: $('acc-copy-key'),
   rotate: $('acc-rotate'),
   grants: $('acc-grants'),
+
+  discordPanel: $('acc-discord-panel'),
+  discordFacts: $('acc-discord-facts'),
+  discordLink: $('acc-discord-link'),
+  discordUnlink: $('acc-discord-unlink'),
+  discordNoPass: $('acc-discord-nopass'),
+  discordHelp: $('acc-discord-help'),
 
   admUsername: $('adm-username'),
   admPassword: $('adm-password'),
@@ -107,7 +147,13 @@ function paintTopbar() {
 
   const guest = current !== me.user.id;
   const mine = me.sessions.find((entry) => entry.id === current);
-  els.whoamiUser.textContent = `${me.user.username}${me.user.role === 'admin' ? ' - admin' : ''}`;
+  // replaceChildren rather than textContent, because a text assignment cannot
+  // carry the mark beside the name. textContent still reads as the username, so
+  // anything asserting on it is unaffected.
+  els.whoamiUser.replaceChildren(
+    document.createTextNode(`${me.user.username}${me.user.role === 'admin' ? ' - admin' : ''}`),
+    ...(me.user.discord ? [discordMark(`Signs in with Discord as ${me.user.discord.tag}`)] : []),
+  );
   els.whoami.hidden = false;
   // Only worth a selector when there is somewhere to go.
   els.target.parentElement.hidden = me.sessions.length < 2;
@@ -138,6 +184,38 @@ function paintAccount() {
   els.key.textContent = me.user.sessionKey ?? '-';
   els.note.textContent = `Passwords must be at least ${me.passwordMin} characters.`;
   paintGrants();
+  paintDiscord();
+}
+
+/**
+ * The Discord panel on the Account tab.
+ *
+ * Hidden outright when the server has none configured. The help line is the
+ * place requirement 6 is actually explained to the person it affects: the role
+ * is read when you sign in, so losing it stops the next sign-in rather than
+ * this one.
+ */
+function paintDiscord() {
+  if (!els.discordPanel) return;
+
+  const on = Boolean(discordServer);
+  els.discordPanel.hidden = !on;
+  if (!on) return;
+
+  const linked = me.user.discord;
+  facts(els.discordFacts, [
+    ['Signs in with', [me.user.hasPassword ? 'Password' : null, linked ? 'Discord' : null].filter(Boolean).join(' and ') || 'nothing'],
+    ['Discord account', linked ? linked.tag || linked.id : 'not linked'],
+    ...(linked ? [['Linked on', when(linked.linkedAt)]] : []),
+  ]);
+
+  els.discordLink.hidden = Boolean(linked);
+  els.discordUnlink.hidden = !linked || !me.user.hasPassword;
+  els.discordNoPass.hidden = !linked || !me.user.hasPassword;
+
+  els.discordHelp.textContent = linked
+    ? `Your ${discordServer.role} role is checked when you sign in. Losing it stops the next sign-in; it does not end this one.`
+    : `Link your Discord account and you can sign in with it, as long as you hold ${discordServer.role}.`;
 }
 
 /**
@@ -346,6 +424,23 @@ function paintUsers(list) {
         el('span', 'admin-meta', {}, user.live ? 'production loaded' : `last in ${when(user.lastLoginAt)}`),
       );
 
+      /*
+       * How this account gets in, which is the fact this panel exists to act
+       * on. The handle is shown because it is what a person recognises, and the
+       * snowflake sits in the tooltip because the handle is the part that can
+       * be changed and re-claimed - so the id is the only way to tell a
+       * colleague from somebody who took their old name.
+       */
+      if (user.discord) {
+        const mark = el('span', 'admin-meta admin-discord', {
+          title: `Discord id ${user.discord.id}${user.hasPassword ? '' : ' - no password'}`,
+        });
+        mark.append(discordMark(), document.createTextNode(user.discord.tag || 'Discord'));
+        row.append(mark);
+      } else if (!user.hasPassword) {
+        row.append(el('span', 'admin-meta is-warn', {}, 'no way to sign in'));
+      }
+
       const act = async (label, body, confirmText) => {
         if (confirmText && !window.confirm(confirmText)) return;
         try {
@@ -403,16 +498,46 @@ function paintUsers(list) {
       const signOut = el('button', 'btn btn-small', { type: 'button' }, 'Sign out');
       signOut.addEventListener('click', () => act(`${user.username} signed out everywhere`, { action: 'sign-out' }));
 
+      /*
+       * Unlink, and deliberately no "link".
+       *
+       * Attaching a Discord identity to somebody else's account has no honest
+       * use and is a straightforward impersonation: the recovery path for a
+       * locked-out operator is to set them a password, which they find out
+       * about the moment they use it. This button is for the other direction -
+       * somebody lost their Discord account and needs it detached.
+       */
+      const unlink = el('button', 'btn btn-small', { type: 'button' }, 'Unlink Discord');
+      unlink.hidden = !user.discord;
+      unlink.addEventListener('click', () =>
+        act(
+          `Discord unlinked from ${user.username}`,
+          { action: 'unlink-discord' },
+          `Unlink ${user.username}'s Discord account?\n\nThey are signed out, and they will need their password to get back in.`,
+        ),
+      );
+
       const remove = el('button', 'btn btn-small btn-danger', { type: 'button' }, 'Delete');
       remove.addEventListener('click', () =>
         act(
           `${user.username} deleted`,
           { action: 'delete' },
-          `Delete ${user.username}?\n\nTheir graphics, presets, teams and player aliases are deleted with them. This cannot be undone.`,
+          /*
+           * Says what Delete is, because it is not what it looks like when
+           * Discord can create accounts. Deleting removes the DATA; it does not
+           * remove the person, who still holds the role and can sign straight
+           * back in with an empty production. Taking the role away in Discord
+           * is the eviction. Saying so here is the whole fix - the button was
+           * never going to be able to do it.
+           */
+          `Delete ${user.username}?\n\nTheir graphics, presets, teams and player aliases are deleted with them. This cannot be undone.` +
+            (user.discord
+              ? `\n\nThis does NOT stop them signing in again: they still hold the Discord role, and a new empty account would be made for them. Remove the role in Discord, or use Disable.`
+              : ''),
         ),
       );
 
-      row.append(disable, promote, tracker, signOut, remove);
+      row.append(disable, promote, tracker, unlink, signOut, remove);
       return row;
     }),
   );
@@ -560,6 +685,65 @@ document.addEventListener('click', async (event) => {
   await fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   location.assign('/login.html');
 });
+
+// ------------------------------------------------------- the discord panel ---
+
+/**
+ * Whether this server offers Discord at all, and what the role is called.
+ *
+ * From /api/auth/state, which is the one route that answers before a login and
+ * is where the login page reads the same fact. It carries a role NAME and
+ * nothing else - no client id, no guild id, no role id.
+ */
+let discordServer = null;
+
+els.discordLink?.addEventListener('click', async () => {
+  els.discordLink.disabled = true;
+  try {
+    // A POST decides it - so the CSRF check applies - and the navigation that
+    // follows carries only the opaque signed cookie the POST set.
+    const { authorize } = await post('/api/account/discord/link', {});
+    location.assign(authorize);
+  } catch (error) {
+    toast(error.message);
+    els.discordLink.disabled = false;
+  }
+});
+
+els.discordUnlink?.addEventListener('click', async () => {
+  if (!window.confirm('Unlink your Discord account?\n\nYou will sign in with your password from now on.')) return;
+  try {
+    await post('/api/account/discord/unlink', {});
+    me = (await refreshAccount()) ?? me;
+    paintTopbar();
+    paintAccount();
+    toast('Discord unlinked');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+els.discordNoPass?.addEventListener('click', async () => {
+  const current = window.prompt('Turn off your password?\n\nDiscord becomes the only way you can sign in.\n\nType your current password to confirm:');
+  if (!current) return;
+  try {
+    await post('/api/account/password', { current, clearPassword: true });
+    me = (await refreshAccount()) ?? me;
+    paintTopbar();
+    paintAccount();
+    toast('Your password is off - sign in with Discord from now on');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+void fetch('/api/auth/state')
+  .then((response) => (response.ok ? response.json() : null))
+  .then((payload) => {
+    discordServer = payload?.discord ?? null;
+    if (me) paintAccount();
+  })
+  .catch(() => {});
 
 void account().then((data) => {
   if (!data) return; // not signed in; the server has already redirected

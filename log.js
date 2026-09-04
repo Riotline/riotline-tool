@@ -31,8 +31,15 @@ const RANK = Object.fromEntries(LOG_LEVELS.map((name, index) => [name, index]));
  * webhook request. Logging raw URLs would put it in a buffer the admin panel
  * renders, in a `docker logs` anyone with shell access can read, and in whatever
  * ships those logs onward.
+ *
+ * `code` and `state` are the second pair that travel that way: an OAuth
+ * callback arrives as `?code=...&state=...` on a route that logs like any
+ * other, and the request line is written whatever the outcome. The code is
+ * single-use and short-lived, which is not the same as harmless - it is
+ * exchangeable for an identity assertion until it is spent, and a 500 on that
+ * route logs the whole query string at error level.
  */
-const SECRET_PARAMS = new Set(['key', 'password', 'token', 'secret', 'current']);
+const SECRET_PARAMS = new Set(['key', 'password', 'token', 'secret', 'current', 'code', 'state']);
 
 /** `?key=abc123` -> `?key=<hidden>`, leaving everything else readable. */
 export function safeUrl(rawUrl) {
@@ -127,7 +134,15 @@ export function redact(value, depth = 0) {
       lowered === 'salt' ||
       lowered === 'cookie' ||
       lowered === 'sessionkey' ||
-      lowered === 'token' ||
+      // A substring rather than an exact match: an OAuth exchange answers with
+      // `access_token` and `refresh_token`, and an exact test on 'token' would
+      // have let both straight through into a buffer the admin panel renders.
+      lowered.includes('token') ||
+      // The header a token exchange is sent under. It carries the client secret
+      // on the way out and a bearer token on the way back, and it matched none
+      // of the tests above - 'authorization' contains neither 'token' nor
+      // 'secret', and the 'key' test is an exact one.
+      lowered.includes('authorization') ||
       lowered === 'key'
     ) {
       out[name] = '<hidden>';
