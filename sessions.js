@@ -222,5 +222,15 @@ export function makeMediaOwners(filePath) {
      * fills up again as soon as somebody uploads.
      */
     filter: (userId, entries) => entries.filter((entry) => owners.get(entry.name)?.has(String(userId))),
+
+    /**
+     * Let the process exit without truncating an in-flight save.
+     *
+     * Same omission the alias store had. Losing a claim does not lose the file -
+     * the bytes are content-addressed and every graphic referencing one still
+     * renders - but the uploader stops seeing it in their own media browser,
+     * and there is no way to claim it back short of uploading it again.
+     */
+    flush: () => writeChain,
   };
 }

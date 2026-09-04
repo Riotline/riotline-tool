@@ -975,7 +975,15 @@ function installSession(bundle) {
   });
 }
 
-/** Flush everything a session holds. Called on shutdown and on eviction. */
+/**
+ * Flush everything a session holds. Called on shutdown and on eviction.
+ *
+ * All SEVEN stores. It was six, and the missing one was aliases - which is the
+ * store written most often without anybody pressing anything, because every
+ * roster event records the players it saw. A restart could therefore drop the
+ * last lobby's sightings, or a name typed a second earlier, with the write half
+ * done and nothing said.
+ */
 const flushSession = (bundle) =>
   Promise.all([
     bundle.graphics.flush(),
@@ -984,6 +992,7 @@ const flushSession = (bundle) =>
     bundle.globals.flush(),
     bundle.presets.flush(),
     bundle.teams.flush(),
+    bundle.aliases.flush(),
   ]).catch(() => {});
 
 // ----------------------------------------------------------------- riot ---
@@ -3477,9 +3486,12 @@ const server = createServer((req, res) => {
 // in-flight graphic save.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    // Every open session, not one - and the login table, whose lastSeen stamps
-    // are held in memory between writes on purpose.
+    // Every open session, not one - and the two server-wide stores that are not
+    // in any bundle: the login table, whose lastSeen stamps are held in memory
+    // between writes on purpose, and the media index, where a lost claim means
+    // an uploader stops seeing their own file in the picker.
     logins.flush();
+    mediaOwners.flush();
     void Promise.all(sessions.list().map((id) => flushSession(sessions.peek(id))))
       .catch(() => {})
       .then(() => browser?.close())

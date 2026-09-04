@@ -1191,6 +1191,20 @@ export function makeAliasStore(filePath) {
       if (players.length !== before) persist();
       return this.list();
     },
+
+    /**
+     * Let the process exit without truncating an in-flight save.
+     *
+     * This store had no flush and was therefore the one thing shutdown did not
+     * wait for. Every other store persists the same way - fire and forget onto
+     * a write chain - and the six in flushSession are awaited before the
+     * process goes. Aliases were not, so a name typed a moment before a restart,
+     * or a batch of players just recorded from a roster webhook, could be lost
+     * with the write half done.
+     */
+    flush() {
+      return writeChain;
+    },
   };
 }
 
