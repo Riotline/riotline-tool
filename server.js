@@ -1354,6 +1354,26 @@ async function handleTeamAction({ teams }, body) {
       return { teams: teams.list() };
     }
 
+    /*
+     * A library file from another desk, folded in.
+     *
+     * The whole payload lands in one store call and one write. It ADDS and
+     * UPDATES and never removes, so a 12-team file cannot delete the 30 orgs it
+     * does not mention - the panel promises that and `import()` is what keeps
+     * the promise. Nothing here touches a graphic: a team is copied onto the
+     * scoreboard when it is picked, and `teamId` is never dereferenced at
+     * render, so importing cannot change anything already on air.
+     */
+    case 'import': {
+      const incoming = Array.isArray(body?.teams) ? body.teams : [];
+      if (!incoming.length) throw new ProviderError(400, 'That file had no teams in it.');
+      if (incoming.length > 500) throw new ProviderError(400, 'That file has more than 500 teams in it.');
+
+      const result = teams.import(incoming);
+      await teams.flush();
+      return { teams: result.teams, added: result.added, updated: result.updated };
+    }
+
     default:
       throw new ProviderError(400, `Unknown team action: ${action || '(none)'}`);
   }
@@ -1457,6 +1477,39 @@ async function handleAliasAction({ graphics, select, aliases }, body) {
       const players = aliases.reject(String(body?.key ?? ''), String(body?.playerId ?? ''));
       reresolve();
       return { players, pending: aliases.pending() };
+    }
+
+    /*
+     * A library file from another desk, folded in.
+     *
+     * Adds and updates; never removes. That matters more here than for teams,
+     * because `reresolve()` below rewrites both scoreboard sides and every
+     * select slot from whatever the library now holds - so a swap would revert
+     * every name it dropped to a raw Riot ID, in one frame, live. An import
+     * also leaves `rejected` and `seenAt` alone on records that already exist:
+     * those are answers somebody gave at THIS desk about who a player is not,
+     * and the file has no business overwriting them.
+     *
+     * reresolve() runs once at the end rather than per row, so a hundred names
+     * cost at most three SSE frames instead of three hundred.
+     */
+    case 'import': {
+      const incoming = Array.isArray(body?.players) ? body.players : [];
+      if (!incoming.length) throw new ProviderError(400, 'That file had no named players in it.');
+      if (incoming.length > 1000) throw new ProviderError(400, 'That file has more than 1000 players in it.');
+
+      let result;
+      try {
+        result = aliases.import(incoming);
+      } catch (error) {
+        // The alias cap is the one refusal an operator can act on, so it comes
+        // back as a message rather than a 500.
+        throw new ProviderError(400, error.message);
+      }
+
+      await aliases.flush();
+      reresolve();
+      return { players: result.players, pending: aliases.pending(), added: result.added, updated: result.updated };
     }
 
     case 'clear-unnamed':

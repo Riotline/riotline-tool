@@ -18,7 +18,8 @@ import { mediaControl } from './media-field.js';
 import { SIDE_CHOICES, applyTeam } from './teams.js';
 import { mapDisplayName } from './maps.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
-import { api, outputUrl, targetKey } from './session.js';
+import { api, account, outputUrl, targetKey } from './session.js';
+import { diffPlayers, downloadLibraryFile, importSummary, readLibraryFile, resolveImport } from './library-file.js';
 import {
   SELECT_ANIM_FIELDS,
   SELECT_ANIM_GROUPS,
@@ -261,6 +262,16 @@ els.endClockBtn.addEventListener('click', endClock);
  * `syncFields` additionally skips whatever holds focus, so a team name being
  * typed is never rewritten under the caret.
  */
+/*
+ * Whether the SCOREBOARD is on air, which this tab otherwise has no reason to
+ * know. An alias import rewrites both graphics, so the warning has to name both
+ * - and this rides the one multiplexed stream, so it costs no connection.
+ */
+let graphicVisible = false;
+onState('graphic', (next) => {
+  graphicVisible = Boolean(next?.anim?.visible);
+});
+
 onState('select', (next) => {
   if (!state) return;
 
@@ -551,9 +562,23 @@ function aliasRow(player) {
  */
 let aliasRefresh = null;
 
+/*
+ * An import diff is open in the alias panel.
+ *
+ * While it is, the panel must not rebuild. buildAliasEditor() ends in
+ * replaceChildren, and refreshAliases() calls it whenever a roster event
+ * arrives - so ten players loading into agent select, which is precisely when
+ * somebody is looking at this panel, would throw away every Keep mine / Take
+ * theirs they had clicked. The refresh is skipped rather than queued: the diff
+ * is re-derived against fresh data at the moment Apply is pressed, so nothing
+ * that happened during the decision is lost, and nothing stale is written.
+ */
+let aliasImportOpen = false;
+
 function refreshAliases() {
   clearTimeout(aliasRefresh);
   aliasRefresh = setTimeout(async () => {
+    if (aliasImportOpen) return;
     try {
       const payload = await fetch(api('/api/aliases')).then((response) => response.json());
       const next = payload.players ?? [];
@@ -680,6 +705,43 @@ function buildAliasEditor() {
     aliasAction({ action: 'clear-unnamed' }).catch((error) => toast(`Not cleared: ${error.message}`));
   });
 
+  /*
+   * Handing the named players to another desk, as a file.
+   *
+   * Copy, never link. What lands there becomes theirs; nothing either of you
+   * types afterwards reaches the other's graphics. That is deliberate - a name
+   * is baked onto a card at ingest and rewritten into live select and scoreboard
+   * state by the server, so a live link would be one keystroke from renaming a
+   * player on somebody else's air.
+   */
+  const exportBtn = el('button', 'mini-btn', { type: 'button' }, 'Export named players');
+  exportBtn.addEventListener('click', async () => {
+    if (!named) {
+      toast('There is nobody named to export yet.');
+      return;
+    }
+    const me = await account();
+    const { count } = downloadLibraryFile('players', players, me?.user?.username ?? '');
+    toast(`Exported ${count} named player${count === 1 ? '' : 's'}`);
+  });
+
+  const picker = el('input', null, { type: 'file', accept: 'application/json', id: 'sed-alias-import' });
+  picker.style.display = 'none';
+  picker.addEventListener('change', async () => {
+    const file = picker.files?.[0];
+    picker.value = '';
+    if (!file) return;
+    try {
+      const opened = await readLibraryFile(file, 'players');
+      openAliasImport(opened);
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  const importBtn = el('button', 'mini-btn', { type: 'button' }, 'Import from file');
+  importBtn.addEventListener('click', () => picker.click());
+
   const named = players.filter((player) => player.alias).length;
 
   host.replaceChildren(
@@ -705,8 +767,130 @@ function buildAliasEditor() {
       ? wrapChildren('alias-list', shown.map(aliasRow))
       : el('p', 'empty', {}, players.length ? 'Nobody matches that.' : 'No players seen yet. Run a lobby with the webhook pointed here, or write one in below.'),
     aliasDraftForm(),
-    wrapChildren('team-form-actions', [tidy]),
+    subhead('Share this library'),
+    help(
+      'Export writes a JSON file of the players you have NAMED - their Riot ID, their account id and the name ' +
+        'you chose. Nobody unnamed is included. Import folds somebody else\'s file into yours: it adds and ' +
+        'updates, and never deletes anyone. What arrives becomes yours to edit; nothing either of you types ' +
+        'afterwards reaches the other.',
+    ),
+    wrapChildren('team-form-actions', [exportBtn, importBtn, picker, tidy]),
   );
+}
+
+/**
+ * The import diff, rendered into the alias panel instead of the editor.
+ *
+ * Everything here is arithmetic over two arrays already in memory - the file
+ * just opened and `players`. Nothing is sent until Apply, and Cancel sends
+ * nothing at all.
+ */
+function openAliasImport(opened) {
+  aliasImportOpen = true;
+
+  const host = els.editors.aliases;
+  const diff = diffPlayers(opened.rows, players);
+  // One entry per Differs row, in the order the rows are rendered.
+  const choices = diff.differs.map(() => 'mine');
+
+  const close = () => {
+    aliasImportOpen = false;
+    buildAliasEditor();
+  };
+
+  const paint = () => {
+    const sum = importSummary(diff, choices);
+
+    const rows = diff.differs.map((entry, index) => {
+      const row = el('div', 'access-row');
+      row.append(
+        el('span', 'access-name', {}, entry.label),
+        el('span', 'admin-meta', {}, `${entry.riotId || 'no Riot ID'} - you call them "${entry.was}"`),
+      );
+      for (const [key, label] of [['mine', `Keep "${entry.was}"`], ['theirs', `Use "${entry.row.alias}"`]]) {
+        const button = el('button', `btn btn-small${choices[index] === key ? ' is-active' : ''}`, { type: 'button' }, label);
+        button.addEventListener('click', () => {
+          choices[index] = key;
+          paint();
+        });
+        row.append(button);
+      }
+      return row;
+    });
+
+    const apply = el(
+      'button',
+      'btn btn-primary',
+      { type: 'button' },
+      `Import ${sum.added + sum.replaced} player${sum.added + sum.replaced === 1 ? '' : 's'} (${sum.added} added, ${sum.replaced} renamed, nothing deleted)`,
+    );
+    apply.disabled = sum.added + sum.replaced === 0;
+    apply.addEventListener('click', async () => {
+      apply.disabled = true;
+      try {
+        /*
+         * Re-derived against `players` as it is NOW, not as it was when the
+         * file was opened. A lobby loading in during the decision would
+         * otherwise have this write a name over one the feed just resolved.
+         * The operator's choices are kept by position, which is safe because
+         * the diff is recomputed from the same file in the same order.
+         */
+        const fresh = diffPlayers(opened.rows, players);
+        const payload = resolveImport(fresh, choices);
+        if (!payload.length) {
+          close();
+          toast('Nothing to import - you kept every name you already had.');
+          return;
+        }
+        const result = await aliasAction({ action: 'import', players: payload });
+        aliasImportOpen = false;
+        toast(`Imported ${result?.added ?? 0} new and renamed ${result?.updated ?? 0}`);
+      } catch (error) {
+        aliasImportOpen = false;
+        toast(`Not imported: ${error.message}`);
+        buildAliasEditor();
+      }
+    });
+
+    const backup = el('button', 'btn btn-ghost', { type: 'button' }, 'Export mine first');
+    backup.addEventListener('click', async () => {
+      const me = await account();
+      downloadLibraryFile('players', players, me?.user?.username ?? '');
+      toast('Saved a copy of your current list');
+    });
+
+    const cancel = el('button', 'btn btn-ghost', { type: 'button' }, 'Cancel');
+    cancel.addEventListener('click', close);
+
+    host.replaceChildren(
+      title('Import players', el('span', 'pill', {}, opened.from ? `from ${opened.from}` : 'from a file')),
+      help(
+        `${opened.rows.length} named player${opened.rows.length === 1 ? '' : 's'} in the file. ` +
+          `${sum.added} are new to you, ${sum.identical} you already have exactly, and ${diff.differs.length} you call something different.`,
+      ),
+      /*
+       * The warning names the graphic an alias import actually moves.
+       *
+       * Both, not just the scoreboard: this panel lives on the agent select tab
+       * and the strip is the thing a rename changes first - the server rewrites
+       * select slots before it touches either scoreboard side.
+       */
+      ...(state.anim?.visible || graphicVisible
+        ? [
+            el(
+              'p',
+              'banner banner-warn',
+              {},
+              `${state.anim?.visible ? 'The agent select strip is on air. ' : ''}${graphicVisible ? 'The scoreboard is on air. ' : ''}Renaming takes effect immediately.`,
+            ),
+          ]
+        : []),
+      ...(rows.length ? [subhead('You call these players something else'), wrapChildren('alias-list', rows)] : []),
+      wrapChildren('team-form-actions', [apply, backup, cancel]),
+    );
+  };
+
+  paint();
 }
 
 // ----------------------------------------------------- editor: animation ---

@@ -1184,6 +1184,59 @@ export function makeAliasStore(filePath) {
       }));
     },
 
+    /**
+     * Fold a library file into this one. Adds and updates; never deletes.
+     *
+     * Upsert rather than a whole-array swap, and that is the whole safety
+     * property. A swap would mean importing a colleague's 12-player file into a
+     * 300-player library deleted 288 people - and then `reresolve()` would
+     * rewrite both scoreboard sides and every select slot from the survivors,
+     * so every deleted name would revert to a raw Riot ID in one frame, on air.
+     * The confirmation says "nothing deleted"; this is what makes that true
+     * rather than a promise the caller has to keep.
+     *
+     * On an existing record only the alias and the Riot ID move. `seenAt` and
+     * `rejected` stay with the account that earned them: `rejected` is the list
+     * of "this is NOT that player" answers somebody gave at this desk, and
+     * clearing it would let the by-name branch of aliasForPlayer put a name back
+     * on the wrong person the next time they load in.
+     *
+     * @param {{id?: string, riotId?: string, alias?: string}[]} incoming
+     */
+    import(incoming) {
+      const rows = (Array.isArray(incoming) ? incoming : []).map(clean).filter((entry) => entry.alias && aliasKey(entry));
+
+      let added = 0;
+      let updated = 0;
+
+      for (const row of rows) {
+        const wanted = aliasKey(row);
+        const existing = players.find((entry) => aliasKey(entry) === wanted);
+
+        if (!existing) {
+          // seenAt 0 reads as "never seen at this desk", which is true, and
+          // sorts it below anybody this operator has actually had in a lobby.
+          players.push({ ...row, seenAt: 0 });
+          added += 1;
+          continue;
+        }
+
+        if (existing.alias !== row.alias || (row.riotId && existing.riotId !== row.riotId)) updated += 1;
+        existing.alias = row.alias;
+        if (row.riotId) existing.riotId = row.riotId;
+      }
+
+      // Checked after the merge rather than before: the cap is about what the
+      // library ends up holding, and an import that mostly updates adds nothing.
+      const named = players.filter((entry) => entry.alias).length;
+      if (named > ALIAS_LIMIT) {
+        throw new Error(`That would take the player library to ${named} names, over the ${ALIAS_LIMIT} limit.`);
+      }
+
+      if (added || updated) persist();
+      return { added, updated, players: this.list() };
+    },
+
     /** Drop everyone nobody has bothered to name. */
     clearUnnamed() {
       const before = players.length;
@@ -1522,6 +1575,57 @@ export function makeTeamStore(filePath) {
       if (teams.length === before) return false;
       persist();
       return true;
+    },
+
+    /**
+     * Fold a library file into this one. Adds and updates; never deletes.
+     *
+     * Upsert, not a swap, for the same reason the alias store is: importing a
+     * colleague's 12-team file must not delete the 30 orgs it does not mention.
+     * The dashboard says "nothing deleted" and this is what makes that true.
+     *
+     * Keyed on the slug rather than on the supplied id, because the id an
+     * export carries came from `uniqueId` at the other desk and may be
+     * `sentinels-2` there and free here. Matching on what the name slugs to is
+     * what makes a re-import of the same file a no-op rather than a second copy.
+     *
+     * Every id written is forced to be a fixed point of `teamSlug`: `uniqueId`
+     * can emit a 42-character id from a 40-character base, and `load()` re-slugs
+     * to 40 with no uniqueness pass, so the pair would collide one restart later
+     * and `get()` would silently return whichever came first.
+     *
+     * @param {{id?: string, name?: string}[]} incoming
+     */
+    import(incoming) {
+      const rows = Array.isArray(incoming) ? incoming : [];
+
+      let added = 0;
+      let updated = 0;
+
+      for (const row of rows) {
+        const clean = sanitiseTeamFields(row, EMPTY_TEAM);
+        // A team with no name cannot be picked out of a list, which is the same
+        // rule load() applies to the file on disk.
+        if (!clean.name) continue;
+
+        const wanted = teamSlug(clean.name);
+        const existing = teams.find((entry) => entry.id === wanted || teamSlug(entry.name) === wanted);
+
+        if (existing) {
+          const changed = TEAM_FIELDS.some((field) => existing[field.key] !== clean[field.key]);
+          if (changed) {
+            Object.assign(existing, clean);
+            updated += 1;
+          }
+          continue;
+        }
+
+        teams.push({ id: teamSlug(uniqueId(clean.name)), ...clean });
+        added += 1;
+      }
+
+      if (added || updated) persist();
+      return { added, updated, teams: this.list() };
     },
 
     flush() {

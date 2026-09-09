@@ -19,7 +19,8 @@ import { onState } from './live.js';
 import { mediaControl } from './media-field.js';
 import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, applyTeam, teamLabel } from './teams.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
-import { api, outputUrl, targetKey } from './session.js';
+import { api, account, outputUrl, targetKey } from './session.js';
+import { diffTeams, downloadLibraryFile, importSummary, readLibraryFile, resolveImport } from './library-file.js';
 import {
   AUDIO_FIELDS,
   AUDIO_GROUPS,
@@ -824,7 +825,133 @@ function buildTeamEditor() {
     grid(2, controls),
     draftLogoField(),
     actions,
+    subhead('Share this library'),
+    help(
+      'Export writes a JSON file of your teams. Import folds somebody else\'s file into yours: it adds and ' +
+        'updates, and never deletes a team. What arrives becomes yours to edit - picking a team copies its ' +
+        'fields onto a graphic rather than linking them, so an import can never change something already on air.',
+    ),
+    teamShareActions(),
   );
+}
+
+/**
+ * Export and import for the team library.
+ *
+ * Matched on what the name slugs to rather than on the id in the file, so
+ * re-importing the same file is a no-op instead of a second copy. There is
+ * deliberately no "keep both" for a collision: all three pickers render a team
+ * as `name (region)` and nothing else, so two entries with the same name are
+ * two visually identical dropdown rows and a coin flip over which logo goes on
+ * air. Keep mine or take theirs is the whole choice.
+ */
+function teamShareActions() {
+  const exportBtn = el('button', 'mini-btn', { type: 'button' }, 'Export library');
+  exportBtn.addEventListener('click', async () => {
+    if (!library.length) {
+      toast('There are no teams to export yet.');
+      return;
+    }
+    const me = await account();
+    const { count } = downloadLibraryFile('teams', library, me?.user?.username ?? '');
+    toast(`Exported ${count} team${count === 1 ? '' : 's'}`);
+  });
+
+  const picker = el('input', null, { type: 'file', accept: 'application/json', id: 'wed-team-import' });
+  picker.style.display = 'none';
+  picker.addEventListener('change', async () => {
+    const file = picker.files?.[0];
+    picker.value = '';
+    if (!file) return;
+    try {
+      openTeamImport(await readLibraryFile(file, 'teams'));
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  const importBtn = el('button', 'mini-btn', { type: 'button' }, 'Import from file');
+  importBtn.addEventListener('click', () => picker.click());
+
+  return wrapChildren('team-form-actions', [exportBtn, importBtn, picker]);
+}
+
+/** The diff, rendered into the team panel instead of the editor. */
+function openTeamImport(opened) {
+  const host = els.editors.teams;
+  const diff = diffTeams(opened.rows, library);
+  const choices = diff.differs.map(() => 'mine');
+
+  const paint = () => {
+    const sum = importSummary(diff, choices);
+
+    const rows = diff.differs.map((entry, index) => {
+      const row = el('div', 'access-row');
+      row.append(
+        el('span', 'access-name', {}, entry.label),
+        el('span', 'admin-meta', {}, `differs: ${entry.changed.join(', ')}`),
+      );
+      for (const [key, label] of [['mine', 'Keep mine'], ['theirs', 'Take theirs']]) {
+        const button = el('button', `btn btn-small${choices[index] === key ? ' is-active' : ''}`, { type: 'button' }, label);
+        button.addEventListener('click', () => {
+          choices[index] = key;
+          paint();
+        });
+        row.append(button);
+      }
+      return row;
+    });
+
+    const total = sum.added + sum.replaced;
+    const apply = el(
+      'button',
+      'btn btn-primary',
+      { type: 'button' },
+      `Import ${total} team${total === 1 ? '' : 's'} (${sum.added} added, ${sum.replaced} replaced, nothing deleted)`,
+    );
+    apply.disabled = total === 0;
+    apply.addEventListener('click', async () => {
+      apply.disabled = true;
+      try {
+        // Re-derived against the library as it is now, for the same reason the
+        // alias import does it: another editor on this session may have saved
+        // a team while this panel was open.
+        const payload = resolveImport(diffTeams(opened.rows, library), choices);
+        if (!payload.length) {
+          buildTeamEditor();
+          toast('Nothing to import - you kept every team you already had.');
+          return;
+        }
+        const result = await teamAction({ action: 'import', teams: payload });
+        toast(`Imported ${result?.added ?? 0} new and updated ${result?.updated ?? 0}`);
+      } catch (error) {
+        toast(`Not imported: ${error.message}`);
+        buildTeamEditor();
+      }
+    });
+
+    const backup = el('button', 'btn btn-ghost', { type: 'button' }, 'Export mine first');
+    backup.addEventListener('click', async () => {
+      const me = await account();
+      downloadLibraryFile('teams', library, me?.user?.username ?? '');
+      toast('Saved a copy of your current library');
+    });
+
+    const cancel = el('button', 'btn btn-ghost', { type: 'button' }, 'Cancel');
+    cancel.addEventListener('click', buildTeamEditor);
+
+    host.replaceChildren(
+      title('Import teams', el('span', 'pill', {}, opened.from ? `from ${opened.from}` : 'from a file')),
+      help(
+        `${opened.rows.length} team${opened.rows.length === 1 ? '' : 's'} in the file. ` +
+          `${sum.added} are new to you, ${sum.identical} you already have exactly, and ${diff.differs.length} disagree with yours.`,
+      ),
+      ...(rows.length ? [subhead('These disagree with what you have'), wrapChildren('team-list', rows)] : []),
+      wrapChildren('team-form-actions', [apply, backup, cancel]),
+    );
+  };
+
+  paint();
 }
 
 // -------------------------------------------------------------- preview ---
