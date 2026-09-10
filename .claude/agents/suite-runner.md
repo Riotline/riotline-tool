@@ -20,6 +20,11 @@ session scratchpad has been wiped mid-task before and six suites were lost.
 | `log-e2e.mjs` | 8126 | 43 | levels, the admin log routes, and that no key, password, hash or cookie reaches the buffer or stdout |
 | `ui-e2e.mjs` | 8124 | 61 | Playwright: login, topbar, a cookie-less OBS URL that really renders, uploads, admin panel, the log panel |
 | `discord-e2e.mjs` | 8127 (+8128) | 88 | the whole Discord OAuth flow against a fake Discord on 8128: the role gate, replay, the link-cookie check, never-born-an-admin, and that no secret or code reaches a log |
+| `matchid-e2e.mjs` | 8151 | 25 | the match-id webhook: the key gate, the bare-string body, envelope shapes, the 400 on junk, SSE replay and live delivery, cross-session isolation |
+| `matchid-ui-e2e.mjs` | 8152 | 28 | Playwright: the tracker-only panel, the hook filling the box, a miss that stays retryable, a hit that reaches the graphics Import, and typing that is not clobbered |
+| `mosaic-e2e.mjs` | 8154 | 37 | painted geometry at 1920x1080: the mosaic covers the frame, its rings are symmetric, nothing rotates in flight, and the event logo scale resizes both slots without moving the corner pin, and the grid texture is square-on where the lattice leans |
+| `winner-layout-e2e.mjs` | 8161 | 39 | painted geometry: the winner name band is the column not the text, the cap holds, everything centres on 960, nothing leaves the frame, the winner name shrinks its type rather than condensing with nothing above it moving, and vertical spacing scales gaps in all three scenes |
+| `winner-ui-e2e.mjs` | 8156 | 35 | Playwright: the mosaic opening and the grid texture save, the logo size slider reads out as a percentage and stores above 1, and no other ratio slider changed |
 
 Run each from the project directory:
 
@@ -30,6 +35,11 @@ node "d:/Projects/Local VAL Prod App/.claude-tests/settings-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/log-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/ui-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/discord-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/matchid-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/matchid-ui-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/mosaic-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/winner-ui-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/winner-layout-e2e.mjs"
 ```
 
 Each spawns its own server on its own port (discord-e2e also starts a fake Discord on 8128) against a throwaway

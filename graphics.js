@@ -197,6 +197,21 @@ const ratio = (value, fallback) => {
   return Number.isFinite(parsed) ? Math.min(1, Math.max(0, Math.round(parsed * 100) / 100)) : fallback;
 };
 
+/**
+ * A ratio that is allowed past 1, clamped to the field's own range.
+ *
+ * `ratio` caps at 1 because everything it guards is a proportion - an opacity,
+ * a dim. A multiplier is not, and running one through `ratio` would silently
+ * clamp every enlargement to "no change" while the slider claimed otherwise.
+ * Two decimals, the same as `ratio`, because the sliders step in twentieths and
+ * a float arriving as 1.0500000000000002 should not be stored that way.
+ */
+const scale = (value, fallback, min = 0.1, max = 4) => {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed * 100) / 100));
+};
+
 function sanitisePlayer(input, fallback) {
   const source = input ?? {};
   return {
@@ -493,6 +508,11 @@ export function sanitiseWinnerStyle(input, fallback = DEFAULT_WINNER_STYLE) {
       }
       case 'ratio':
         clean[field.key] = ratio(value, previous);
+        break;
+      // Clamped to the field's own min/max rather than a rule here, so a second
+      // scale field needs no edit in this switch to be bounded correctly.
+      case 'scale':
+        clean[field.key] = scale(value, previous, field.min, field.max);
         break;
       case 'bool':
         clean[field.key] = bool(value, previous);
@@ -969,6 +989,83 @@ export function ingestGame(state, payload, { now = Date.now(), catalogue = null 
   }
 
   return { state: next, applied, entered, left };
+}
+
+/**
+ * What a match id is allowed to look like.
+ *
+ * Deliberately a charset rather than a UUID pattern. Every id this has been
+ * shown is a UUID, but the one thing worse than accepting a shape nobody uses
+ * is refusing the shape that turns up next season - and everything this guards
+ * against (a whole JSON blob pasted into the box, a newline smuggled into a log
+ * line, a path segment) is already gone once the charset is closed.
+ */
+const MATCH_ID = /^[A-Za-z0-9_-]{8,128}$/;
+
+/**
+ * The match-id feed: one id, however the client chose to wrap it.
+ *
+ * The loosest of the three hooks on purpose. The other two carry structure that
+ * has to survive - a seat index, a scene name - so their envelopes mean
+ * something. This one carries a single string, so anything an id can be dug out
+ * of is accepted: the bare string, a JSON string, `{matchId}`, `{id}`, `{data:
+ * ...}` nested to any of those, an array, or `{events: [...]}` - the same three
+ * envelope shapes the roster hook takes, because whatever is watching the game
+ * client will already be posting one of them.
+ *
+ * Returns '' rather than throwing. A feed that fires on every match end will
+ * eventually fire on something that has no id yet, and answering that with a
+ * 400 puts a red line in somebody's client log for an event that was never
+ * going to be useful. The route decides what to do about an empty answer.
+ *
+ * @param {unknown} payload
+ * @param {number} depth  guards against a self-referential envelope
+ * @returns {string} the id, or '' if there is not exactly one usable id in there
+ */
+export function matchIdFrom(payload, depth = 0) {
+  if (depth > 6) return '';
+
+  if (typeof payload === 'string' || typeof payload === 'number') {
+    const value = String(payload).trim();
+    if (MATCH_ID.test(value)) return value;
+
+    /*
+     * A string that is not an id may still contain one.
+     *
+     * The roster hook already receives `data` as a JSON string inside the JSON
+     * envelope - that is how the game client sends it, not a mistake to be
+     * corrected - so a client reusing its existing shape for this hook will do
+     * the same thing here. Parsed rather than refused, for the same reason.
+     */
+    if (/^[[{"]/.test(value)) {
+      try {
+        return matchIdFrom(JSON.parse(value), depth + 1);
+      } catch {
+        return '';
+      }
+    }
+    return '';
+  }
+
+  if (Array.isArray(payload)) {
+    // First usable one wins. A client that batches two matches into one post is
+    // reporting them in order, and the earlier is the one already finished.
+    for (const entry of payload) {
+      const found = matchIdFrom(entry, depth + 1);
+      if (found) return found;
+    }
+    return '';
+  }
+
+  if (!payload || typeof payload !== 'object') return '';
+
+  for (const key of ['matchId', 'matchID', 'match_id', 'id', 'gameId', 'data', 'events', 'match']) {
+    if (!(key in payload)) continue;
+    const found = matchIdFrom(payload[key], depth + 1);
+    if (found) return found;
+  }
+
+  return '';
 }
 
 /**

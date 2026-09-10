@@ -44,6 +44,11 @@
   --texture-blend: overlay;
   --texture-size: cover;
   --texture-repeat: no-repeat;
+
+  /* The winner's name, which fits by shrinking - so its band has to reserve a
+     full-size line and both need the same two numbers. */
+  --winner-name-size: 190px;
+  --winner-name-leading: 0.92;
 }
 
 * {
@@ -335,6 +340,94 @@ body {
   transition-delay: 0ms;
 }
 
+/* ---- mosaic: the prism's lattice, on a square grid ---- */
+
+/*
+ * Everything the prism does, with the rotation taken out.
+ *
+ * Same two layers - a solid fill so the landed grid really is the backdrop, and
+ * an outline that burns bright through the flight and drops back to a whisper
+ * before there is text over it - and the same rings out from the middle.
+ *
+ * The one deliberate difference is that these do not turn, and it is the reason
+ * this is a separate opening rather than a flag on the prism. A diamond needs
+ * the turn: without it, it is a square fading up. A square needs the opposite,
+ * because any turn at all takes it through 45 degrees on the way in, so the
+ * frame fills with diamonds that square up at the last moment - which is the
+ * prism, done worse. So the whole gesture here is scale.
+ */
+.mosaic {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  opacity: var(--bg-opacity);
+  clip-path: inset(0 0 0 0);
+  transition: clip-path var(--out-ms) var(--ease);
+  visibility: hidden;
+}
+
+.stage[data-opening="mosaic"] .mosaic {
+  visibility: visible;
+}
+
+/* The grid is this opening's fill, so the slats keep out of its way - a solid
+   panel fading in behind would flood the frame long before the rings finished.
+   Same bargain the facets and the prism make. */
+.stage[data-opening="mosaic"] .slat {
+  opacity: 0;
+}
+
+/* Off in one sweep, like every other opening. */
+.stage[data-active="false"][data-park="right"] .mosaic {
+  clip-path: inset(0 0 0 100%);
+}
+
+.mosaic-tile {
+  position: absolute;
+  background: var(--bg);
+  /* The seam guard the prism needs for its rotation, kept for the scale: a tile
+     resting at 1.008 lands on subpixel boundaries just as a rotated one does,
+     and a hairline of game feed through a solid overlay is very visible on air.
+     Smaller than the prism's because there is no diagonal to cover. */
+  box-shadow: 0 0 0 1px var(--bg);
+  transform: scale(1.008);
+  transition:
+    transform var(--in-ms) var(--ease),
+    opacity var(--in-ms) var(--ease);
+  transition-delay: var(--mosaic-delay, 0ms);
+}
+
+.mosaic-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 3px solid var(--accent);
+  box-shadow:
+    0 0 26px var(--accent),
+    inset 0 0 22px var(--accent);
+  /* Where the grid settles. Held back until this tile has landed, so the
+     outline is at full strength for the flight and out of the way by the time
+     the first band of text arrives. */
+  opacity: 0.14;
+  transition: opacity var(--stage-ms) var(--ease);
+  transition-delay: calc(var(--mosaic-delay, 0ms) + var(--in-ms));
+}
+
+/* Parked: nothing, and square the whole way. 0.18 rather than the prism's 0.12
+   because a square at the same scale reads noticeably smaller than a diamond
+   whose points reach further - the two openings should start from tiles that
+   look the same size, not from the same number. */
+.stage[data-active="false"][data-park="left"][data-opening="mosaic"] .mosaic-tile {
+  opacity: 0;
+  transform: scale(0.18);
+}
+
+.stage[data-active="false"][data-park="left"][data-opening="mosaic"] .mosaic-tile::before {
+  opacity: 0.95;
+  transition-delay: 0ms;
+}
+
 /* ---- pulse: rings of neon, with the backdrop opening behind them ---- */
 
 /*
@@ -563,6 +656,9 @@ body {
 .stage.anim-off .prism,
 .stage.anim-off .prism-tile,
 .stage.anim-off .prism-tile::before,
+.stage.anim-off .mosaic,
+.stage.anim-off .mosaic-tile,
+.stage.anim-off .mosaic-tile::before,
 .stage.anim-off .event-logo,
 .stage.anim-off .texture,
 .stage.anim-off .plate,
@@ -650,12 +746,23 @@ body {
    channel - left ungated it hangs over the game feed between cues, which is the
    one thing a graphic that "appears when the map ends" must not do. Timed with
    the map plate so the backdrop arrives first and the mark lands on it. */
+/*
+ * Sized with calc rather than transform: scale().
+ *
+ * A transform would leave the box the same and grow the picture out of it, so a
+ * logo scaled up would drift over the map card while `top`/`right` claimed it
+ * had not moved. Growing the box keeps the pin exactly where it is - the mark
+ * is anchored top-right and expands down and to the left, into empty frame.
+ *
+ * The fallback in every var() is the pre-scale size, so a state file written
+ * before this setting existed renders identically.
+ */
 .event-logo {
   position: absolute;
   top: 64px;
   right: 84px;
-  width: 190px;
-  height: 96px;
+  width: calc(190px * var(--event-logo-scale, 1));
+  height: calc(96px * var(--event-logo-scale, 1));
   z-index: 5;
   transition: opacity var(--in-ms) var(--ease);
   transition-delay: var(--plate-delay, 0ms);
@@ -873,6 +980,29 @@ body {
     );
 }
 
+/* The grid: the same two sets of lines, square on. What the mosaic opening
+   leaves behind, the way the lattice is what the prism leaves behind.
+
+   0deg runs the gradient up the frame so its bands are horizontal, 90deg runs it
+   across so its bands are vertical - crossed, they cut squares of exactly
+   --texture-scale. That is the one number that behaves differently from the
+   lattice, and it behaves *better*: the lattice's setting is measured
+   perpendicular to lines lying at 45 degrees, so a diamond ends up root-2 wider
+   than the number says, where a grid cell is the number. */
+.stage[data-texture="grid"] .texture-layer {
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0 calc(var(--texture-scale) - 2px),
+      var(--accent) calc(var(--texture-scale) - 2px) var(--texture-scale)
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 calc(var(--texture-scale) - 2px),
+      var(--accent) calc(var(--texture-scale) - 2px) var(--texture-scale)
+    );
+}
+
 /* An uploaded texture is a picture, not a light source, so it does its own
    glowing or it does none. */
 .stage[data-texture="image"] .texture-glow {
@@ -951,7 +1081,7 @@ body {
 }
 
 .kicker {
-  margin: 0 0 18px;
+  margin: 0 0 calc(18px * var(--band-gap, 1));
   font-size: 40px;
   font-weight: 700;
   letter-spacing: 0.32em;
@@ -969,7 +1099,7 @@ body {
 }
 
 .map-headline {
-  margin: 34px 0 0;
+  margin: calc(34px * var(--band-gap, 1)) 0 0;
   font-size: 46px;
   font-weight: 600;
   letter-spacing: 0.24em;
@@ -983,7 +1113,7 @@ body {
   display: block;
   width: 220px;
   height: 6px;
-  margin-bottom: 30px;
+  margin-bottom: calc(30px * var(--band-gap, 1));
   background: var(--accent);
 }
 
@@ -995,7 +1125,7 @@ body {
 }
 
 .score-headline {
-  margin: 0 0 70px;
+  margin: 0 0 calc(70px * var(--band-gap, 1));
   font-size: 42px;
   font-weight: 600;
   letter-spacing: 0.3em;
@@ -1130,7 +1260,7 @@ body {
 }
 
 .score-maps {
-  margin-top: 76px;
+  margin-top: calc(76px * var(--band-gap, 1));
   width: 100%;
   max-width: 1040px;
   display: flex;
@@ -1263,7 +1393,7 @@ body {
 }
 
 .winner-kicker {
-  margin: 0 0 40px;
+  margin: 0 0 calc(40px * var(--band-gap, 1));
   padding: 14px 46px;
   font-size: 40px;
   font-weight: 800;
@@ -1278,7 +1408,7 @@ body {
 .winner-logo {
   width: 300px;
   height: 300px;
-  margin-bottom: 44px;
+  margin-bottom: calc(44px * var(--band-gap, 1));
 }
 
 .winner-logo img {
@@ -1287,17 +1417,76 @@ body {
   object-fit: contain;
 }
 
+/*
+ * The band is the column, not the name.
+ *
+ * The same rule .score-id has, and for the same reason - but this one was
+ * missing, and without it the winner name had no ceiling of any kind. The band
+ * is a flex item in a centred column, so with no width it shrink-wrapped its
+ * text: fitText measured the parent, got back exactly the width of the glyphs
+ * it was about to measure, concluded everything fitted and returned. No
+ * squeeze, no tricode fallback, and a long enough org ran off both edges of the
+ * frame - measured at -158px to 2078px on a 1920 stage.
+ *
+ * Giving it the column makes the remaining space authoritative and the text the
+ * thing that has to give. The clip is the backstop the score rows already have:
+ * squeezing has a floor and the tricode swap has a threshold, so some name is
+ * always long enough to reach the edge, and stopping is better than spilling.
+ */
+.winner-name-band {
+  width: 100%;
+  overflow: hidden;
+  /*
+   * Held to the height of a full-size line, whatever size the name ends up.
+   *
+   * This heading shrinks its type to fit, and type that shrinks takes its line
+   * box with it - so without a fixed height here the band would get shorter for
+   * a long name, and a centred column of bands would slide everything above and
+   * below it up. Which team just won is not a reason for the crest to move.
+   *
+   * `align-items: center` is what then sits the smaller type in the middle of
+   * that reserved line rather than at the top of it.
+   */
+  height: calc(var(--winner-name-size) * var(--winner-name-leading));
+  align-items: center;
+  /*
+   * Flex centring, not text-align, and the difference only shows on the names
+   * this exists for.
+   *
+   * `text-align: center` centres a line box; an inline-block *wider* than the
+   * line box is not centred at all, it is pinned to the start and allowed to
+   * run off the end. The squeeze then happens about that off-centre position -
+   * measured 77px right of the frame's middle on a name that had to condense.
+   * A flex container centres an overflowing item properly, so the box the
+   * transform scales about is already where it should be.
+   */
+  display: flex;
+  justify-content: center;
+}
+
 .winner-name {
   margin: 0;
-  font-size: 190px;
+  /* Both in custom properties because the band above reserves a line from them,
+     and a size changed in one place and not the other is a layout that moves. */
+  font-size: var(--winner-name-size);
   font-weight: 900;
   letter-spacing: -0.02em;
-  line-height: 0.92;
+  line-height: var(--winner-name-leading);
   white-space: nowrap;
+  /* Overrides the shared `left center`. The map and score names are set
+     left-aligned, so they squeeze towards their own start; this one is centred,
+     and squeezing it about its left edge would walk it off centre as it
+     condensed. */
+  transform-origin: center;
+  /* Never shrink to fit the band. fitText measures offsetWidth and needs it to
+     be the width of the glyphs - a flex item allowed to shrink would report the
+     band's width instead, which is the bug the band's own sizing just fixed,
+     one level down. */
+  flex: 0 0 auto;
 }
 
 .winner-sub {
-  margin: 40px 0 0;
+  margin: calc(40px * var(--band-gap, 1)) 0 0;
   font-size: 44px;
   font-weight: 600;
   letter-spacing: 0.2em;
@@ -1323,14 +1512,27 @@ body {
  * that it competes with the team name underneath it: the winner scene has one
  * headline and it is not the event's.
  */
+/*
+ * An in-scene mark is a band, so it is scaled by growing the row rather than by
+ * transforming the picture inside it: the scene is a column of bands and the
+ * ones below have to make room. A transform would put a big logo straight
+ * through the team name.
+ *
+ * The width cap scales with it. Held fixed, a wide wordmark at 2x would hit the
+ * cap, stop growing sideways and letterbox itself inside a taller row - the
+ * slider would appear to stop working somewhere in the middle of its travel.
+ */
 .event-mark {
-  height: 84px;
-  margin-bottom: 34px;
+  height: calc(84px * var(--event-logo-scale, 1));
+  /* The gap under the logo is the one most worth being able to change: the mark
+     above it now scales and this did not, so a large crest closed the space up
+     and a small one left it hanging. */
+  margin-bottom: calc(34px * var(--band-gap, 1));
 }
 
 .event-mark img {
   height: 100%;
-  max-width: 460px;
+  max-width: calc(460px * var(--event-logo-scale, 1));
   object-fit: contain;
   object-position: left center;
 }
@@ -1339,14 +1541,14 @@ body {
 .scene-winner .event-mark img {
   object-position: center;
   width: 100%;
-  max-width: 620px;
+  max-width: calc(620px * var(--event-logo-scale, 1));
 }
 
 .scene-score .event-mark,
 .scene-winner .event-mark {
-  height: 118px;
+  height: calc(118px * var(--event-logo-scale, 1));
 }
 
 .scene-winner .event-mark {
-  margin-bottom: 30px;
+  margin-bottom: calc(30px * var(--band-gap, 1));
 }

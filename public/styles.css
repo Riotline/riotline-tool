@@ -1066,6 +1066,19 @@ pre {
 /* A lookup somebody else started. Lives in the topbar rather than beside the
    search box, because the operator who needs it most is the one on another tab
    about to start the same 60-second lookup. */
+/* Status tones for a pill. Colour only - the pill keeps its shape so the row
+   above it cannot reflow as the state changes. */
+.pill.ok {
+  color: var(--team-blue);
+  border-color: var(--team-blue);
+}
+
+.pill.warn,
+.pill.busy {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
 .lookup-live {
   font-size: 11px;
   letter-spacing: 0.08em;
@@ -1369,6 +1382,21 @@ pre {
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--text-faint);
+}
+
+/* A slider that shows its value: label left, number right, on one line. Set by
+   rangeField rather than matched with :has(), which the dashboard could use but
+   which buys nothing here over a class the builder already knows to add. */
+.g-field.has-readout > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.g-readout {
+  color: var(--text-dim);
+  /* So the label does not shuffle sideways as the digits change under a drag. */
+  font-variant-numeric: tabular-nums;
 }
 
 .g-field input,

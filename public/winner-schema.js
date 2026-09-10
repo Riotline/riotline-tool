@@ -109,6 +109,7 @@ export const WINNER_OPENINGS = [
   { key: 'streak', label: 'Streak - bolt' },
   { key: 'facets', label: 'Facets - shards fill' },
   { key: 'prism', label: 'Prism - lit lattice' },
+  { key: 'mosaic', label: 'Mosaic - lit grid' },
   { key: 'pulse', label: 'Pulse - neon rings' },
 ];
 
@@ -164,6 +165,37 @@ export const PRISM_ROWS = Math.ceil(1080 / (PRISM_SIZE / 2)) + 2;
 export const PRISM_RINGS = 6;
 
 /**
+ * The mosaic: the prism's opening on an unrotated grid.
+ *
+ * Same two-layer tile, same rings out from the middle, squares instead of
+ * diamonds. It is a separate opening rather than a switch on the prism because
+ * a rotated grid and a square one are different geometries - the prism has to
+ * interlock half-offset rows and divide its cell by root-2 to get a side, where
+ * this is simply a grid - and one builder trying to be both would be harder to
+ * read than two that are each obvious.
+ *
+ * The one real difference in the motion, and it is the whole reason the prism
+ * cannot just stop rotating: a diamond needs the turn to read as a shard rather
+ * than a square fading up, while a square needs *no* turn at all. Rotating a
+ * square carries it through 45 degrees on the way in, so the audience watches
+ * a grid of squares become a lattice of diamonds and then square up again -
+ * which is the prism, badly. So these scale and do not turn.
+ *
+ * 240px divides the 1920 frame exactly eight times and covers the 1080 in four
+ * and a half, so a five-row grid hangs half a tile below the frame and the
+ * overflow clips it. Forty tiles against the prism's ninety: an axis-aligned
+ * grid needs no half-offset rows and no ring or column outside the frame to
+ * hide its edges, so it buys the same coverage for well under half the
+ * composited layers.
+ */
+export const MOSAIC_SIZE = 240;
+export const MOSAIC_COLS = Math.ceil(1920 / MOSAIC_SIZE);
+export const MOSAIC_ROWS = Math.ceil(1080 / MOSAIC_SIZE);
+
+/** Rings, as the prism has them - same reason, same count, so they read as a pair. */
+export const MOSAIC_RINGS = 6;
+
+/**
  * The pulse opening: rings of neon thrown out from the middle of the frame, with
  * the backdrop opening as a circle behind the last of them.
  *
@@ -189,6 +221,7 @@ export const OPENING_STEPS = {
   blinds: Math.ceil(OPENING_SLATS / 2),
   facets: FACET_COLS + FACET_ROWS - 1,
   prism: PRISM_RINGS,
+  mosaic: MOSAIC_RINGS,
   pulse: PULSE_RINGS,
 };
 
@@ -315,7 +348,12 @@ export const eventLogoInScene = (state, stageKey) =>
  */
 export const WINNER_TEXTURES = [
   { key: 'none', label: 'Nothing' },
+  // One per built opening that leaves a pattern behind: the lattice is the prism
+  // standing still, the grid is the mosaic. Both are two crossed sets of
+  // repeating lines and differ only by 45 degrees, which is the whole of the
+  // difference between the two openings as well.
   { key: 'lattice', label: 'Neon lattice' },
+  { key: 'grid', label: 'Neon grid' },
   { key: 'image', label: 'Uploaded image' },
 ];
 
@@ -354,6 +392,79 @@ export const WINNER_STYLE_FIELDS = [
     group: 'Typeface',
     label: 'Event logo',
     default: 'result',
+  },
+  /*
+   * One multiplier over every place the logo appears.
+   *
+   * A competition logo is whatever shape the competition made it, and the slots
+   * here were sized for a wide wordmark - a square crest lands small in the
+   * corner and a tall one lands enormous in a scene. Rather than a size per
+   * slot, which is four numbers to keep in step for one logo, this scales all
+   * of them together and each keeps its own anchor: the corner mark grows down
+   * and to the left from where it is pinned, and an in-scene mark grows about
+   * its own line.
+   *
+   * 1 is exactly what the sizes were before this existed, so an upgrade changes
+   * nothing on air. The range is deliberately not centred on it - there is far
+   * more call for making an oversized crest behave than for doubling a wordmark
+   * that was already sized to fit.
+   */
+  {
+    key: 'eventLogoScale',
+    type: 'scale',
+    min: 0.3,
+    max: 2,
+    step: 0.05,
+    group: 'Typeface',
+    label: 'Event logo size',
+    default: 1,
+  },
+
+  /*
+   * How wide the winner's name may get, as a share of the 1920 frame.
+   *
+   * Measured against the frame rather than the text column, because "no wider
+   * than two thirds of screen" is the thing an operator actually means and the
+   * column is an implementation detail they cannot see. At 100% the column is
+   * still the limit, so the top of the slider is "as much room as there is".
+   *
+   * The default reins in the case this was added for. A thirteen-character org
+   * at 190px measures about 1476px - it reaches within a hundred pixels of both
+   * edges and reads as a wall of letters rather than as a name. 70% of the
+   * frame is 1344px: every ordinary name is untouched, a long one condenses a
+   * little, and only something genuinely absurd falls back to the tricode.
+   */
+  {
+    key: 'winnerNameWidth',
+    type: 'scale',
+    min: 0.3,
+    max: 1,
+    step: 0.05,
+    group: 'Layout',
+    label: 'Winner name max width',
+    default: 0.7,
+  },
+  /*
+   * One multiplier over the vertical gaps between bands, in all three scenes.
+   *
+   * The scenes are a centred column of bands and the negative space between
+   * them was tuned against fixed furniture. The event logo is no longer fixed -
+   * it scales - so the balance that was right at 100% is not right at 180%, and
+   * there was no way to answer that without editing a stylesheet.
+   *
+   * Deliberately one control rather than one per gap: the gaps were chosen in
+   * proportion to each other, and scaling them together preserves that where
+   * nine separate numbers would let it drift.
+   */
+  {
+    key: 'bandGap',
+    type: 'scale',
+    min: 0.4,
+    max: 1.8,
+    step: 0.05,
+    group: 'Layout',
+    label: 'Vertical spacing',
+    default: 1,
   },
 
   { key: 'bg', type: 'hex', group: 'Backdrop', label: 'Backdrop colour', default: '#0b0f14' },
@@ -399,7 +510,7 @@ export const WINNER_STYLE_FIELDS = [
     min: 40,
     max: 800,
     group: 'Texture',
-    label: 'Size (px - lattice cell, or tile)',
+    label: 'Size (px - cell, or tile)',
     default: 190,
   },
   { key: 'textureTile', type: 'bool', group: 'Texture', label: 'Repeat the image instead of filling the frame', default: false },

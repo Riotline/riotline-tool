@@ -305,13 +305,49 @@ export function makeFields(state, onChange) {
     return wrap;
   }
 
-  function rangeField(label, path, { min = 0, max = 1, step = 0.05 } = {}) {
+  /**
+   * A slider, optionally with its value written on the label line.
+   *
+   * `readout` is a formatter rather than a flag, because the number a slider
+   * holds and the number worth showing are rarely the same thing - 0.55 wants
+   * to be read as 55%, and a multiplier wants a unit on it.
+   *
+   * Off by default. An opacity only ever needs "less" and "more", and a row of
+   * numbers nobody reads is a row of numbers competing with the labels. It
+   * earns its place the moment a slider has a *default* worth getting back to,
+   * which a bare handle cannot be steered to.
+   */
+  function rangeField(label, path, { min = 0, max = 1, step = 0.05, readout = null } = {}) {
     const input = el('input', null, { type: 'range', min, max, step });
+    const value = readout ? el('span', 'g-readout') : null;
+
+    const show = (current) => {
+      if (value) value.textContent = readout(Number(current));
+    };
+
     bind(input, () => {
-      input.value = String(get(path) ?? 0);
+      const current = get(path) ?? 0;
+      input.value = String(current);
+      show(current);
     });
-    input.addEventListener('input', () => set(path, Number.parseFloat(input.value)));
-    return field(label, input);
+
+    input.addEventListener('input', () => {
+      const next = Number.parseFloat(input.value);
+      set(path, next);
+      // Updated here as well as in the binding: syncFields deliberately skips
+      // the control being interacted with, so the readout on the slider under
+      // the cursor is the one thing a re-sync will never refresh.
+      show(next);
+    });
+
+    const wrap = field(label, input);
+    if (value) {
+      wrap.classList.add('has-readout');
+      // Into the label span, so the two sit on one line and the slider keeps
+      // the full width of the field beneath them.
+      wrap.firstChild.append(value);
+    }
+    return wrap;
   }
 
   /**

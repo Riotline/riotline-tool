@@ -56,6 +56,12 @@
              the schema owns, not markup. -->
         <div class="prism" id="prism" aria-hidden="true"></div>
 
+        <!-- The mosaic: the same lit tiles on an unrotated grid, so the opening
+             builds the frame out of squares rather than diamonds. Its own layer
+             for the same reason the prism has one - the geometry differs, and
+             neither is painted unless its own opening is playing. -->
+        <div class="mosaic" id="mosaic" aria-hidden="true"></div>
+
         <!-- Opening furniture. All inert unless their own style is playing. The
              pulse rings are filled in by winner.js so the count comes from the
              schema, which is also what the server times the opening from. -->
@@ -128,7 +134,16 @@
                  scaleX onto the heading to squeeze a long org name, and an
                  animation transform on the same element would fight it. -->
             <div class="winner-name-band" data-band>
-              <h1 class="winner-name" data-bind="winner.name" data-short-bind="winner.shortName" data-fit="1"></h1>
+              <!-- The one heading that shrinks rather than condensing. It is
+                   set far larger than anything else here, which is the size at
+                   which narrowed letters stop reading as a typeface choice. -->
+              <h1
+                class="winner-name"
+                data-bind="winner.name"
+                data-short-bind="winner.shortName"
+                data-fit="1"
+                data-fit-mode="size"
+              ></h1>
             </div>
             <p class="winner-sub" data-band data-bind="winnerSubtitle"></p>
           </div>

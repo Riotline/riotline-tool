@@ -21,6 +21,10 @@ import { api } from './session.js';
 import {
   FACET_COLS,
   FACET_ROWS,
+  MOSAIC_COLS,
+  MOSAIC_RINGS,
+  MOSAIC_ROWS,
+  MOSAIC_SIZE,
   OPENING_SLATS,
   PEAK_STAGE,
   PRISM_COLS,
@@ -166,6 +170,56 @@ const prismTiles = [...prismGrid.children];
   });
 }
 
+/*
+ * The mosaic grid.
+ *
+ * The prism above, with the rotation taken out and the interlocking arithmetic
+ * with it. An axis-aligned grid tiles by simply being a grid, so there is no
+ * half-offset row, no division by root-2 to turn a bounding box into a side,
+ * and no ring of tiles outside the frame to hide the offset at the edges. Tiles
+ * are laid from the top-left and the layer's overflow clips whatever hangs off
+ * the bottom, which at 240px is half a row.
+ *
+ * Rings are measured exactly as the prism measures them - normalised against
+ * the frame, so they are ellipses matching 16:9 and reach the corners at the
+ * same moment they reach the sides.
+ */
+const mosaicGrid = document.getElementById('mosaic');
+const mosaicRadii = [];
+
+for (let row = 0; row < MOSAIC_ROWS; row += 1) {
+  for (let col = 0; col < MOSAIC_COLS; col += 1) {
+    const tile = el('div', 'mosaic-tile');
+    tile.style.left = `${col * MOSAIC_SIZE}px`;
+    tile.style.top = `${row * MOSAIC_SIZE}px`;
+    tile.style.width = `${MOSAIC_SIZE}px`;
+    tile.style.height = `${MOSAIC_SIZE}px`;
+
+    // The tile's own centre, not its corner: a ring measured from the corner
+    // puts the top-left tile of each quadrant a step ahead of its mirror image,
+    // and the symmetry is the entire reason these arrive in rings.
+    const centreX = (col + 0.5) * MOSAIC_SIZE;
+    const centreY = (row + 0.5) * MOSAIC_SIZE;
+    mosaicRadii.push(Math.hypot((centreX - STAGE_W / 2) / (STAGE_W / 2), (centreY - STAGE_H / 2) / (STAGE_H / 2)));
+
+    mosaicGrid.append(tile);
+  }
+}
+
+const mosaicTiles = [...mosaicGrid.children];
+
+// Normalised over the range the grid occupies, for the reason spelled out over
+// the prism's rings: no tile sits exactly on the centre of the frame, so an
+// absolute radius leaves ring 0 empty and the opening wastes a stagger step it
+// has already told the server about.
+{
+  const near = Math.min(...mosaicRadii);
+  const span = Math.max(...mosaicRadii) - near || 1;
+  mosaicTiles.forEach((tile, index) => {
+    tile.dataset.ring = String(Math.round(((mosaicRadii[index] - near) / span) * (MOSAIC_RINGS - 1)));
+  });
+}
+
 // The pulse opening's rings. Same reasoning as the slats: the count is the
 // schema's, because the server times the opening from it.
 const pulseGrid = document.getElementById('pulse');
@@ -206,6 +260,10 @@ const imageTargets = [...stage.querySelectorAll('[data-img]')];
 const fitTargets = [...stage.querySelectorAll('[data-fit]')];
 const leadTargets = [...stage.querySelectorAll('[data-lead]')];
 const winnerScene = stage.querySelector('.scene-winner');
+// The one fitted heading with an operator-settable ceiling. The map name is
+// sized by its own scene and the score names by the row they share with a
+// crest, so neither has a share of the frame worth arguing about.
+const winnerName = stage.querySelector('.winner-name');
 const cornerMark = document.getElementById('event-logo');
 const sceneMarks = [...stage.querySelectorAll('[data-mark]')];
 const plate = document.getElementById('plate');
@@ -327,6 +385,21 @@ function applyStyle(style, view) {
   root.setProperty('--plate-blur', `${style.plateBlur}px`);
   root.setProperty('--plate-dim', String(style.plateDim));
   root.setProperty('--upcoming-dim', String(style.upcomingDim));
+  // One multiplier, read by every slot the logo can appear in. Unitless, so
+  // each slot multiplies its own px sizes and keeps its own anchor.
+  root.setProperty('--event-logo-scale', String(style.eventLogoScale));
+  // Likewise for the vertical gaps between bands, in all three scenes.
+  root.setProperty('--band-gap', String(style.bandGap));
+
+  /*
+   * The winner name's ceiling, in stage pixels.
+   *
+   * Resolved here rather than in CSS because fitText works in numbers, not in
+   * lengths - and the setting is a share of the 1920 stage, which is a constant
+   * this file already owns. Written before the refit at the end of render(), so
+   * the next measurement uses it.
+   */
+  if (winnerName) winnerName.dataset.fitMax = String(Math.round(style.winnerNameWidth * STAGE_W));
 
   stage.classList.toggle('uppercase', style.uppercase);
   stage.classList.toggle('plate-off', !style.plateBehind);
@@ -371,11 +444,30 @@ function applyTexture(style) {
 }
 
 /**
- * The big names are allowed to squeeze horizontally rather than shrink: a
- * font-size change would move the baseline the design is built around, and an
- * org name is only ever a little too long, never twice too long.
+ * Two ways for a name to give way, and each heading picks one.
+ *
+ * `scaleX` condenses: the letters get narrower and the baseline does not move,
+ * which is what a heading sharing a row with a crest wants - the score names and
+ * the map name are set beside or above fixed furniture, and moving their
+ * baseline would move that furniture with them.
+ *
+ * `size` shrinks the type properly, letters keeping their proportions. That is
+ * the honest answer for the winner's name, which is the one heading on the whole
+ * sequence set large enough that condensing it is legible as condensing rather
+ * than as a typeface. It is opt-in per node (`data-fit-mode`) rather than a
+ * global change, because the other three headings still want the first
+ * behaviour.
  */
 const MIN_SQUEEZE = 0.5;
+
+/**
+ * How small the type may get before the tricode is the better answer.
+ *
+ * Lower than the condensing floor, and deliberately: 50%-wide letters look like
+ * a rendering fault, where a name at half size just looks like a long name set
+ * smaller. Shrinking buys real headroom that condensing never had.
+ */
+const MIN_SHRINK = 0.45;
 
 /**
  * Below this, condensing stops being a design choice and starts looking like a
@@ -385,6 +477,16 @@ const MIN_SQUEEZE = 0.5;
  */
 const SWAP_TO_SHORT = 0.72;
 
+/**
+ * The same decision for a heading that shrinks instead, and it comes later.
+ *
+ * The 0.72 above is a judgement about *condensed* letters, not about long
+ * names, so it does not carry over: a proportionally smaller name is still the
+ * team's actual name and reads as one a good deal further down. Falling back to
+ * a tricode any earlier would be throwing away the name for no reason.
+ */
+const SWAP_TO_SHORT_SHRINK = 0.55;
+
 function fitText(node) {
   // The full name is preferred; `data-short` is what it falls back to. Reset
   // before measuring or a previous swap decides this one.
@@ -392,15 +494,41 @@ function fitText(node) {
   const short = node.dataset.short ?? '';
   if (node.textContent !== full) node.textContent = full;
 
-  node.style.transform = 'scale(1)';
+  const shrinks = node.dataset.fitMode === 'size';
+
+  /*
+   * Both levers are cleared, not just the one in use.
+   *
+   * Measuring has to happen at the node's natural width, and a node carrying
+   * last pass's font size would be measured at that size and then "fitted"
+   * again from there - a name that got shorter would never grow back. Clearing
+   * both rather than the active one costs nothing and means the mode can change
+   * without leaving a stale lever behind.
+   */
+  node.style.transform = shrinks ? '' : 'scale(1)';
+  node.style.fontSize = '';
 
   const parent = node.parentElement;
   if (!parent) return;
 
+  // Read after the reset, so this is the size the stylesheet asked for rather
+  // than whatever the last fit left behind.
+  const baseSize = shrinks ? Number.parseFloat(getComputedStyle(node).fontSize) : 0;
+
   const allowance = Number.parseFloat(node.dataset.fit) || 1;
   const style = getComputedStyle(parent);
   const column = parent.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  const available = column * allowance;
+
+  /*
+   * An absolute ceiling, on top of the share of the column.
+   *
+   * The two are different questions and both have to be answerable. The column
+   * is what the layout can give; `--fit-max` is what the operator will allow,
+   * and they set it as a share of the 1920 frame because that is the thing they
+   * are looking at. Whichever is smaller wins.
+   */
+  const cap = Number.parseFloat(node.dataset.fitMax) || Infinity;
+  const available = Math.min(column * allowance, cap);
   // offsetWidth, not scrollWidth: these are inline-blocks sized to their own
   // text, so their layout width *is* the width of the glyphs. scrollWidth was
   // reporting overflow out of a full-width block, which is a different number
@@ -412,14 +540,24 @@ function fitText(node) {
   let ratio = available / needed;
 
   // Only worth swapping if the short form actually buys something.
-  if (short && short !== full && ratio < SWAP_TO_SHORT) {
+  if (short && short !== full && ratio < (shrinks ? SWAP_TO_SHORT_SHRINK : SWAP_TO_SHORT)) {
     node.textContent = short;
     const shortNeeded = node.offsetWidth;
     if (shortNeeded <= available) return;
     ratio = available / shortNeeded;
   }
 
-  node.style.transform = `scaleX(${Math.max(MIN_SQUEEZE, ratio)})`;
+  const applied = Math.max(shrinks ? MIN_SHRINK : MIN_SQUEEZE, ratio);
+
+  if (!shrinks) {
+    node.style.transform = `scaleX(${applied})`;
+    return;
+  }
+
+  // Floored to whole pixels rather than rounded: rounding up would put the
+  // name a hair past the ceiling it was just measured against, which is the one
+  // direction that matters.
+  node.style.fontSize = `${Math.floor(baseSize * applied)}px`;
 }
 
 const refit = () => fitTargets.forEach(fitText);
@@ -593,6 +731,11 @@ function applySeqConfig(seq) {
   // The prism arrives in rings out from the middle, so its step is the ring.
   for (const tile of prismTiles) {
     tile.style.setProperty('--prism-delay', `${Number(tile.dataset.ring) * seq.openStaggerMs}ms`);
+  }
+
+  // The mosaic, the same way - it is the prism on a square grid.
+  for (const tile of mosaicTiles) {
+    tile.style.setProperty('--mosaic-delay', `${Number(tile.dataset.ring) * seq.openStaggerMs}ms`);
   }
 
   // The pulse throws one ring per step, in order.

@@ -834,6 +834,21 @@ function bestMatchEntry(arrays, matchId) {
   return candidates[0]?.entry ?? null;
 }
 
+/**
+ * Why a match id came back with nothing, in the operator's terms.
+ *
+ * The two cases want opposite advice and neither is an error to fix. Reached by
+ * a Riot ID, the id came off a list this tool showed, so a miss means the list
+ * has gone stale. Reached by id alone - the match-id hook - nothing has claimed
+ * the match exists yet, and the likeliest reason is that it finished seconds
+ * ago: tracker indexes a game some time after the client knows about it, so the
+ * answer is to press the button again rather than to change anything.
+ */
+const notFoundHint = (handle) =>
+  handle
+    ? 'Re-run the search to refresh the list - match ids expire from tracker over time.'
+    : 'tracker.gg has probably not indexed it yet. Wait a few seconds and press the button again.';
+
 export async function trackerMatchDetail(config, { matchId, handle, type }) {
   const cacheKey = `${handle}::${type}`;
   const cached = trackerListCache.get(cacheKey);
@@ -868,11 +883,7 @@ export async function trackerMatchDetail(config, { matchId, handle, type }) {
   }
 
   if (apiDeniedIt && !match) {
-    throw new ProviderError(
-      404,
-      'tracker.gg has no record of that match.',
-      'Re-run the search to refresh the list - match ids expire from tracker over time.',
-    );
+    throw new ProviderError(404, 'tracker.gg has no record of that match.', notFoundHint(handle));
   }
 
   // Fallback: drive the match page and take whatever it fetches for itself.
@@ -899,7 +910,9 @@ export async function trackerMatchDetail(config, { matchId, handle, type }) {
 
   // The list entry is a fallback and a tie-breaker, never an upgrade: only
   // consult it when the match page gave us nothing or gave us a lone player.
-  if (!match || trackerPlayerSegments(match).length < 2) {
+  // Skipped entirely without a handle - this is the one step that needs a
+  // profile to read, and a lookup driven by the match-id hook has none.
+  if (handle && (!match || trackerPlayerSegments(match).length < 2)) {
     try {
       let matches = cached && Date.now() - cached.at < TRACKER_LIST_TTL_MS ? cached.matches : null;
       if (!matches) matches = await trackerMatchesRaw(config, handle, type);
@@ -915,11 +928,7 @@ export async function trackerMatchDetail(config, { matchId, handle, type }) {
   }
 
   if (!match) {
-    throw new ProviderError(
-      404,
-      'That match could not be found on tracker.gg.',
-      'Re-run the search to refresh the list.',
-    );
+    throw new ProviderError(404, 'That match could not be found on tracker.gg.', notFoundHint(handle));
   }
 
   const summary = trackerSummary(match);

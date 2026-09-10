@@ -10,7 +10,7 @@
  *                   cookie - the id says which, the cookie says who.
  *   ?key=<key>      an OBS browser source or a game-client webhook. There is no
  *                   person and no cookie; the key is the whole credential. It
- *                   opens the output pages and the two webhooks and nothing
+ *                   opens the output pages and the webhooks and nothing
  *                   else, because it ends up written into OBS configuration and
  *                   read out over screen shares.
  *

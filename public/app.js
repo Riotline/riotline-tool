@@ -15,7 +15,7 @@
 import { onState } from './live.js';
 import { setLookupMatch } from './store.js';
 import { WATCH_MAX, isPermanentFailure, mapLimit, parseHandles, scoreboardReady } from './watch-core.js';
-import { SESSION_ID } from './session.js';
+import { SESSION_ID, outputUrl, targetKey } from './session.js';
 
 // ------------------------------------------------------------ elements ---
 
@@ -53,6 +53,13 @@ const els = {
   watchLogCopy: $('watch-log-copy'),
   watchBaseline: $('watch-baseline'),
   watchCheck: $('watch-check'),
+  watchPanel: $('watch-panel'),
+  matchIdPanel: $('match-id-panel'),
+  matchIdInput: $('match-id-input'),
+  matchIdGo: $('match-id-go'),
+  matchIdClear: $('match-id-clear'),
+  matchIdState: $('match-id-state'),
+  matchIdHook: $('match-id-hook'),
 };
 
 const state = {
@@ -212,6 +219,10 @@ function syncProviderUi() {
   els.typeField.hidden = !modes;
   els.routingBlock.hidden = current !== 'riot';
   els.henrikBlock.hidden = current !== 'henrik';
+  // Only tracker answers on a match id with no account attached to it. Henrik
+  // needs an affinity it cannot derive from the id, and Riot's endpoint needs a
+  // production key - offering the box for either would be offering a 400.
+  if (els.matchIdPanel) els.matchIdPanel.hidden = current !== 'tracker' || !config.trackerEnabled;
 
   if (modes) {
     els.matchType.replaceChildren(...modes.map((value) => el('option', { value, text: titleCase(value) })));
@@ -258,8 +269,9 @@ function syncFeatureUi() {
     }
   }
 
-  const panel = document.querySelector('.watch');
-  if (panel) panel.hidden = !config.watchEnabled;
+  // By id, not by class. There are two `.watch` panels now and querySelector
+  // returns the first, which would have hidden the wrong one.
+  if (els.watchPanel) els.watchPanel.hidden = !config.watchEnabled;
 }
 
 for (const radio of document.querySelectorAll('input[name="provider"]')) {
@@ -400,6 +412,11 @@ function showMatch(match, matchId) {
   setLookupMatch(match, state.handle);
 }
 
+/**
+ * @returns {Promise<boolean|null>} true if the detail loaded, false if the
+ *   lookup failed, null if a newer selection overtook this one - which is not
+ *   an outcome to report, because the newer one will report its own.
+ */
 async function selectMatch(matchId) {
   state.selectedMatchId = matchId;
   markSelected(matchId);
@@ -418,11 +435,13 @@ async function selectMatch(matchId) {
       type: els.matchType.value,
     });
 
-    if (state.selectedMatchId !== matchId) return; // a newer selection won
+    if (state.selectedMatchId !== matchId) return null; // a newer selection won
 
     showMatch(match, matchId);
+    return true;
   } catch (error) {
     showError(els.details, error);
+    return false;
   }
 }
 
@@ -1087,6 +1106,130 @@ els.watchIds.addEventListener('input', syncBurstButtons);
 
 els.watchIds.value = localStorage.getItem('watch-ids') ?? '';
 syncBurstButtons();
+
+// ------------------------------------------------- lookup by match id ---
+
+/**
+ * One match, straight from its id.
+ *
+ * The rest of this tab is a funnel - Riot ID, then a list, then a match - which
+ * is the right shape when the question is "what did this player just play".
+ * When something already knows the id, every step of that funnel is a tracker.gg
+ * page load spent rediscovering a fact the operator was handed.
+ *
+ * The id arrives either by paste or on the match-id hook, and both land in the
+ * same box for the same reason the paste box exists at all: the operator sees
+ * what is about to be looked up, and can fix it, before anything is fetched.
+ *
+ * Nothing here fires automatically. A match is at its least findable in the
+ * seconds after it ends - tracker indexes it some time later - so an automatic
+ * lookup would reliably spend itself on a 404 and then sit there looking done.
+ * The button is the retry, and the operator is the one who knows whether the
+ * scoreboard is needed yet.
+ */
+if (els.matchIdPanel) {
+  /*
+   * Pill text is kept short deliberately.
+   *
+   * This column is a fixed 266px whatever the window is doing, and the heading
+   * it sits in is 23px tall until the pill needs a second line, at which point
+   * it becomes 39px and everything below it steps down. Measured: anything up
+   * to about 115px stays on one line, which is roughly fifteen characters of
+   * the uppercase 11px face. Longer than that and the panel moves every time a
+   * lookup finishes. The details panel is where the sentence goes.
+   */
+  const setState = (text, tone = '') => {
+    els.matchIdState.textContent = text;
+    els.matchIdState.hidden = !text;
+    els.matchIdState.className = `pill${tone ? ` ${tone}` : ''}`;
+  };
+
+  const syncGo = () => {
+    els.matchIdGo.disabled = !els.matchIdInput.value.trim();
+  };
+
+  // Filled in asynchronously, like the OBS and roster URLs: the key belongs to
+  // the account, so the markup holds a placeholder until it resolves.
+  void targetKey().then((key) => {
+    const url = outputUrl('/api/match-id', key);
+    els.matchIdHook.textContent = url;
+    els.matchIdHook.title = url;
+  });
+
+  els.matchIdInput.addEventListener('input', syncGo);
+  syncGo();
+
+  els.matchIdClear.addEventListener('click', () => {
+    els.matchIdInput.value = '';
+    setState('');
+    syncGo();
+    els.matchIdInput.focus();
+  });
+
+  els.matchIdGo.addEventListener('click', async () => {
+    const matchId = els.matchIdInput.value.trim();
+    if (!matchId) return;
+
+    els.matchIdGo.disabled = true;
+    setState('Looking up', 'busy');
+
+    // A tracker lookup drives a real browser, so this is seconds rather than
+    // milliseconds - the disabled button is the whole of the double-press guard.
+    const outcome = await selectMatch(matchId);
+
+    els.matchIdGo.disabled = false;
+    syncGo();
+
+    // null means a newer selection overtook this one; it reports itself.
+    if (outcome === null) return setState('');
+    // The failure is spelled out in the details panel, hint and all. The pill
+    // only has to say which way it went.
+    setState(outcome ? 'Loaded' : 'Not found yet', outcome ? 'ok' : 'warn');
+  });
+
+  /*
+   * The hook, arriving over the same stream as everything else.
+   *
+   * Only a *changed* id fills the box. A client that re-posts the same match
+   * every few seconds is a normal thing to configure, and each of those would
+   * otherwise wipe whatever the operator had typed.
+   *
+   * And not while they are typing in it either: an id that lands mid-paste
+   * waits for the box to lose focus rather than overwriting under the cursor.
+   */
+  let pending = null;
+
+  const fill = (matchId) => {
+    els.matchIdInput.value = matchId;
+    syncGo();
+    setState('From the client', 'ok');
+  };
+
+  els.matchIdInput.addEventListener('blur', () => {
+    if (!pending) return;
+    fill(pending);
+    pending = null;
+  });
+
+  let known = null;
+
+  onState('matchFeed', (next) => {
+    const matchId = String(next?.matchId ?? '');
+    if (!matchId) return;
+
+    // The first frame replays whatever the session already held, which is how a
+    // dashboard opened after the match ended still finds the id waiting.
+    if (matchId === known) return;
+    known = matchId;
+
+    if (document.activeElement === els.matchIdInput && els.matchIdInput.value.trim()) {
+      pending = matchId;
+      setState('New id waiting', 'warn');
+      return;
+    }
+    fill(matchId);
+  });
+}
 
 // ------------------------------------------------------------ exports ---
 

@@ -127,8 +127,47 @@
           </div>
         </div>
 
+        <!-- Straight to one match, when something already knows its id. Only
+             tracker answers on an id alone, so this hides for the other two. -->
+        <section class="watch" id="match-id-panel" hidden>
+          <h3 class="watch-title">
+            Match ID lookup
+            <span id="match-id-state" class="pill" hidden></span>
+          </h3>
+
+          <label class="field">
+            <span>Match ID</span>
+            <input
+              id="match-id-input"
+              type="text"
+              spellcheck="false"
+              placeholder="Paste an ID, or let the webhook fill it in"
+            />
+          </label>
+          <p class="field-help">
+            No Riot ID and no match list - straight to the scoreboard. A match that has just ended will not be
+            on tracker.gg for a little while, so an empty answer here usually means "not yet": wait a few
+            seconds and press again.
+          </p>
+
+          <div class="watch-actions">
+            <button id="match-id-go" type="button" class="btn btn-primary" disabled>Get match details</button>
+            <button id="match-id-clear" type="button" class="btn btn-ghost">Clear</button>
+          </div>
+
+          <!-- The third hook. Post the match id here - as the bare string, or
+               as {"matchId": "..."} - and the box above fills itself in. -->
+          <label class="obs-url">
+            <span>Match ID webhook</span>
+            <span class="obs-url-row">
+              <code id="match-id-hook">/api/match-id</code>
+              <button type="button" class="btn-copy" data-copy-target="match-id-hook" title="Copy URL">Copy</button>
+            </span>
+          </label>
+        </section>
+
         <!-- Post-match lookup: baseline during the game, results the moment it ends. -->
-        <section class="watch">
+        <section class="watch" id="watch-panel">
           <h3 class="watch-title">
             Post-match lookup
             <span id="watch-state" class="pill" hidden></span>

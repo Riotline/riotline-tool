@@ -79,6 +79,7 @@ import {
   ingestGame,
   graphicPatch,
   ingestRoster,
+  matchIdFrom,
   settleSelect,
   stopTimer,
   stageBands,
@@ -462,6 +463,66 @@ function makeLookupSlot() {
 }
 
 /**
+ * The last match id the game client reported, for this session.
+ *
+ * In memory and never on disk, the same call makeLookupSlot makes and for a
+ * related reason: this is a hand-off, not a setting. It has to survive a
+ * dashboard reload - the stream replays current state to whoever connects, so
+ * an operator who opens the tab after the match ended still finds the id
+ * waiting - but it must not survive a restart, because a match id repopulating
+ * the box an hour later is a prompt to look up a game that is long off air.
+ *
+ * One slot per session, like the lookup slot. Two operators running two matches
+ * are each pointing their own game client at their own key, and an id from one
+ * production appearing in the other's box would be worse than useless.
+ */
+function makeMatchFeed() {
+  let revision = 0;
+  let state = { matchId: '', receivedAt: 0, count: 0 };
+  const listeners = new Set();
+
+  return {
+    get revision() {
+      return revision;
+    },
+    get state() {
+      return state;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    /**
+     * @returns {boolean} whether this was a new id - a client that re-posts the
+     *   same match every few seconds should not keep re-arming the dashboard
+     */
+    receive(matchId) {
+      const fresh = matchId !== state.matchId;
+
+      /*
+       * `count` moves even when the id does not.
+       *
+       * The dashboard only fills the box on a change, but "we heard from the
+       * client again" is still worth being able to see - it is the difference
+       * between a hook that is wired up and quiet and one that was never wired
+       * up at all, which is otherwise indistinguishable from the operator's
+       * side at exactly the moment they need to know.
+       */
+      state = { matchId, receivedAt: Date.now(), count: state.count + 1 };
+      revision += 1;
+      for (const listener of listeners) {
+        try {
+          listener({ revision, state });
+        } catch {
+          /* a dead connection must not take the feed down with it */
+        }
+      }
+      return fresh;
+    },
+  };
+}
+
+/**
  * A tracker.gg Cloudflare solve any operator can drive from their own browser.
  *
  * The clearance is bound to the IP and user agent that earned it, so the solve
@@ -797,6 +858,8 @@ function installSession(bundle) {
   // Every session gets its own lookup slot - see makeLookupSlot. It is not a
   // persisted store, so the registry does not know about it.
   bundle.lookups = makeLookupSlot();
+  // Likewise the match-id feed: in memory, per session, never flushed.
+  bundle.matchFeed = makeMatchFeed();
 
   /**
    * Auto-hide.
@@ -1171,9 +1234,23 @@ async function handleApi(pathname, params, ctx) {
       }
 
       if (provider === 'tracker') {
+        /*
+         * The handle is optional here, and only here.
+         *
+         * A match list needs a profile to read - there is nowhere else a list
+         * of somebody's games exists. A single match does not: tracker's own
+         * backend answers on the id alone, and so does the match page. All the
+         * handle buys is the third fallback, which reads the id back out of a
+         * cached profile list, so its absence costs one retry route and nothing
+         * else. That is what lets the match-id hook hand an operator a game
+         * nobody has searched for yet.
+         */
         const handle = (params.get('handle') ?? '').trim();
-        if (!handle) throw new ProviderError(400, 'Missing Riot ID handle.');
-        return announceLookup(lookups, handle, type, () => trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type }));
+        // The id is the useful label when there is no handle - it is what the
+        // other dashboards see in the "looking up" indicator.
+        return announceLookup(lookups, handle || matchId, type, () =>
+          trackerMatchDetail(TRACKER_CONFIG, { matchId, handle, type }),
+        );
       }
 
       return riotMatchDetail(riotGet, { matchId, region });
@@ -1845,10 +1922,11 @@ const KEYED_ROUTES = new Set([
   '/api/events',
   '/api/roster',
   '/api/game',
+  '/api/match-id',
 ]);
 
-/** The two webhooks. A key is the only credential a game client can carry. */
-const WEBHOOK_ROUTES = new Set(['/api/roster', '/api/game']);
+/** The webhooks. A key is the only credential a game client can carry. */
+const WEBHOOK_ROUTES = new Set(['/api/roster', '/api/game', '/api/match-id']);
 
 /** Routes only an administrator may reach. */
 const isAdminRoute = (pathname) => pathname.startsWith('/api/admin/');
@@ -3183,7 +3261,7 @@ async function route(req, res) {
   if (ctx.viaKey) {
     // A session key on a route that is not a browser source or a webhook. It
     // lives in OBS configuration and gets read out over screen shares, so it
-    // opens exactly two doors and this is not one of them.
+    // opens exactly two kinds of door and this is not one of them.
     if (!KEYED_ROUTES.has(pathname)) return unauthorised(res, 403, 'That key is only good for the output pages and the webhooks.');
     if (!ctx.bundle) return unauthorised(res, 404, 'No session has that key. It may have been rotated.');
   } else if (!ctx.user) {
@@ -3248,7 +3326,7 @@ async function route(req, res) {
 
 /** The SSE routes. Returns true if this request was one. */
 async function handleStream(pathname, req, res, ctx) {
-  const { graphics, winner, select, globals, lookups } = ctx.bundle;
+  const { graphics, winner, select, globals, lookups, matchFeed } = ctx.bundle;
 
   if (pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res), true;
   if (pathname === '/api/winner/events') return streamState(winner, 'winner', req, res), true;
@@ -3276,6 +3354,7 @@ async function handleStream(pathname, req, res, ctx) {
         ['select', select],
         ['global', globals],
         ['lookup', lookups],
+        ['matchFeed', matchFeed],
         // The one entry that is not this session's: there is a single browser
         // on this machine, so a solve concerns everybody. Filtered so the
         // password reaches only whoever started it.
@@ -3293,7 +3372,7 @@ async function handleStream(pathname, req, res, ctx) {
 /** The write routes. `ctx.bundle` is the session, and it may be written to. */
 async function handlePost(pathname, req, res, ctx) {
   const bundle = ctx.bundle;
-  const { graphics, winner, select, globals, aliases } = bundle;
+  const { graphics, winner, select, globals, aliases, matchFeed } = bundle;
 
   switch (pathname) {
     // Starting a login is a POST because it launches a browser; the progress
@@ -3454,6 +3533,53 @@ async function handlePost(pathname, req, res, ctx) {
           map: select.state.mapName,
           onAir: select.state.anim.visible,
         };
+      });
+
+    /*
+     * The match-id feed.
+     *
+     * A third hook rather than a field on /api/game, on the same reasoning that
+     * split the first two: this one hands the operator something to act on
+     * rather than driving a graphic. Nothing it receives reaches air by itself -
+     * it fills a box on the lookup tab and waits to be pressed, because the
+     * moment a match ends is the moment tracker.gg has least chance of knowing
+     * about it, and a lookup that fired automatically would spend its one shot
+     * on a 404.
+     *
+     * The body may be the bare id as text/plain. A game client posting a string
+     * is not going to negotiate a content type, and the key path is exempt from
+     * the CSRF check precisely because it carries no cookie to ride.
+     */
+    case '/api/match-id':
+      return handleWrite(res, async () => {
+        const raw = (await readBody(req, MAX_BODY_BYTES)).toString('utf8').trim();
+
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          // Not JSON, so the body is the id. This is the documented shape.
+          parsed = raw;
+        }
+
+        const matchId = matchIdFrom(parsed);
+        if (!matchId) {
+          // 400 rather than a quiet 200: unlike a roster event that is simply
+          // not ours, there is exactly one thing this hook is for, and a client
+          // that posted something else is misconfigured and should be told.
+          throw new ProviderError(
+            400,
+            'No usable match id in that payload.',
+            'Post the id on its own, or as {"matchId": "..."}. Letters, digits, - and _ only.',
+          );
+        }
+
+        const fresh = matchFeed.receive(matchId);
+        // Once per match, so info is the right level - and the id is the whole
+        // point of the line, which is why it is not redacted.
+        log.info('feed', `match id ${fresh ? 'received' : 're-sent'}: ${matchId}`, { session: ctx.owner?.id });
+
+        return { matchId, fresh };
       });
 
     case '/api/aliases':

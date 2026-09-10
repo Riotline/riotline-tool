@@ -445,16 +445,22 @@ https://gfx.example.com/select.html?key=<session key>
 Browser source, **1920×1080**, no custom CSS. The scoreboard and agent select are
 transparent; the winner sequence is full screen.
 
-The two game webhooks carry the same key:
+The game webhooks carry the same key:
 
 ```
 POST https://gfx.example.com/api/roster?key=<session key>
 POST https://gfx.example.com/api/game?key=<session key>
+POST https://gfx.example.com/api/match-id?key=<session key>
 ```
+
+The third takes a match id and nothing else — the bare string as the body is
+fine. It puts the id in the **Match ID lookup** box on the lookup tab and stops
+there; nothing is fetched and nothing reaches air until an operator presses the
+button.
 
 **Treat the session key as a password that lives in a URL.** Anyone holding it
 can watch your graphics and feed your agent select. It opens those pages and
-those two webhooks and nothing else — never the dashboard, never your account.
+those webhooks and nothing else — never the dashboard, never your account.
 If one ends up on stream, press **Make a new key** on the Account tab and re-copy
 the URLs. Every old URL stops working at once, so do not do it mid-show.
 
@@ -585,7 +591,7 @@ They are deliberately separate, and weakest last:
 | --- | --- | --- |
 | password | scrypt hash on disk | making a login |
 | login token | httpOnly cookie | the dashboard, as that person |
-| session key | `?key=` in OBS and webhook URLs | that session's output pages and its two webhooks |
+| session key | `?key=` in OBS and webhook URLs | that session's output pages and its three webhooks |
 
 The session key is weak by design — it is typed into OBS configuration and read
 aloud over screen shares. `KEYED_ROUTES` in `server.js` is the complete list of

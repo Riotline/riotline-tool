@@ -570,6 +570,7 @@ function buildSeqEditor() {
         'sides; Impact slams it in behind a flash of the accent colour; Streak sends an accent bolt across and ' +
         'drags the backdrop in behind it; Facets cascades angled shards across the frame until they lock together; ' +
         'Prism spins in a lattice of diamonds outlined and lit in the accent colour, in rings out from the middle; ' +
+        'Mosaic is the same in squares, growing rather than spinning, for a cleaner grid and fewer layers; ' +
         'Pulse throws rings of neon out from the centre and opens the backdrop as a circle behind the last of them.',
     ),
     help(
@@ -645,6 +646,18 @@ function styleField(entry) {
       return logoField(entry.label, path);
     case 'ratio':
       return rangeField(entry.label, path);
+    // A slider like a ratio, but over the field's own range rather than 0..1 -
+    // so the schema decides how far a multiplier may go, not this switch. Shown
+    // as a percentage: 100% reads as "the size it was" far more directly than
+    // 1.00 does, and this is the one slider here with a default worth returning
+    // to rather than a taste to be dialled in.
+    case 'scale':
+      return rangeField(entry.label, path, {
+        min: entry.min,
+        max: entry.max,
+        step: entry.step,
+        readout: (value) => `${Math.round(value * 100)}%`,
+      });
     case 'bool':
       return checkField(entry.label, path);
     case 'px':
@@ -663,13 +676,37 @@ function buildStyleEditor() {
     const columns = entries.every((entry) => entry.type === 'bool') ? null : 2;
     groups.push(subhead(group), grid(columns, entries.map(styleField)));
 
+    if (group === 'Typeface') {
+      groups.push(
+        help(
+          'The logo itself is on the Global tab - it is shared with the other two graphics. These two decide what ' +
+            'this sequence does with it: where it sits, and how big. Size is one multiplier over every slot, so a ' +
+            'square crest and a wide wordmark can each be made to sit properly without touching four numbers. ' +
+            '100% is the original size. In the corner it grows down and to the left from where it is pinned; ' +
+            'in a scene it grows the row it is in, so the bands under it move down to make room.',
+        ),
+      );
+    }
+
+    if (group === 'Layout') {
+      groups.push(
+        help(
+          'Max width caps the winner name as a share of the frame, so a long org does not run edge to edge - past ' +
+            'it the name condenses, and past that it falls back to the tricode. Vertical spacing scales the gaps ' +
+            'between every band on all three slides at once; it is the one to reach for after changing the logo ' +
+            'size, since the space under the mark was set when the mark could not grow.',
+        ),
+      );
+    }
+
     if (group === 'Texture') {
       groups.push(
         help(
           'A finish on the backdrop, above the map plate and under the text, for the whole sequence. The lattice is ' +
-            'the prism opening standing still, so the score line sits on the thing the opening built. Keep it low - ' +
-            'the moment it reads as a pattern it is competing with the team name. It also gives an encoder some ' +
-            'structure to hold on to, which is what stops a blurred splash banding on a stream.',
+            'the prism opening standing still and the grid is the mosaic, so the score line sits on the thing the ' +
+            'opening built - pair them up, and set the size to 240 for a grid that matches the mosaic cell for ' +
+            'cell. Keep it low - the moment it reads as a pattern it is competing with the team name. It also ' +
+            'gives an encoder some structure to hold on to, which is what stops a blurred splash banding on a stream.',
         ),
       );
     }
