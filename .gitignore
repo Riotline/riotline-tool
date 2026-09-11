@@ -6,3 +6,4 @@ node_modules/
 tools/probe-output/
 .state/
 CLAUDE.md
+public/riot.txt
