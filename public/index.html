@@ -551,6 +551,75 @@
         </section>
 
         <!--
+          Companion.
+
+          This panel is the documentation. Companion's generic WebSocket module
+          discovers nothing on its own - the operator hand-types a JSON path and
+          a variable name for every value they want on a button - so a table of
+          exact names is the difference between it working and it silently not.
+          Both tables are built from public/companion-schema.js rather than
+          written here, so what is listed is what the server actually sends.
+
+          Starts with no key, and says so: the control channel operates the desk
+          and nobody gets one by default.
+        -->
+        <section class="panel" id="acc-companion-panel">
+          <h2 class="panel-title">Stream deck / Bitfocus Companion</h2>
+          <p class="field-help" id="acc-companion-intro"></p>
+
+          <div id="acc-companion-off" hidden>
+            <p class="field-help">
+              You have no control key, so nothing can drive your graphics remotely.
+              Create one only if you are going to use it.
+            </p>
+          </div>
+
+          <div id="acc-companion-on" hidden>
+            <p class="obs-url"><code id="acc-companion-url">-</code></p>
+            <p class="field-help">
+              Paste that into Companion: <strong>Connections &rarr; add "Generic: WebSocket" &rarr; URL</strong>.
+              It carries your control key, so treat it as a password - unlike the OBS key it can
+              show, hide and reset your graphics.
+            </p>
+          </div>
+
+          <div class="tracker-login-row">
+            <button type="button" class="btn" id="acc-companion-copy" hidden>Copy</button>
+            <button type="button" class="btn" id="acc-companion-new">Create a control key</button>
+            <button type="button" class="btn btn-danger" id="acc-companion-clear" hidden>Remove it</button>
+          </div>
+
+          <details class="companion-docs">
+            <summary>Button actions - what to send</summary>
+            <p class="field-help">
+              One line in <strong>Send generic command</strong>, on the button's press action.
+              Case and separator do not matter, and <code>{"op":"winner.stage","value":2}</code>
+              is accepted where an action needs a number.
+            </p>
+            <div id="acc-companion-ops"></div>
+          </details>
+
+          <details class="companion-docs">
+            <summary>Button feedback - the variables</summary>
+            <p class="field-help">
+              Companion creates none of these on its own. For each one you want, add the feedback
+              <strong>"Update variable with value from WebSocket message"</strong> to a button, put
+              the name in <strong>both</strong> the JSON Path and the Variable box, and read it back
+              as <code>$(&lt;connection&gt;:&lt;name&gt;)</code>. The separator is a dot - the module's
+              own help page says slashes, and that is wrong. A path that matches nothing fails
+              silently and leaves the old value on screen.
+            </p>
+            <p class="field-help">
+              Put every one of these feedbacks on a single spare button and read the variables from
+              the buttons that show them: a variable only exists while some button subscribes to it.
+              To colour a button, use Companion's own <strong>Variable: Check value</strong> against
+              the <code>_n</code> form - it is 1 or 0, which compares cleanly where a true/false may not.
+            </p>
+            <div id="acc-companion-vars"></div>
+          </details>
+        </section>
+
+        <!--
           Hidden entirely on a server with no Discord configured, rather than
           shown greyed out: an operator has no way to act on it and no reason to
           wonder about it.

@@ -110,9 +110,16 @@ routing, and it buys nothing here on its own.
 
 Two things must be true of whatever you put in front:
 
-1. **It must forward WebSocket upgrades.** The Cloudflare-solve viewer is a
-   websocket under `/tracker-login/`. Without upgrade support the panel loads
-   and then sits there connecting for ever.
+1. **It must forward WebSocket upgrades.** Two things need them: the
+   Cloudflare-solve viewer under `/tracker-login/`, and the Bitfocus Companion
+   control channel at `/api/companion`. Without upgrade support the solve panel
+   loads and then sits there connecting for ever, and a stream deck reconnects
+   in a loop with its buttons dark.
+
+   A proxy that idles connections out will also drop a control channel that is
+   behaving correctly by being quiet between cues. The server pings every 30
+   seconds to hold it open, but a timeout shorter than that will still win —
+   `proxy_read_timeout 24h;` in the nginx block below covers both.
 2. **It must not buffer server-sent events.** Every graphic updates over SSE. A
    proxy that buffers will make the dashboard and every OBS source freeze —
    `nginx` needs `proxy_buffering off;` (the server already sends

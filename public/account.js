@@ -14,6 +14,7 @@
 
 import { el } from './fields.js';
 import { SETTING_FIELDS } from './settings-schema.js';
+import { COMPANION_GRAPHICS, companionVariables } from './companion-schema.js';
 import { SESSION_ID, account, refreshAccount, switchTo } from './session.js';
 
 const $ = (id) => document.getElementById(id);
@@ -68,6 +69,17 @@ const els = {
   key: $('acc-key'),
   copyKey: $('acc-copy-key'),
   rotate: $('acc-rotate'),
+
+  companionPanel: $('acc-companion-panel'),
+  companionIntro: $('acc-companion-intro'),
+  companionOff: $('acc-companion-off'),
+  companionOn: $('acc-companion-on'),
+  companionUrl: $('acc-companion-url'),
+  companionCopy: $('acc-companion-copy'),
+  companionNew: $('acc-companion-new'),
+  companionClear: $('acc-companion-clear'),
+  companionOps: $('acc-companion-ops'),
+  companionVars: $('acc-companion-vars'),
   grants: $('acc-grants'),
 
   discordPanel: $('acc-discord-panel'),
@@ -185,6 +197,107 @@ function paintAccount() {
   els.note.textContent = `Passwords must be at least ${me.passwordMin} characters.`;
   paintGrants();
   paintDiscord();
+  paintCompanion();
+}
+
+/**
+ * The Companion panel.
+ *
+ * The two tables are built once and never rebuilt - they come from the schema,
+ * not from the account - so only the key half repaints.
+ */
+let companionTablesBuilt = false;
+
+function paintCompanion() {
+  if (!els.companionPanel) return;
+
+  const enabled = me.companion?.enabled !== false;
+  const has = Boolean(me.user.hasControlKey);
+
+  els.companionIntro.textContent = enabled
+    ? 'Drive the transport from a stream deck, and light the buttons up with what is actually on air. ' +
+      'This uses its own key, not the OBS one - so removing it stops the stream deck without touching a browser source.'
+    : 'An administrator has switched the control channel off on this server, so this key will not connect. ' +
+      'It is kept, and starts working again the moment the switch goes back on.';
+
+  els.companionOff.hidden = has;
+  els.companionOn.hidden = !has;
+  els.companionCopy.hidden = !has;
+  els.companionClear.hidden = !has;
+  els.companionNew.textContent = has ? 'Replace the key' : 'Create a control key';
+
+  if (has && me.user.controlKey) {
+    /*
+     * Built from the page's own location rather than a value from the server.
+     * The dashboard is already open on the address that works from here -
+     * through a tunnel, over a LAN, or on localhost - and a server that tried
+     * to name itself would be guessing at which of those the operator meant.
+     */
+    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const path = me.companion?.path ?? '/api/companion';
+    els.companionUrl.textContent = `${scheme}://${window.location.host}${path}?key=${me.user.controlKey}`;
+  }
+
+  if (!companionTablesBuilt) {
+    companionTablesBuilt = true;
+    buildCompanionTables();
+  }
+}
+
+/**
+ * Both reference tables, straight out of the shared schema.
+ *
+ * Note `el()` takes TEXT as its fourth argument, not children - so every row
+ * is assembled with append rather than built in one call.
+ */
+function buildCompanionTables() {
+  const opBlocks = [];
+  const varBlocks = [];
+
+  const codeCell = (text) => {
+    const td = el('td');
+    td.append(el('code', null, {}, text));
+    return td;
+  };
+
+  const table = (rows) => {
+    const body = el('tbody');
+    body.append(...rows);
+    const node = el('table', 'companion-table');
+    node.append(body);
+    return node;
+  };
+
+  for (const graphic of COMPANION_GRAPHICS) {
+    const opRows = graphic.ops.map((op) => {
+      const row = el('tr', op.danger ? 'is-danger' : null);
+      row.append(codeCell(`${graphic.key}.${op.key}${op.arg ? `  (+ ${op.arg})` : ''}`), el('td', null, {}, op.help));
+      return row;
+    });
+    opBlocks.push(
+      el('h3', 'companion-heading', {}, graphic.label),
+      el('p', 'field-help', {}, graphic.note),
+      table(opRows),
+    );
+
+    const varRows = companionVariables(graphic.key)
+      // The 1/0 twins would double the table and say nothing new. The note
+      // above it explains them once; listing thirty of them would bury the
+      // names somebody actually has to read.
+      .filter((field) => field.kind !== 'lampNumber')
+      .map((field) => {
+        const row = el('tr');
+        row.append(
+          codeCell(field.key),
+          el('td', null, {}, field.kind === 'lamp' ? `${field.label}  -  also ${field.key}_n as 1/0` : field.label),
+        );
+        return row;
+      });
+    varBlocks.push(el('h3', 'companion-heading', {}, graphic.label), table(varRows));
+  }
+
+  els.companionOps.replaceChildren(...opBlocks);
+  els.companionVars.replaceChildren(...varBlocks);
 }
 
 /**
@@ -301,6 +414,49 @@ els.rotate.addEventListener('click', async () => {
     els.key.textContent = me.user.sessionKey;
     await refreshAccount();
     toast('New key made - re-copy the OBS and webhook URLs');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+els.companionCopy.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(els.companionUrl.textContent);
+    toast('Companion URL copied');
+  } catch {
+    toast('Could not reach the clipboard - select the URL and copy it by hand');
+  }
+});
+
+els.companionNew.addEventListener('click', async () => {
+  // Only warns when there is something to break. Making a first key breaks
+  // nothing, and a confirmation on it would just be noise.
+  if (me?.user?.hasControlKey) {
+    const warning =
+      'Replace the control key?\n\nAny stream deck using the old one stops working at once, and disconnects now. Your OBS sources are not affected.';
+    if (!window.confirm(warning)) return;
+  }
+
+  try {
+    const payload = await post('/api/account/control-key', {});
+    me.user = payload.user;
+    paintCompanion();
+    await refreshAccount();
+    toast(payload.user.hasControlKey ? 'Control key ready - paste the URL into Companion' : 'Control key made');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+els.companionClear.addEventListener('click', async () => {
+  if (!window.confirm('Remove the control key?\n\nAnything connected now is disconnected, and nothing can drive your graphics remotely until you make a new one.')) return;
+
+  try {
+    const payload = await post('/api/account/control-key', { action: 'clear' });
+    me.user = payload.user;
+    paintCompanion();
+    await refreshAccount();
+    toast('Control key removed');
   } catch (error) {
     toast(error.message);
   }

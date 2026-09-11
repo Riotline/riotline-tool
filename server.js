@@ -58,6 +58,8 @@ import {
 } from './auth.js';
 import { makeMediaOwners, makeSessionRegistry } from './sessions.js';
 import { LOG_LEVELS, captureConsole, makeLogger, safeUrl as safeLogUrl } from './log.js';
+import { makeCompanionHub } from './companion.js';
+import { refuseUpgrade } from './websocket.js';
 import {
   ANIM_TIER_COUNT,
   FONT_CHOICES,
@@ -182,6 +184,16 @@ const trackerOn = () => TRACKER_AVAILABLE && settings.state.tracker;
 
 /** Is the multi-account post-match watch allowed right now? */
 const watchOn = () => settings.state.watch;
+
+/*
+ * The Companion control channel.
+ *
+ * One condition rather than tracker's two, and the asymmetry is the point: a
+ * websocket needs nothing of the machine that the server does not already
+ * have, so there is no capability to check and no env var that would say
+ * anything this does not.
+ */
+const companionOn = () => settings.state.companion;
 
 /**
  * The log.
@@ -834,6 +846,23 @@ const sessions = makeSessionRegistry({
   onCreate: installSession,
   log: (tag, message) => log.info(tag, message),
 });
+
+/**
+ * The Bitfocus Companion control channel.
+ *
+ * Server-wide, like the tracker browser and unlike a graphic: it is one hub
+ * holding every open socket, and each socket is bound to one account's session
+ * for its lifetime. Placed after the registry because it resolves a bundle
+ * through it, and before the routes because the upgrade listener closes over
+ * it.
+ */
+const companion = makeCompanionHub({
+  ownerForKey: (key) => users.resolveControlKey(key),
+  bundleFor: (id) => sessions.get(id),
+  enabled: companionOn,
+  log,
+});
+
 
 // Left where it is, and said out loud on boot. The single-user layout is not
 // migrated: a graphic.json from before accounts existed has no owner, and
@@ -1928,6 +1957,24 @@ const KEYED_ROUTES = new Set([
 /** The webhooks. A key is the only credential a game client can carry. */
 const WEBHOOK_ROUTES = new Set(['/api/roster', '/api/game', '/api/match-id']);
 
+/**
+ * The Companion control channel - and the reason it is NOT in the list above.
+ *
+ * KEYED_ROUTES is a list rather than a rule so that every new route forces the
+ * question, and this is the route the question was for. The answer is no: that
+ * list ends "a key shows a graphic and feeds it a lobby; it does not operate
+ * the desk", and show / hide / next / swap / reset is the desk. Putting this
+ * path in there would not have been adding a route, it would have been
+ * deleting the sentence - and every session key already sitting in an OBS
+ * config would have silently become a remote control for a live broadcast.
+ *
+ * So it takes a *different* credential, `user.controlKey`, resolved in the
+ * upgrade handler at the bottom of this file and nowhere near contextFor. It
+ * is also not an HTTP route at all: nothing serves it, and a GET lands on the
+ * 404 like any other unknown path.
+ */
+const COMPANION_PATH = '/api/companion';
+
 /** Routes only an administrator may reach. */
 const isAdminRoute = (pathname) => pathname.startsWith('/api/admin/');
 
@@ -2577,7 +2624,11 @@ async function handleAccount(pathname, req, res, ctx) {
 
   if (pathname === '/api/account/me') {
     return sendJson(res, 200, {
-      user: publicUser(user, { includeKey: true }),
+      // The control key travels only here: the caller's own account, over a
+      // cookie. Deliberately not in the login response and not in
+      // visibleSessions - see the note on publicUser.
+      user: publicUser(user, { includeKey: true, includeControlKey: true }),
+      companion: { enabled: companionOn(), path: COMPANION_PATH },
       sessions: visibleSessions(user),
       grantable: grantableUsers(user),
       passwordMin: PASSWORD_MIN,
@@ -2711,6 +2762,44 @@ async function handleAccount(pathname, req, res, ctx) {
         return { user: publicUser(users.byId(user.id), { includeKey: true }) };
       });
 
+    /*
+     * Mint, replace or withdraw the Companion control key.
+     *
+     * Its own route rather than a flag on /api/account/key, which is the whole
+     * reason there are two keys: rotating this one drops a stream deck and
+     * leaves every browser source alone, and rotating that one re-points OBS
+     * and leaves the stream deck running. One button doing both would take the
+     * graphics off air to fix a control channel.
+     */
+    case '/api/account/control-key':
+      return handleWrite(res, async () => {
+        const body = await readJsonBody(req);
+        const clearing = String(body?.action ?? '') === 'clear';
+
+        if (clearing) {
+          await users.clearControlKey(user.id);
+          log.info('account', `${user.username} withdrew their Companion control key`);
+        } else {
+          const had = Boolean(user.controlKey);
+          await users.rotateControlKey(user.id);
+          // At info either way: one of these is a new door and the other has
+          // just stopped somebody's stream deck working mid-show.
+          log.info('account', `${user.username} ${had ? 'made a new' : 'created a'} Companion control key`);
+        }
+
+        /*
+         * Every open channel for this account, dropped.
+         *
+         * Not optional and not cosmetic. A socket authenticates once, at the
+         * handshake, so one that is already open holds no credential to
+         * re-check - and without this, revoking a leaked key would leave the
+         * leak connected until somebody restarted the server.
+         */
+        companion.closeForOwner(user.id, clearing ? 'The control key was withdrawn.' : 'The control key changed.');
+
+        return { user: publicUser(users.byId(user.id), { includeKey: true, includeControlKey: true }) };
+      });
+
     case '/api/account/grant':
       return handleWrite(res, async () => {
         const body = await readJsonBody(req);
@@ -2803,6 +2892,18 @@ async function handleAdmin(pathname, req, res, ctx) {
       // A solve in progress on a source that has just been switched off has
       // nothing left to earn clearance for.
       if (!state.tracker && trackerLogin.state.active) trackerLogin.cancel();
+
+      /*
+       * A hidden panel is a courtesy, not a control - and neither is a refused
+       * handshake on its own. Sockets that are already open were authorised
+       * before the switch moved, so switching it off has to reach them too or
+       * an administrator's "off" leaves every stream deck in the building still
+       * driving the graphics.
+       */
+      if (before.companion !== state.companion) {
+        log.info('settings', `Companion control channel switched ${state.companion ? 'on' : 'off'}`, { by: ctx.user.username });
+        if (!state.companion) companion.closeAll('An administrator switched the control channel off.');
+      }
 
       await settings.flush();
       return { settings: state, available: { tracker: TRACKER_AVAILABLE, discord: DISCORD_AVAILABLE } };
@@ -3669,6 +3770,9 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     // in any bundle: the login table, whose lastSeen stamps are held in memory
     // between writes on purpose, and the media index, where a lost claim means
     // an uploader stops seeing their own file in the picker.
+    // Said properly rather than dropped: a close frame lets Companion show
+    // "disconnected" instead of retrying into a socket that is already gone.
+    companion.closeAll('The graphics server is shutting down.');
     logins.flush();
     mediaOwners.flush();
     void Promise.all(sessions.list().map((id) => flushSession(sessions.peek(id))))
@@ -3679,14 +3783,76 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-server.on('upgrade', (req, socket, head) => {
-  // The same check the HTTP side does. An upgrade that skipped it would be a way
-  // to reach the VNC socket without one, which is the whole door - and the
-  // websocket is the half that carries the keystrokes.
-  if (req.url?.startsWith(`${TRACKER_LOGIN_PREFIX}/`) && canOpenTrackerLogin(userFor(req))) {
-    return proxyTrackerLoginSocket(req, socket, head);
+/**
+ * An upgrade that a *browser* started somewhere else.
+ *
+ * Companion is not a browser and sends no Origin at all, so absent is the
+ * normal case and is allowed. A present-but-foreign Origin, though, can only
+ * have come from a page on somebody else's site, and this endpoint has no
+ * business being opened by one.
+ *
+ * It is defence in depth rather than the main lock - the credential is in the
+ * query string, not a cookie, so a hostile page would have to already know the
+ * control key. But the repo's own posture on this is that one real defence is
+ * not the whole of one, and the check costs a string compare.
+ */
+function foreignOriginUpgrade(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  try {
+    return new URL(origin).host !== String(req.headers.host ?? '');
+  } catch {
+    return true; // unparseable, so certainly not ours
   }
-  socket.destroy();
+}
+
+/*
+ * Every upgrade, inside one try.
+ *
+ * This listener sits outside the `.catch` that wraps the request path, and an
+ * upgrade is reachable without any credential at all - so a throw in here is a
+ * remote kill in exactly the way `GET /%ZZ` was, with as little in the log to
+ * say what happened. `safeUrl` is used for the same reason it is used there:
+ * `decodeURIComponent` throws on a malformed escape.
+ */
+server.on('upgrade', (req, socket, head) => {
+  /*
+   * Every path out of here - the tracker proxy, a refusal, a plain destroy -
+   * leaves a raw socket that can emit 'error' after we have stopped looking at
+   * it, and an unlistened 'error' on a socket exits the process. One listener
+   * at the top covers all of them; the handlers below add their own on top.
+   */
+  socket.on('error', (error) => log.debug('upgrade', `socket error: ${error.message}`));
+
+  try {
+    // The same check the HTTP side does. An upgrade that skipped it would be a way
+    // to reach the VNC socket without one, which is the whole door - and the
+    // websocket is the half that carries the keystrokes.
+    if (req.url?.startsWith(`${TRACKER_LOGIN_PREFIX}/`) && canOpenTrackerLogin(userFor(req))) {
+      return proxyTrackerLoginSocket(req, socket, head);
+    }
+
+    const url = safeUrl(req);
+
+    if (url?.pathname === COMPANION_PATH) {
+      if (foreignOriginUpgrade(req)) {
+        log.warn('companion', 'refused a control channel opened from another site');
+        return refuseUpgrade(socket, 403, 'This endpoint is not for cross-site use.');
+      }
+      // Async, and the only thing that could reject is opening the session -
+      // which handleUpgrade answers for itself. This catch is the backstop.
+      return void companion.handleUpgrade(req, url, socket, head).catch((error) => {
+        log.error('companion', `upgrade failed: ${error.message}`);
+        socket.destroy();
+      });
+    }
+
+    // Nothing else upgrades. No log line: an unmatched upgrade is a scanner.
+    socket.destroy();
+  } catch (error) {
+    log.error('upgrade', `${safeLogUrl(req.url)} threw`, { error: error?.stack ?? String(error) });
+    socket.destroy();
+  }
 });
 
 server.listen(PORT, HOST, () => {
@@ -3718,6 +3884,21 @@ server.listen(PORT, HOST, () => {
     }`,
   );
   console.log(`  Post-match      ${watchOn() ? 'multi-account watch enabled' : 'multi-account watch switched off'}`);
+  /*
+   * Two facts, because either one alone is misleading. The switch being on
+   * does not mean anybody can connect - every account starts with no control
+   * key - and a room full of control keys does nothing while the switch is off.
+   */
+  {
+    const withKeys = users.list().filter((entry) => entry.controlKey && !entry.disabled).length;
+    console.log(
+      `  Companion       ${
+        !companionOn()
+          ? 'switched off by an administrator'
+          : `ws://${shown}:${PORT}${COMPANION_PATH}  (${withKeys} account${withKeys === 1 ? '' : 's'} with a control key)`
+      }`,
+    );
+  }
   /*
    * Three states, like tracker.gg above, and the middle one names the variable.
    * "Discord is off" and "Discord is on but DISCORD_GUILD_ID is not a

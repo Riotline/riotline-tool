@@ -161,6 +161,38 @@ function cleanUser(input) {
     role: ROLES.includes(source.role) ? source.role : 'user',
     // The UUID that appears in OBS and webhook URLs for this user's session.
     sessionKey: text(source.sessionKey, '', 64) || randomUUID(),
+
+    /*
+     * The Companion control channel's key, and deliberately NOT the session key.
+     *
+     * The session key is the weak one on purpose - it is typed into OBS
+     * configuration, it sits in a browser source URL, and it gets read out over
+     * screen shares. What it opens is bounded by KEYED_ROUTES, and the comment
+     * on that list says what the bound is for: "A key shows a graphic and feeds
+     * it a lobby; it does not operate the desk."
+     *
+     * A control channel operates the desk. Show, hide, next, swap, reset - it
+     * is the desk. So reusing the session key would not have been adding a
+     * route to a list, it would have been deleting the sentence, and every OBS
+     * URL already in a config file somewhere would have quietly become a remote
+     * control for a live broadcast.
+     *
+     * Hence a second key with the same strength and a different blast radius.
+     * It never appears in a URL a browser loads, never in a browser source,
+     * and rotates on its own - so leaking one does not leak the other, and
+     * fixing one does not take the graphics off air.
+     *
+     * Blank until somebody asks for one, which is the opposite of sessionKey
+     * directly above. Deliberate, and the same rule the trackerLogin flag
+     * below follows: a *feature* that arrives switched off on upgrade is a
+     * nasty surprise, a *permission* that arrives switched on because a field
+     * was absent is a worse one. Every account minting a live remote control
+     * for its own broadcast on first load - one nobody asked for, nobody knows
+     * exists, and which sits in users.json being valid forever - is the second
+     * kind. So the socket refuses every account until one is minted, and the
+     * feature is genuinely inert on a server where nobody uses Companion.
+     */
+    controlKey: text(source.controlKey, '', 64),
     disabled: source.disabled === true,
     /*
      * May this account open a tracker.gg Cloudflare solve?
@@ -230,7 +262,7 @@ export const hasCredential = (user) => Boolean((user?.salt && user?.hash) || use
 export const canOpenTrackerLogin = (user) => Boolean(user) && (user.role === 'admin' || user.trackerLogin === true);
 
 /** What may be sent to a browser. Never the hash, never the salt. */
-export const publicUser = (user, { includeKey = false } = {}) => ({
+export const publicUser = (user, { includeKey = false, includeControlKey = false } = {}) => ({
   id: user.id,
   username: user.username,
   role: user.role,
@@ -264,6 +296,21 @@ export const publicUser = (user, { includeKey = false } = {}) => ({
     : null,
 
   ...(includeKey ? { sessionKey: user.sessionKey } : {}),
+
+  /*
+   * Whether a control key exists, always - the value itself, only when asked.
+   *
+   * Its own option rather than riding on `includeKey`, because the two travel
+   * to different places. `includeKey` is what puts the session key into the
+   * session list, so that somebody granted editor access can configure OBS
+   * against a colleague's production. A control key must not follow it there:
+   * a grant can be revoked in one write, and a token that had already been
+   * copied into a stream deck would outlive the revoke.
+   *
+   * The boolean is safe everywhere and is what the Account panel renders from.
+   */
+  hasControlKey: Boolean(user.controlKey),
+  ...(includeControlKey ? { controlKey: user.controlKey } : {}),
 });
 
 export function makeUserStore(filePath) {
@@ -305,6 +352,51 @@ export function makeUserStore(filePath) {
     byId: (id) => users.find((user) => user.id === String(id)) ?? null,
     byName,
     bySessionKey: (key) => users.find((user) => user.sessionKey === String(key)) ?? null,
+    /*
+     * The empty-string guard is the whole point of this being its own function.
+     *
+     * Most accounts have no control key, so `controlKey` is `''` on most
+     * records - and `find(user => user.controlKey === '')` matches the first
+     * of them. Without this line, a request with `?key=` and nothing after it
+     * would authenticate as somebody, and which somebody would depend on the
+     * order of users.json.
+     */
+    byControlKey: (key) => (String(key ?? '') ? (users.find((user) => user.controlKey === String(key)) ?? null) : null),
+
+    /**
+     * The Companion control channel's key, and why it was refused.
+     *
+     * Two separate namespaces of UUID now sit next to each other on the Account
+     * panel, and the failure they produce is identical from the far end: a
+     * socket that will not open. So this is the one lookup that reports which
+     * mistake was made, because "you used the other key" is unguessable from
+     * outside and obvious from in here.
+     *
+     * The hint never contains the value it was given. It says which *kind* of
+     * key arrived, which is a fact about the caller's configuration and not a
+     * secret, and it goes into a log buffer that is rendered in a browser.
+     *
+     * @returns {{owner: object|null, hint?: string}}
+     */
+    resolveControlKey(key) {
+      const wanted = String(key ?? '');
+      if (!wanted) return { owner: null, hint: 'No control key was sent.' };
+
+      // Never matches a blank field on an account that has not minted one.
+      const owner = users.find((user) => user.controlKey && user.controlKey === wanted);
+      if (owner) return { owner };
+
+      // The near miss, named. Both are UUIDs on the same panel.
+      if (users.some((user) => user.sessionKey === wanted)) {
+        return {
+          owner: null,
+          hint:
+            'That is the OBS session key, not the control key. They are different on purpose - ' +
+            'copy the one from the Companion panel on the Account tab.',
+        };
+      }
+      return { owner: null, hint: 'That control key matches no account. It may have been rotated.' };
+    },
 
     /**
      * The account a Discord identity signs into.
@@ -530,6 +622,39 @@ export function makeUserStore(filePath) {
       user.sessionKey = randomUUID();
       await persist();
       return user.sessionKey;
+    },
+
+    /**
+     * The control key, rotated on its own.
+     *
+     * Separate from rotateSessionKey and not folded into it, which is the point
+     * of having two keys at all: rotating this one drops the stream deck and
+     * leaves every browser source untouched, and rotating that one re-points
+     * OBS and leaves the stream deck running. A single "rotate my keys" would
+     * take the graphics off air to fix a control channel.
+     */
+    async rotateControlKey(id) {
+      const user = users.find((entry) => entry.id === String(id));
+      if (!user) throw new Error('No such user.');
+      user.controlKey = randomUUID();
+      await persist();
+      return user.controlKey;
+    },
+
+    /**
+     * Take the control key away entirely.
+     *
+     * Not the same as rotating it, and worth its own verb: rotating issues a
+     * new credential, and an operator who has stopped using Companion wants
+     * there to be no credential. Blank is the state a fresh account is in, so
+     * this genuinely returns the door to shut rather than fitting a new lock.
+     */
+    async clearControlKey(id) {
+      const user = users.find((entry) => entry.id === String(id));
+      if (!user) throw new Error('No such user.');
+      user.controlKey = '';
+      await persist();
+      return true;
     },
 
     async setGrant(ownerId, granteeId, level) {

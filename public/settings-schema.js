@@ -61,6 +61,28 @@ export const SETTING_FIELDS = [
       'tab when the source is tracker.gg.',
     off: 'The panel is hidden and the server refuses a watch lookup.',
   },
+  {
+    key: 'companion',
+    label: 'The Bitfocus Companion control channel',
+    default: true,
+    /*
+     * No `requires`, and that is the interesting thing about this one.
+     *
+     * tracker.gg needs an env var beside it because the machine has to be able
+     * to do it at all - a Chromium, a profile directory - and "an administrator
+     * turned this off" and "this deployment cannot" are different answers an
+     * operator deserves to tell apart. A websocket needs nothing the server does
+     * not already have, so there is no second question to ask and no env var
+     * that would be anything but a duplicate of this switch.
+     */
+    help:
+      'Lets a stream deck drive the transport - show, hide, next, swap - over a websocket, and ' +
+      'pushes each graphic’s state back so the buttons can light up. Every account holds its ' +
+      'own control key and starts without one, so turning this on grants nothing by itself. ' +
+      'Turning it off refuses the socket for everybody and drops any that are open, without ' +
+      'clearing anyone’s key - so it can be turned straight back on.',
+    off: 'The websocket answers as though the route does not exist, and open control channels are dropped.',
+  },
 ];
 
 export const SETTING_KEYS = SETTING_FIELDS.map((field) => field.key);

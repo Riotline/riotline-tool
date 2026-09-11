@@ -2447,3 +2447,59 @@ label.is-off {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ------------------------------------------------------- Companion panel ---
+ *
+ * Two reference tables the operator reads while typing into Companion, so the
+ * one thing they must do well is stay legible next to a second window. Hence
+ * monospace on the left column (the strings are copied by eye and a wrong
+ * character is a silent failure) and a scroll cap rather than a panel that
+ * grows to sixty rows and buries the buttons above it.
+ */
+.companion-docs > .field-help {
+  padding: 10px 12px 0;
+}
+
+.companion-heading {
+  margin: 14px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.companion-table {
+  width: 100%;
+  margin-bottom: 10px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.companion-table td {
+  padding: 5px 12px;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+  color: var(--text-dim);
+}
+
+/* Sized to the longest name so the descriptions line up down the table, but
+   able to give way on a narrow window rather than squeezing the prose out. */
+.companion-table td:first-child {
+  width: 34%;
+  min-width: 150px;
+}
+
+.companion-table code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* The ones with no confirmation behind them. Marked rather than hidden: they
+   are real operator buttons, and an operator who wires one to a stream deck
+   should know it fires the moment it is pressed. */
+.companion-table tr.is-danger code {
+  color: var(--danger, #ff6b6b);
+}
