@@ -31,6 +31,14 @@ import {
 } from './public/animation.js';
 import { EMPTY_TEAM, TEAM_FIELDS, TEAM_REGIONS, teamSlug } from './public/teams.js';
 import { mapCodeFromUrl, mapDisplayName } from './public/maps.js';
+import {
+  LOBBY_SEATS,
+  emptyLobby,
+  lobbyProgress,
+  lobbySides,
+  parseTeamOrder,
+  sanitiseLobbySeat,
+} from './public/lobby-schema.js';
 import { DEFAULT_SETTINGS, sanitiseSettings } from './public/settings-schema.js';
 import {
   COLOUR_SOURCE_KEYS,
@@ -87,6 +95,9 @@ import {
 export { STAT_FIELDS, STAT_KEYS, STAT_SLOTS, FONT_CHOICES, BUILT_IN_PRESETS, ANIM_TIER_COUNT, inDurationMs };
 export { TEAM_REGIONS, WINNER_STAGES, WINNER_STAGE_COUNT, isOverlayEntry, resolveWinner, stageBands, stageEnterMs };
 export { SELECT_SLOTS, aliasForPlayer, displayName, isAgentSelectScene };
+// Re-exported so the server imports the lobby's shape from the same place it
+// imports everything else's, rather than reaching into public/ for some of it.
+export { LOBBY_SEATS, emptyLobby, lobbyProgress, lobbySides };
 
 export const PLAYERS_PER_SIDE = 5;
 
@@ -891,6 +902,125 @@ export function settleSelect(previous, next, at = Date.now()) {
 }
 
 export const clearRosterState = (state) => ({ ...state, slots: emptySlots() });
+
+// ------------------------------------------------------------ staged lobby ---
+
+/**
+ * The Overwolf lobby feed - who is in the game and on what, held rather than shown.
+ *
+ * Same wire shape as /api/roster and deliberately a different store. That hook
+ * writes the agent-select graphic, so every event it accepts is on air a frame
+ * later; this one fills a board the operator reads, checks and stages. Pointing
+ * both at one store was the tempting simplification and it is wrong in the one
+ * case this exists for: an observer client's `teammate` flag is arbitrary, so
+ * the first thing an operator does is swap the sides - and a swap that repainted
+ * agent select mid-lobby would be a graphic moving because somebody was tidying
+ * up the thing that feeds a *different* graphic.
+ *
+ * Two event keys, because Overwolf reports the roster and the on-screen order
+ * separately and neither is sufficient: `roster` says who picked what but is
+ * indexed by the client's own bookkeeping, and `ui_team_order_*` says what is
+ * where on screen but names only agents. lobbySides does the join.
+ *
+ * Pure, like ingestRoster and ingestGame, so the whole of it tests without a
+ * server or a lobby.
+ *
+ * @param {object} state    the current lobby state
+ * @param {unknown} payload one event, an array of them, or {events: [...]}
+ * @returns {{state: object, applied: number, seen: {playerId: string, riotId: string}[]}}
+ */
+export function ingestLobby(state, payload) {
+  const events = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.events)
+      ? payload.events
+      : [payload];
+
+  let next = state;
+  let applied = 0;
+  const seen = [];
+
+  for (const event of events) {
+    if (!event || typeof event !== 'object') continue;
+
+    /*
+     * Shots Fired splits its config key on "." into feature / event / category,
+     * so `match_info.roster.match_info` arrives as event "roster". The bare
+     * inner object is accepted too, for hand-testing the hook with curl.
+     */
+    const kind = String(event.event ?? event.key ?? '').trim().toLowerCase();
+
+    let data = event.data ?? event;
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        /*
+         * Not JSON - which is the normal path for the order events, whose
+         * payload uses unquoted keys. Handed on as the original string so
+         * parseTeamOrder can do what JSON.parse could not; a roster event that
+         * genuinely arrived malformed falls out at the object check below.
+         */
+        data = event.data;
+      }
+    }
+
+    if (kind === 'ui_team_order_allies' || kind === 'ui_team_order_enemies') {
+      const order = parseTeamOrder(data);
+      if (!order.length) continue;
+      const side = kind.endsWith('allies') ? 'allies' : 'enemies';
+      next = { ...next, [side]: order, updatedAt: Date.now(), count: next.count + 1 };
+      applied += 1;
+      continue;
+    }
+
+    // Anything that names itself and is not one of ours. An envelope that says
+    // nothing still gets a look, for the same reason ingestRoster allows it.
+    if (kind && kind !== 'roster' && kind !== 'match_info') continue;
+    if (!data || typeof data !== 'object') continue;
+
+    /*
+     * Rejected rather than clamped, for the reason ingestRoster spells out: an
+     * index off the board is a message this does not understand, and clamping
+     * it would quietly write a stranger over whoever is in the last seat.
+     */
+    const index = int(event.eventIndex ?? data.eventIndex ?? data.index, -1, -1, Number.MAX_SAFE_INTEGER);
+    if (!(index >= 0 && index < LOBBY_SEATS)) continue;
+
+    const riotId = text(data.name ?? data.riotId, '', 64);
+    const playerId = text(data.player_id ?? data.playerId, '', 64);
+    if (playerId && riotId) seen.push({ playerId, riotId });
+
+    const seats = [...next.seats];
+    seats[index] = sanitiseLobbySeat(
+      {
+        riotId,
+        playerId,
+        character: data.character ?? '',
+        teammate: data.teammate,
+        seen: true,
+      },
+      next.seats[index],
+    );
+
+    next = {
+      ...next,
+      // Recorded, not acted on - see emptyLobby. For VALORANT this is the
+      // constant 21640, so it can never mean "a new lobby started".
+      gameId: text(event.gameId ?? data.gameId, next.gameId, 64),
+      seats,
+      updatedAt: Date.now(),
+      count: next.count + 1,
+    };
+    applied += 1;
+  }
+
+  return { state: next, applied, seen };
+}
+
+/** Back to an empty board. The operator's button, because the feed has no
+    signal that means "new lobby" - see emptyLobby. */
+export const clearLobbyState = (state) => ({ ...emptyLobby(), count: state?.count ?? 0 });
 
 /**
  * The general game feed - scenes and match facts.
