@@ -3824,9 +3824,11 @@ async function handlePost(pathname, req, res, ctx) {
         const result = ingestGame(select.state, body, { catalogue });
         // The feed knowing the map is the whole reason to share one: the game
         // says it once and every graphic gets it.
+        const mapBefore = globals.state.mapName;
         if (result.state.mapName && result.state.mapName !== select.state.mapName) {
           globals.patch({ mapName: result.state.mapName });
         }
+        const movedTheSharedMap = globals.state.mapName !== mapBefore;
         if (result.applied) select.replace(result.state);
 
         // A scene change is different from a roster event: it drives the
@@ -3839,7 +3841,24 @@ async function handlePost(pathname, req, res, ctx) {
           });
         }
 
-        pushGlobal(bundle);
+        /*
+         * Only when this event actually moved the shared map.
+         *
+         * It used to run on every event, and that quietly undid operator work.
+         * `pushGlobal` copies the Global tab's map onto all three graphics
+         * whenever they differ, so a bare `scene` event - which carries no map
+         * and changes nothing here - was still enough to overwrite a map an
+         * operator had just picked by hand. The winner graphic is where it hurt:
+         * its map is "the map just played", the operator sets it at the end of a
+         * map, and the client is posting MainMenu / CharacterSelect the whole
+         * time. The field would revert a second later with nothing to say why,
+         * and the background splash with it.
+         *
+         * The one-way rule is intact - Global still owns the value and a graphic
+         * still never pushes back. What changed is that a write nobody made no
+         * longer counts as Global having spoken.
+         */
+        if (movedTheSharedMap) pushGlobal(bundle);
         return {
           applied: result.applied,
           scene: select.state.scene,
