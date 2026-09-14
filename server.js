@@ -59,7 +59,7 @@ import {
 import { makeMediaOwners, makeSessionRegistry } from './sessions.js';
 import { LOG_LEVELS, captureConsole, makeLogger, safeUrl as safeLogUrl } from './log.js';
 import { makeCompanionHub } from './companion.js';
-import { BUS_KEYS, busName } from './buses.js';
+import { BUS_KEYS, CUE_WRAP, busName } from './buses.js';
 import { refuseUpgrade } from './websocket.js';
 import {
   ANIM_TIER_COUNT,
@@ -989,39 +989,27 @@ const legacyState = existsSync(path.join(STATE_DIR, 'graphic.json'));
  * Called by the registry the moment a session opens, so a browser source that
  * connects before its operator has touched anything still gets a live clock.
  */
-function installSession(bundle) {
-  // The drivers run on air. Preview deliberately has none of them - it does not
-  // auto-hide, does not auto-advance and does not expire a clock, because it is
-  // a thing being looked at rather than a thing playing out.
-  const graphics = bundle.graphics.program;
-  const winner = bundle.winner.program;
-  const select = bundle.select.program;
-
-  // Every session gets its own lookup slot - see makeLookupSlot. It is not a
-  // persisted store, so the registry does not know about it.
-  bundle.lookups = makeLookupSlot();
-  // Likewise the match-id feed: in memory, per session, never flushed.
-  bundle.matchFeed = makeMatchFeed();
-  // And the staged lobby: the Overwolf feed writes it, the operator stages it,
-  // the GStack export reads it. Memory only, per session.
-  bundle.lobby = makeLobbyFeed();
-
-  /**
-   * Auto-hide.
-   *
-   * Timed here rather than in the output page so that every browser source and
-   * the dashboard agree the graphic came down - a page that hid itself would
-   * leave the dashboard's Show button claiming it was still on air.
-   *
-   * The trigger is the cue counter, not `visible`: an operator adjusting the
-   * roster during the hold should not keep resetting the clock. The boot value
-   * is seeded here so restoring a visible graphic from disk does not count as a
-   * cue and immediately hide it.
-   */
+/**
+ * Auto-hide, for one store.
+ *
+ * Timed here rather than in the output page so that every browser source and
+ * the dashboard agree the graphic came down - a page that hid itself would
+ * leave the dashboard's Show button claiming it was still on air.
+ *
+ * The trigger is the cue counter, not `visible`: an operator adjusting the
+ * roster during the hold should not keep resetting the clock. The boot value
+ * is seeded here so restoring a visible graphic from disk does not count as a
+ * cue and immediately hide it.
+ *
+ * Only ever installed on program. Preview is a thing being looked at rather
+ * than a thing playing out, and a staged graphic that vanished eight seconds
+ * after the operator brought it up to check it would be a bug, not a feature.
+ */
+function installAutoHide(store, { session }) {
   let autoHideTimer = null;
-  let lastSeenCue = graphics.state.anim.cue;
+  let lastSeenCue = store.state.anim.cue;
 
-  const stopGraphics = graphics.subscribe(({ state }) => {
+  const stop = store.subscribe(({ state }) => {
     const { cue, visible, holdMs } = state.anim;
     if (cue === lastSeenCue) return;
     lastSeenCue = cue;
@@ -1035,7 +1023,7 @@ function installSession(bundle) {
      * right trigger: it moves on an operator's intent and not on their typing.
      */
     log.info('air', `scoreboard ${visible ? 'on' : 'off'}`, {
-      session: bundle.userId,
+      session,
       ...(visible && holdMs ? { autoHideMs: holdMs } : {}),
     });
 
@@ -1047,29 +1035,49 @@ function installSession(bundle) {
     // the graphic fully on screen rather than eight from the button press.
     autoHideTimer = setTimeout(() => {
       autoHideTimer = null;
-      const anim = graphics.state.anim;
+      const anim = store.state.anim;
       if (!anim.visible) return; // hidden by hand in the meantime
-      graphics.patch({ anim: { ...anim, visible: false, cue: anim.cue + 1 } });
+      store.patch({ anim: { ...anim, visible: false, cue: anim.cue + 1 } });
     }, inDurationMs(state.anim, ANIM_TIER_COUNT) + holdMs);
 
     // A pending auto-hide must not be the reason the process stays alive.
     autoHideTimer.unref?.();
   });
 
-  /**
-   * The winner sequence driver.
-   *
-   * Same reasoning as auto-hide, one step further: the sequence has a position,
-   * so something has to decide when scene 1 becomes scene 2. Doing it here
-   * rather than in the output page means the dashboard's stage indicator, the
-   * preview and every browser source are all reading the same position from the
-   * same place - a page that advanced itself would leave three of them guessing.
-   *
-   * Every automatic move bumps the cue exactly like a button press, so the pages
-   * cannot tell the difference and do not need to.
-   */
+  return () => {
+    clearTimeout(autoHideTimer);
+    stop();
+  };
+}
+
+/**
+ * The winner sequence driver, for one store.
+ *
+ * Same reasoning as auto-hide, one step further: the sequence has a position,
+ * so something has to decide when scene 1 becomes scene 2. Doing it here
+ * rather than in the output page means the dashboard's stage indicator, the
+ * preview and every browser source are all reading the same position from the
+ * same place - a page that advanced itself would leave three of them guessing.
+ *
+ * Every automatic move bumps the cue exactly like a button press, so the pages
+ * cannot tell the difference and do not need to.
+ *
+ * `advances` is what differs between the two buses, and it is the whole reason
+ * this took an argument:
+ *
+ *   program   the operator's `autoAdvance` setting. The sequence runs itself
+ *             on air exactly as it always has.
+ *   preview   only while a rehearsal is running. Preview is manual by default -
+ *             next and prev are for stepping through and checking a scene - and
+ *             a preview that marched on by itself would never let anybody look
+ *             at anything. Play is the opt-in.
+ *
+ * `onAir` keeps preview out of the air log. That log is the production's record
+ * of what an audience saw; a rehearsal in it would be a lie by omission.
+ */
+function installSequence(store, { session, advances, onAir }) {
   let sequenceTimer = null;
-  let lastSeenSeqCue = winner.state.seq.cue;
+  let lastSeenSeqCue = store.state.seq.cue;
 
   const clearSequenceTimer = () => {
     clearTimeout(sequenceTimer);
@@ -1080,7 +1088,7 @@ function installSession(bundle) {
     clearSequenceTimer();
 
     const seq = state.seq;
-    if (!seq.active || !seq.autoAdvance) return;
+    if (!seq.active || !advances(seq)) return;
 
     const stage = WINNER_STAGES[seq.stage];
     if (!stage) return;
@@ -1096,11 +1104,11 @@ function installSession(bundle) {
 
     sequenceTimer = setTimeout(() => {
       sequenceTimer = null;
-      const current = winner.state.seq;
+      const current = store.state.seq;
       // Taken over by hand in the meantime - an operator's cue always wins.
       if (!current.active || current.cue !== seq.cue) return;
 
-      winner.patch({
+      store.patch({
         seq: {
           ...current,
           active: !last,
@@ -1108,7 +1116,7 @@ function installSession(bundle) {
           restart: false,
           // The graphic coming off takes the music with it unless the operator
           // asked for it to carry on underneath whatever follows.
-          music: last ? Boolean(winner.state.audio.keepPlaying) : current.music,
+          music: last ? Boolean(store.state.audio.keepPlaying) : current.music,
           cue: current.cue + 1,
         },
       });
@@ -1117,31 +1125,49 @@ function installSession(bundle) {
     sequenceTimer.unref?.();
   }
 
-  const stopWinner = winner.subscribe(({ state }) => {
+  const stop = store.subscribe(({ state }) => {
     if (state.seq.cue === lastSeenSeqCue) return;
     lastSeenSeqCue = state.seq.cue;
-    log.info('air', state.seq.active ? `winner sequence scene ${state.seq.stage + 1}` : 'winner sequence off', {
-      session: bundle.userId,
-    });
+    if (onAir) {
+      log.info('air', state.seq.active ? `winner sequence scene ${state.seq.stage + 1}` : 'winner sequence off', {
+        session,
+      });
+    }
     scheduleSequence(state);
   });
 
-  /**
-   * The agent select clock, expired on the server.
-   *
-   * The bar in the page fills itself off a start stamp and needs no help to look
-   * right, so this exists purely to keep the *state* honest: once the 85 seconds
-   * are up the clock is not running, and a dashboard opened a minute later
-   * should not be told that it is. Without this the graphic would look finished
-   * while every readout still claimed it was counting.
-   *
-   * Keyed on the start stamp rather than a cue, because restarting the clock is
-   * the only thing that should ever cancel a pending expiry.
-   */
+  return {
+    stop: () => {
+      clearSequenceTimer();
+      stop();
+    },
+    /** Re-arm after something outside the store changed whether it may advance. */
+    reschedule: () => scheduleSequence(store.state),
+  };
+}
+
+/**
+ * The agent select clock, expired on the server.
+ *
+ * The bar in the page fills itself off a start stamp and needs no help to look
+ * right, so this exists purely to keep the *state* honest: once the 85 seconds
+ * are up the clock is not running, and a dashboard opened a minute later
+ * should not be told that it is. Without this the graphic would look finished
+ * while every readout still claimed it was counting.
+ *
+ * Keyed on the start stamp rather than a cue, because restarting the clock is
+ * the only thing that should ever cancel a pending expiry.
+ *
+ * Installed on BOTH buses, unlike the other two. This is not an on-air
+ * behaviour that preview should be spared - it is the state telling the truth
+ * about itself, and a preview whose clock said "running" forty minutes after
+ * the draft ended would be wrong on the dashboard an operator is reading.
+ */
+function installClock(store, { session, onAir }) {
   let timerExpiry = null;
   let lastTimerStart = null;
 
-  const stopSelect = select.subscribe(({ state }) => {
+  const stop = store.subscribe(({ state }) => {
     const { running, startedAt, durationMs } = state.timer;
     if (running && startedAt === lastTimerStart) return;
 
@@ -1152,9 +1178,9 @@ function installSession(bundle) {
     // stopping of a clock that had never started - once per roster event.
     const wasRunning = lastTimerStart !== null;
     lastTimerStart = running ? startedAt : null;
-    if (running || wasRunning) {
+    if (onAir && (running || wasRunning)) {
       log.info('air', running ? 'agent select clock started' : 'agent select clock stopped', {
-        session: bundle.userId,
+        session,
         ...(running ? { forMs: durationMs } : {}),
       });
     }
@@ -1164,22 +1190,122 @@ function installSession(bundle) {
     const wait = Math.max(0, startedAt + durationMs - Date.now());
     timerExpiry = setTimeout(() => {
       timerExpiry = null;
-      const current = select.state.timer;
+      const current = store.state.timer;
       // Restarted or stopped by hand in the meantime - an operator always wins.
       if (!current.running || current.startedAt !== startedAt) return;
-      select.replace(stopTimer(select.state, { filled: true }));
+      store.replace(stopTimer(store.state, { filled: true }));
     }, wait);
 
     timerExpiry.unref?.();
   });
 
-  bundle.teardown.push(() => {
-    clearTimeout(autoHideTimer);
-    clearSequenceTimer();
+  return () => {
     clearTimeout(timerExpiry);
-    stopGraphics();
-    stopWinner();
-    stopSelect();
+    stop();
+  };
+}
+
+/**
+ * Whether a rehearsal is running, per graphic.
+ *
+ * In memory, per session, never flushed - the same call makeMatchFeed and
+ * makeLookupSlot make, and for a sharper reason here. This is the operator
+ * pressing Play to watch the sequence play out at its real timings on preview;
+ * it is not a property of the graphic, it must never cross to air on a take,
+ * and a server restart mid-rehearsal should leave nothing behind claiming a
+ * rehearsal is still running.
+ *
+ * Kept out of the winner state entirely for that last reason: a `seq.rehearse`
+ * field would be copied to program by the very next take.
+ */
+function makeRehearsal() {
+  let revision = 0;
+  let state = { winner: false };
+  const listeners = new Set();
+
+  return {
+    get revision() {
+      return revision;
+    },
+    get state() {
+      return state;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set(graphic, running) {
+      if (state[graphic] === running) return state;
+      state = { ...state, [graphic]: running };
+      revision += 1;
+      for (const listener of listeners) listener({ revision, state });
+      return state;
+    },
+  };
+}
+
+function installSession(bundle) {
+  // Every session gets its own lookup slot - see makeLookupSlot. It is not a
+  // persisted store, so the registry does not know about it.
+  bundle.lookups = makeLookupSlot();
+  // Likewise the match-id feed: in memory, per session, never flushed.
+  bundle.matchFeed = makeMatchFeed();
+  // And the staged lobby: the Overwolf feed writes it, the operator stages it,
+  // the GStack export reads it. Memory only, per session.
+  bundle.lobby = makeLobbyFeed();
+  // Whether Play is running on a preview. Memory only, and never taken to air.
+  bundle.rehearsal = makeRehearsal();
+
+  /*
+   * Which drivers each bus gets, and why they differ.
+   *
+   * Program is the audience's copy and runs everything it always did. Preview
+   * is a thing being looked at, so it gets neither auto-hide nor auto-advance -
+   * a staged graphic that vanished, or marched on to the next scene, while
+   * somebody was checking it would be a bug.
+   *
+   * The clock is the exception and goes on both, because it is not an on-air
+   * behaviour: it is the state telling the truth about itself, and the
+   * dashboard reads preview.
+   */
+  const session = bundle.userId;
+
+  const stopAutoHide = installAutoHide(bundle.graphics.program, { session });
+
+  const airSequence = installSequence(bundle.winner.program, {
+    session,
+    onAir: true,
+    advances: (seq) => seq.autoAdvance,
+  });
+
+  const previewSequence = installSequence(bundle.winner.preview, {
+    session,
+    onAir: false,
+    // Only while Play is held down, so to speak. `seq.autoAdvance` is ignored
+    // here deliberately - it is the operator's setting for what air should do,
+    // not permission for preview to run off on its own.
+    advances: () => bundle.rehearsal.state.winner === true,
+  });
+
+  /*
+   * Starting a rehearsal is a change the store never sees.
+   *
+   * The sequence driver re-arms on a store event, and pressing Play does not
+   * write the winner state - it flips a flag beside it. Without this the
+   * rehearsal would not begin until the operator happened to touch something.
+   */
+  const stopRehearsal = bundle.rehearsal.subscribe(() => previewSequence.reschedule());
+
+  const stopAirClock = installClock(bundle.select.program, { session, onAir: true });
+  const stopPreviewClock = installClock(bundle.select.preview, { session, onAir: false });
+
+  bundle.teardown.push(() => {
+    stopAutoHide();
+    airSequence.stop();
+    previewSequence.stop();
+    stopRehearsal();
+    stopAirClock();
+    stopPreviewClock();
   });
 }
 
@@ -3766,6 +3892,9 @@ async function handleStream(pathname, req, res, ctx, params) {
         ['lookup', lookups],
         ['matchFeed', matchFeed],
         ['lobby', lobby],
+        // Whether Play is running, so the button can say Stop. Not part of any
+        // graphic's state - see makeRehearsal.
+        ['rehearsal', ctx.bundle.rehearsal],
         // The one entry that is not this session's: there is a single browser
         // on this machine, so a solve concerns everybody. Filtered so the
         // password reaches only whoever started it.
@@ -3831,6 +3960,46 @@ async function handlePost(pathname, req, res, ctx, params) {
      * One route rather than three, so there is one place that decides who may
      * put something on air rather than three that have to agree.
      */
+    /*
+     * Play the sequence on preview, at its real timings.
+     *
+     * Preview is manual by default - next and prev are for stepping through and
+     * checking a scene, and a preview that marched on by itself would never let
+     * anybody look at anything. This is the opt-in: run it once, as air would,
+     * so the operator can see whether the holds are right before it matters.
+     *
+     * Never touches program, whatever is passed. There is no bus argument on
+     * purpose: rehearsing on air is not a thing, it is just being on air.
+     */
+    case '/api/rehearse':
+      return handleWrite(res, async () => {
+        const body = await readJsonBody(req);
+        const which = String(body?.graphic ?? 'winner');
+        if (which !== 'winner') {
+          throw new ProviderError(400, `Only the winner sequence can be rehearsed, not "${which}".`);
+        }
+
+        const run = body?.run !== false;
+        if (run) {
+          // From the top, like Activate - a rehearsal that began halfway
+          // through would not tell the operator what an audience will see.
+          const seq = bundle.winner.preview.state.seq;
+          bundle.winner.preview.patch({
+            seq: { ...seq, active: true, stage: 0, restart: true, cue: (seq.cue + 1) % CUE_WRAP },
+          });
+        }
+        /*
+         * Set after the write, so the driver's own subscription sees the new
+         * scene and the flag together. Setting it first would re-arm against
+         * the old stage and then be re-armed again a microtask later - correct
+         * by accident, and only while the two happen to stay in that order.
+         */
+        bundle.rehearsal.set('winner', run);
+
+        log.debug('preview', `winner rehearsal ${run ? 'started' : 'stopped'}`, { session: ctx.owner?.id });
+        return { graphic: 'winner', running: run, state: bundle.winner.preview.state };
+      });
+
     case '/api/take':
       return handleWrite(res, async () => {
         const body = await readJsonBody(req);
