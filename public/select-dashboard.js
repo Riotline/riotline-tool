@@ -20,6 +20,16 @@ import { mapDisplayName } from './maps.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import { api, account, outputUrl, targetKey } from './session.js';
 import { diffPlayers, downloadLibraryFile, importSummary, readLibraryFile, resolveImport } from './library-file.js';
+
+/*
+ * Which bus this dashboard edits.
+ *
+ * Pinned to air while the preview/program split is being built: the take
+ * button does not exist yet, so a dashboard that staged its edits would be a
+ * dashboard that cannot reach an audience. Stage 4 changes this to 'preview'
+ * and adds the button in the same commit.
+ */
+const EDIT_BUS = 'program';
 import {
   SELECT_ANIM_FIELDS,
   SELECT_ANIM_GROUPS,
@@ -112,7 +122,7 @@ async function save() {
   const generation = ++saveGeneration;
   saveInFlight = true;
   try {
-    const response = await fetch(api('/api/select'), {
+    const response = await fetch(api('/api/select', EDIT_BUS), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -1009,7 +1019,7 @@ els.checker.addEventListener('change', () => {
 els.resetBtn.addEventListener('click', async () => {
   if (!window.confirm('Reset agent select to defaults? Every field will be cleared. Aliases are kept.')) return;
 
-  const response = await fetch(api('/api/select'), {
+  const response = await fetch(api('/api/select', EDIT_BUS), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reset: true }),
@@ -1051,7 +1061,7 @@ async function start() {
   els.frame.style.setProperty('--hide-note', '"Off air - press Show"');
 
   const [selectData, assetData, teamData, aliasData] = await Promise.all([
-    fetch(api('/api/select')).then((r) => r.json()),
+    fetch(api('/api/select', EDIT_BUS)).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { maps: [], agents: [] }))
       .catch(() => ({ maps: [], agents: [] })),

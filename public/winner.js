@@ -17,7 +17,7 @@
  */
 
 import { teamColour } from './teams.js';
-import { api } from './session.js';
+import { api, PAGE_BUS } from './session.js';
 import {
   FACET_COLS,
   FACET_ROWS,
@@ -1115,7 +1115,7 @@ let latestState = null;
 
 // Subscribe first so the first frame is not held up by the catalogue fetch;
 // names and numbers paint immediately and the map splash fills in after.
-const stream = new EventSource(api('/api/winner/events'));
+const stream = new EventSource(api('/api/winner/events', PAGE_BUS));
 
 stream.addEventListener('winner', (event) => {
   try {

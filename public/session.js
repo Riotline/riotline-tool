@@ -28,15 +28,34 @@ export const SESSION_KEY = params.get('key') ?? '';
 export const SESSION_ID = params.get('session') ?? '';
 
 /**
+ * Which bus this page renders: what is on air, or what is being staged.
+ *
+ * Defaults to PROGRAM, and that default is the whole compatibility story. An
+ * OBS browser source saved before this feature existed says
+ * `/post-match.html?key=...` and knows nothing about buses - it has to keep
+ * showing exactly what it always did, which is air. The dashboard's preview
+ * iframes are the ones that opt in, by asking for `?bus=preview`.
+ *
+ * Note this is the opposite default to a *write*, where saying nothing stages
+ * rather than airs. The two are chosen by what the mistake costs: a forgotten
+ * bus on a read shows air to somebody who wanted preview, a forgotten bus on a
+ * write puts something in front of an audience.
+ */
+export const PAGE_BUS = params.get('bus') === 'preview' ? 'preview' : 'program';
+
+/**
  * A same-origin URL carrying whichever of the two this page holds.
  *
  * Never both: a key already names a session, and sending an id beside it would
  * invite the question of which wins. The server reads the key first.
  */
-export function api(path) {
+export function api(path, bus) {
   const url = new URL(path, location.origin);
   if (SESSION_KEY) url.searchParams.set('key', SESSION_KEY);
   else if (SESSION_ID) url.searchParams.set('session', SESSION_ID);
+  // Always spelled out when it is given, never inferred here. A caller that
+  // cares about the bus is a caller that should be readable as caring.
+  if (bus) url.searchParams.set('bus', bus);
   return url.pathname + url.search;
 }
 

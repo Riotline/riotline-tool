@@ -21,6 +21,16 @@ import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, applyTeam, teamLabel } from './t
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import { api, account, outputUrl, targetKey } from './session.js';
 import { diffTeams, downloadLibraryFile, importSummary, readLibraryFile, resolveImport } from './library-file.js';
+
+/*
+ * Which bus this dashboard edits.
+ *
+ * Pinned to air while the preview/program split is being built: the take
+ * button does not exist yet, so a dashboard that staged its edits would be a
+ * dashboard that cannot reach an audience. Stage 4 changes this to 'preview'
+ * and adds the button in the same commit.
+ */
+const EDIT_BUS = 'program';
 import {
   AUDIO_FIELDS,
   AUDIO_GROUPS,
@@ -114,7 +124,7 @@ async function save() {
   const generation = ++saveGeneration;
   saveInFlight = true;
   try {
-    const response = await fetch(api('/api/winner'), {
+    const response = await fetch(api('/api/winner', EDIT_BUS), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -1011,7 +1021,7 @@ els.checker.addEventListener('change', () => {
 els.resetBtn.addEventListener('click', async () => {
   if (!window.confirm('Reset the winner graphic to defaults? Every field will be cleared.')) return;
 
-  const response = await fetch(api('/api/winner'), {
+  const response = await fetch(api('/api/winner', EDIT_BUS), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reset: true }),
@@ -1049,7 +1059,7 @@ async function start() {
   els.frame.style.setProperty('--hide-note', '"Off air - press Activate to play the sequence"');
 
   const [winner, assetData, teamData] = await Promise.all([
-    fetch(api('/api/winner')).then((r) => r.json()),
+    fetch(api('/api/winner', EDIT_BUS)).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { maps: [] }))
       .catch(() => ({ maps: [] })),

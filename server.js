@@ -59,6 +59,7 @@ import {
 import { makeMediaOwners, makeSessionRegistry } from './sessions.js';
 import { LOG_LEVELS, captureConsole, makeLogger, safeUrl as safeLogUrl } from './log.js';
 import { makeCompanionHub } from './companion.js';
+import { BUS_KEYS, busName } from './buses.js';
 import { refuseUpgrade } from './websocket.js';
 import {
   ANIM_TIER_COUNT,
@@ -1225,12 +1226,12 @@ async function handleApi(pathname, params, ctx) {
   // that whoever is asking is allowed to see it - by that point this is just
   // the set of stores to answer from.
   const { globals, aliases, presets, teams, lookups, lobby } = ctx.bundle ?? {};
-  // Stage 1 of the preview/program split: every existing caller stays on
-  // program, so behaviour is unchanged. Preview exists and can be taken from;
-  // nothing reads it yet.
-  const graphics = ctx.bundle?.graphics?.program;
-  const winner = ctx.bundle?.winner?.program;
-  const select = ctx.bundle?.select?.program;
+  // Reads answer for whichever bus was asked for, defaulting to air - see
+  // busFor. `?bus=preview` is what the dashboard will ask for from stage 4.
+  const readBus = busFor(params);
+  const graphics = ctx.bundle?.graphics?.of(readBus);
+  const winner = ctx.bundle?.winner?.of(readBus);
+  const select = ctx.bundle?.select?.of(readBus);
 
   // The configured default, unless it is the source an administrator has just
   // switched off - in which case falling back to it would break every lookup
@@ -2190,6 +2191,32 @@ const WEBHOOK_ROUTES = new Set(['/api/roster', '/api/game', '/api/match-id', '/a
  * 404 like any other unknown path.
  */
 const COMPANION_PATH = '/api/companion';
+
+/**
+ * Which bus a request means - and the one asymmetry in this whole feature.
+ *
+ * An explicit `?bus=` always wins. What differs is what a request that says
+ * nothing gets, and reads and writes deliberately get opposite answers:
+ *
+ *   read   -> program.  Every URL that existed before this feature keeps
+ *            answering exactly as it did. An OBS browser source saved months
+ *            ago, a script somebody wrote against /api/graphic, the health of
+ *            an old scene collection - none of them know the word "bus" and
+ *            all of them mean what is on air.
+ *   write  -> preview.  A write that forgot to say which bus is a bug, and the
+ *            two ways of being wrong are not comparable: staging something by
+ *            accident is invisible until somebody takes it, putting something
+ *            on air by accident is on a stream in front of an audience.
+ *
+ * The same shape as the settings/permissions asymmetry in settings-schema.js -
+ * the default is chosen per-direction by what the mistake costs, not by
+ * whichever is tidier to write down.
+ */
+const busFor = (params, { write = false } = {}) => {
+  const asked = params.get('bus');
+  if (asked) return busName(asked);
+  return write ? 'preview' : 'program';
+};
 
 /** Routes only an administrator may reach. */
 const isAdminRoute = (pathname) => pathname.startsWith('/api/admin/');
@@ -3663,10 +3690,10 @@ async function route(req, res) {
      */
     if (!canEdit(ctx.level)) return unauthorised(res, 403, 'You have view-only access to this session.');
 
-    return handlePost(pathname, req, res, ctx);
+    return handlePost(pathname, req, res, ctx, url.searchParams);
   }
 
-  if (req.method === 'GET' && (await handleStream(pathname, req, res, ctx))) return undefined;
+  if (req.method === 'GET' && (await handleStream(pathname, req, res, ctx, url.searchParams))) return undefined;
 
   try {
     return sendJson(res, 200, await handleApi(pathname, url.searchParams, ctx));
@@ -3678,14 +3705,18 @@ async function route(req, res) {
 }
 
 /** The SSE routes. Returns true if this request was one. */
-async function handleStream(pathname, req, res, ctx) {
+async function handleStream(pathname, req, res, ctx, params) {
   const { globals, lookups, matchFeed, lobby } = ctx.bundle;
-  // Stage 1 of the preview/program split: every existing caller stays on
-  // program, so behaviour is unchanged. Preview exists and can be taken from;
-  // nothing reads it yet.
-  const graphics = ctx.bundle.graphics.program;
-  const winner = ctx.bundle.winner.program;
-  const select = ctx.bundle.select.program;
+
+  /*
+   * An output page's own stream answers for the bus its URL named, defaulting
+   * to air. That default is what keeps an OBS source saved before this feature
+   * existed rendering exactly what it always did.
+   */
+  const streamBus = busFor(params);
+  const graphics = ctx.bundle.graphics.of(streamBus);
+  const winner = ctx.bundle.winner.of(streamBus);
+  const select = ctx.bundle.select.of(streamBus);
 
   if (pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res), true;
   if (pathname === '/api/winner/events') return streamState(winner, 'winner', req, res), true;
@@ -3708,9 +3739,29 @@ async function handleStream(pathname, req, res, ctx) {
   if (pathname === '/api/events') {
     streamStores(
       [
-        ['graphic', graphics],
-        ['winner', winner],
-        ['select', select],
+        /*
+         * BOTH buses, on the one connection.
+         *
+         * The dashboard edits one and has to show the other beside it, which is
+         * two states per graphic - and the six-connection cap means a second
+         * EventSource is not available to carry the second one. So both ride
+         * here.
+         *
+         * The naming is the same invariant as busFor: UNQUALIFIED MEANS AIR.
+         * `graphic` is program, here and on the output pages' own streams, and
+         * always has been; `graphicPreview` is the new thing and says so. That
+         * way nothing already listening changes meaning underneath itself, and
+         * a reader who has not met this feature still guesses right.
+         *
+         * The preview channels are the noisy ones - they move on every
+         * keystroke. Program only moves on a take or on one of its own drivers.
+         */
+        ['graphic', ctx.bundle.graphics.program],
+        ['winner', ctx.bundle.winner.program],
+        ['select', ctx.bundle.select.program],
+        ['graphicPreview', ctx.bundle.graphics.preview],
+        ['winnerPreview', ctx.bundle.winner.preview],
+        ['selectPreview', ctx.bundle.select.preview],
         ['global', globals],
         ['lookup', lookups],
         ['matchFeed', matchFeed],
@@ -3730,15 +3781,24 @@ async function handleStream(pathname, req, res, ctx) {
 }
 
 /** The write routes. `ctx.bundle` is the session, and it may be written to. */
-async function handlePost(pathname, req, res, ctx) {
+async function handlePost(pathname, req, res, ctx, params) {
   const bundle = ctx.bundle;
   const { globals, aliases, matchFeed, lobby } = bundle;
-  // Stage 1 of the preview/program split: every existing caller stays on
-  // program, so behaviour is unchanged. Preview exists and can be taken from;
-  // nothing reads it yet.
-  const graphics = bundle.graphics.program;
-  const winner = bundle.winner.program;
-  const select = bundle.select.program;
+
+  /*
+   * A write says which bus, or it stages. See busFor.
+   *
+   * The three graphic routes honour it. The webhooks below deliberately do not
+   * and are pinned to air - a game client has no opinion about buses and the
+   * automation it drives has to keep reaching the audience. Stage 5 gives the
+   * agent-select feed both buses; until then, air is where it already went.
+   */
+  const writeBus = busFor(params, { write: true });
+  const graphics = bundle.graphics.of(writeBus);
+  const winner = bundle.winner.of(writeBus);
+  const select = bundle.select.of(writeBus);
+  // The webhooks' select, pinned to air whatever the query string says.
+  const selectAir = bundle.select.program;
 
   switch (pathname) {
     // Starting a login is a POST because it launches a browser; the progress
@@ -3759,18 +3819,63 @@ async function handlePost(pathname, req, res, ctx) {
         return trackerLogin.cancel();
       });
 
+    /*
+     * Cut a graphic to air, or pull air back into preview.
+     *
+     * Deliberately NOT in KEYED_ROUTES. A take is the single most consequential
+     * button in this tool - it is the moment something reaches an audience - and
+     * the session key is the weak secret that lives in OBS configuration and
+     * gets read out over screen shares. "A key shows a graphic and feeds it a
+     * lobby; it does not operate the desk" applies here more than anywhere.
+     *
+     * One route rather than three, so there is one place that decides who may
+     * put something on air rather than three that have to agree.
+     */
+    case '/api/take':
+      return handleWrite(res, async () => {
+        const body = await readJsonBody(req);
+        const which = String(body?.graphic ?? '');
+        const bus = bundle[which];
+        if (!BUS_KEYS.includes(which) || !bus) {
+          throw new ProviderError(400, `No such graphic: "${which}".`, `Try one of: ${BUS_KEYS.join(', ')}.`);
+        }
+
+        // Reverting is the undo for a take that has not happened - it pulls air
+        // back over preview, which is what an operator who has staged half a
+        // graphic and changed their mind actually wants.
+        if (String(body?.action ?? '') === 'revert') {
+          const state = bus.revert();
+          log.info('air', `${which} preview reverted to what is on air`, { session: ctx.owner?.id });
+          return { graphic: which, action: 'revert', revision: bus.preview.revision, state };
+        }
+
+        const { state, replayed } = bus.take();
+        /*
+         * At info, and this is the line a production wants afterwards. The cue
+         * counter moving is what separates "they put a new thing on air" from
+         * "they corrected a name on something already up", and that distinction
+         * is exactly what somebody asks about after a show.
+         */
+        log.info('air', `${which} taken to program${replayed ? ' (replayed)' : ' (data only)'}`, {
+          session: ctx.owner?.id,
+        });
+        return { graphic: which, action: 'take', replayed, revision: bus.program.revision, state };
+      });
+
     case '/api/graphic':
       return handleWrite(res, async () => {
         const body = await readJsonBody(req);
         const state = body?.reset === true ? graphics.reset() : graphics.replace(body?.state ?? body);
-        return { revision: graphics.revision, state };
+        // Which bus this landed on, always. A caller that meant air and forgot
+        // to say so gets told, rather than watching a write go quiet.
+        return { bus: writeBus, revision: graphics.revision, state };
       });
 
     case '/api/winner':
       return handleWrite(res, async () => {
         const body = await readJsonBody(req);
         const state = body?.reset === true ? winner.reset() : winner.replace(body?.state ?? body);
-        return { revision: winner.revision, state };
+        return { bus: writeBus, revision: winner.revision, state };
       });
 
     /*
@@ -3805,7 +3910,7 @@ async function handlePost(pathname, req, res, ctx) {
          */
         const settled = settleSelect(previous, written);
         const state = settled === written ? written : select.replace(settled);
-        return { revision: select.revision, state };
+        return { bus: writeBus, revision: select.revision, state };
       });
 
     /*
@@ -3823,7 +3928,7 @@ async function handlePost(pathname, req, res, ctx) {
      */
     case '/api/roster':
       return handleWrite(res, async () => {
-        const result = ingestRoster(select.state, await readJsonBody(req), (id, riotId) => aliases.aliasFor(id, riotId));
+        const result = ingestRoster(selectAir.state, await readJsonBody(req), (id, riotId) => aliases.aliasFor(id, riotId));
 
         // Recorded before the state goes out, so a player who has just been seen
         // is already in the library by the time the dashboard repaints.
@@ -3837,21 +3942,21 @@ async function handlePost(pathname, req, res, ctx) {
          * on `applied` threw those away. Identity is the honest test:
          * ingestRoster only rebuilds what it touched.
          */
-        if (result.state !== select.state) select.replace(result.state);
+        if (result.state !== selectAir.state) selectAir.replace(result.state);
 
         // At debug: a lobby produces ten of these, and one line each is noise
         // right up until the moment you need every one of them.
         log.debug('feed', `roster: ${result.applied} applied`, {
           session: ctx.owner?.id,
           reset: result.reset,
-          locked: select.state.slots.filter((slot) => slot.locked).length,
+          locked: selectAir.state.slots.filter((slot) => slot.locked).length,
         });
 
         return {
           applied: result.applied,
           reset: result.reset,
-          gameId: select.state.gameId,
-          slots: select.state.slots.map((slot) => ({ name: slot.name, character: slot.character, locked: slot.locked })),
+          gameId: selectAir.state.gameId,
+          slots: selectAir.state.slots.map((slot) => ({ name: slot.name, character: slot.character, locked: slot.locked })),
         };
       });
 
@@ -3871,15 +3976,15 @@ async function handlePost(pathname, req, res, ctx) {
         // event. Null when there is no network and nothing on disk, which the
         // written-down table covers.
         const catalogue = await assets.get().catch(() => null);
-        const result = ingestGame(select.state, body, { catalogue });
+        const result = ingestGame(selectAir.state, body, { catalogue });
         // The feed knowing the map is the whole reason to share one: the game
         // says it once and every graphic gets it.
         const mapBefore = globals.state.mapName;
-        if (result.state.mapName && result.state.mapName !== select.state.mapName) {
+        if (result.state.mapName && result.state.mapName !== selectAir.state.mapName) {
           globals.patch({ mapName: result.state.mapName });
         }
         const movedTheSharedMap = globals.state.mapName !== mapBefore;
-        if (result.applied) select.replace(result.state);
+        if (result.applied) selectAir.replace(result.state);
 
         // A scene change is different from a roster event: it drives the
         // automation toggles, so it is worth a line at info even when the ten
@@ -3887,7 +3992,7 @@ async function handlePost(pathname, req, res, ctx) {
         if (result.entered || result.left) {
           log.info('feed', `agent select ${result.entered ? 'started' : 'ended'}`, {
             session: ctx.owner?.id,
-            map: select.state.mapName || '-',
+            map: selectAir.state.mapName || '-',
           });
         }
 
@@ -3911,12 +4016,12 @@ async function handlePost(pathname, req, res, ctx) {
         if (movedTheSharedMap) pushGlobal(bundle);
         return {
           applied: result.applied,
-          scene: select.state.scene,
-          agentSelect: isAgentSelectScene(select.state.scene),
+          scene: selectAir.state.scene,
+          agentSelect: isAgentSelectScene(selectAir.state.scene),
           entered: result.entered,
           left: result.left,
-          map: select.state.mapName,
-          onAir: select.state.anim.visible,
+          map: selectAir.state.mapName,
+          onAir: selectAir.state.anim.visible,
         };
       });
 

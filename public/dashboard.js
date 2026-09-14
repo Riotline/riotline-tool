@@ -19,6 +19,16 @@ import { STATS, STAT_FIELDS, STAT_SLOTS, resultText, statDef } from './stats.js'
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import { api, outputUrl, pageUrl, targetKey } from './session.js';
+
+/*
+ * Which bus this dashboard edits.
+ *
+ * Pinned to air while the preview/program split is being built: the take
+ * button does not exist yet, so a dashboard that staged its edits would be a
+ * dashboard that cannot reach an audience. Stage 4 changes this to 'preview'
+ * and adds the button in the same commit.
+ */
+const EDIT_BUS = 'program';
 import {
   FONT_CHOICES,
   PRESET_FIELDS,
@@ -165,7 +175,7 @@ async function save() {
   const generation = ++saveGeneration;
   saveInFlight = true;
   try {
-    const response = await fetch(api('/api/graphic'), {
+    const response = await fetch(api('/api/graphic', EDIT_BUS), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state }),
@@ -600,7 +610,7 @@ async function presetAction(body) {
   presetLibrary = payload.presets;
 
   // Applying and saving both rewrite the live styling, so pull it back in.
-  const graphic = await fetch(api('/api/graphic')).then((r) => r.json());
+  const graphic = await fetch(api('/api/graphic', EDIT_BUS)).then((r) => r.json());
   state = graphic.state;
   buildAll();
   setStatus('', 'Saved');
@@ -806,7 +816,7 @@ els.sortBtn.addEventListener('click', () => {
 els.resetBtn.addEventListener('click', async () => {
   if (!window.confirm('Reset the graphic to defaults? Every field will be cleared.')) return;
 
-  const response = await fetch(api('/api/graphic'), {
+  const response = await fetch(api('/api/graphic', EDIT_BUS), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reset: true }),
@@ -978,7 +988,7 @@ async function start() {
   });
 
   const [graphic, assetData, presetData, teamData, aliasData] = await Promise.all([
-    fetch(api('/api/graphic')).then((r) => r.json()),
+    fetch(api('/api/graphic', EDIT_BUS)).then((r) => r.json()),
     fetch('/api/valorant-assets')
       .then((r) => (r.ok ? r.json() : { agents: [], maps: [] }))
       .catch(() => ({ agents: [], maps: [] })),
