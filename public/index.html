@@ -166,6 +166,60 @@
           </label>
         </section>
 
+        <!-- The Overwolf staging board. Fills itself from the hook, goes nowhere
+             until Stage is pressed, and is then read by GStack's GET JSON. -->
+        <section class="watch" id="lobby-panel" hidden>
+          <h3 class="watch-title">
+            Lobby staging
+            <span id="lobby-state" class="pill" hidden></span>
+          </h3>
+
+          <div class="lobby-board">
+            <div class="lobby-col">
+              <span class="lobby-col-label" id="lobby-left-label">Left</span>
+              <ol class="lobby-list" id="lobby-left"></ol>
+            </div>
+            <div class="lobby-col">
+              <span class="lobby-col-label" id="lobby-right-label">Right</span>
+              <ol class="lobby-list" id="lobby-right"></ol>
+            </div>
+          </div>
+
+          <p class="field-help" id="lobby-unplaced" hidden></p>
+          <p class="field-help" id="lobby-note"></p>
+
+          <div class="watch-actions">
+            <button id="lobby-stage" type="button" class="btn btn-primary" disabled>Stage for GStack</button>
+            <button id="lobby-swap" type="button" class="btn btn-ghost" disabled>Swap sides</button>
+            <button id="lobby-clear" type="button" class="btn btn-ghost" disabled>Clear</button>
+          </div>
+          <p class="field-help">
+            Nothing here is on air. Point a Shots Fired webhook action at the hook below - one for
+            <code>match_info.roster</code>, one each for <code>ui_team_order_allies</code> and
+            <code>ui_team_order_enemies</code> - then check the two columns and press Stage. Only what you
+            staged is served to GStack, so the board cannot change under you between checking it and pressing
+            the key in VHUD.
+          </p>
+
+          <label class="obs-url">
+            <span>Shots Fired webhook</span>
+            <span class="obs-url-row">
+              <code id="lobby-hook">/api/lobby</code>
+              <button type="button" class="btn-copy" data-copy-target="lobby-hook" title="Copy URL">Copy</button>
+            </span>
+          </label>
+
+          <!-- Paste this one into VHUD's GET JSON box. It answers in GStack's own
+               schema - attackers / defenders, displayName, lockedAgentCharacterId. -->
+          <label class="obs-url">
+            <span>GStack GET JSON URL</span>
+            <span class="obs-url-row">
+              <code id="lobby-export">/api/gstack</code>
+              <button type="button" class="btn-copy" data-copy-target="lobby-export" title="Copy URL">Copy</button>
+            </span>
+          </label>
+        </section>
+
         <!-- Post-match lookup: baseline during the game, results the moment it ends. -->
         <section class="watch" id="watch-panel">
           <h3 class="watch-title">
@@ -719,5 +773,6 @@
     <script src="/winner-dashboard.js" type="module"></script>
     <script src="/select-dashboard.js" type="module"></script>
     <script src="/global-dashboard.js" type="module"></script>
+    <script src="/lobby-dashboard.js" type="module"></script>
   </body>
 </html>

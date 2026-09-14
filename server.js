@@ -81,6 +81,10 @@ import {
   ingestGame,
   graphicPatch,
   ingestRoster,
+  ingestLobby,
+  clearLobbyState,
+  emptyLobby,
+  lobbySides,
   matchIdFrom,
   settleSelect,
   stopTimer,
@@ -535,6 +539,109 @@ function makeMatchFeed() {
 }
 
 /**
+ * The staged lobby - what Overwolf saw, and what the operator decided about it.
+ *
+ * In memory and never on disk, for the reason makeMatchFeed is: this is a
+ * hand-off, not a setting. It must survive a dashboard reload, because the
+ * stream replays current state to whoever connects; it must not survive a
+ * restart, because a roster from an hour ago repopulating the board is a prompt
+ * to put the wrong ten names on air.
+ *
+ * Two boards rather than one, and that is the whole design. `incoming` moves
+ * every time the feed says anything; `staged` only moves when the operator
+ * presses Stage, and `staged` is the only one the export serves. A single board
+ * would mean GStack pulling mid-lobby gets whoever had picked by then - and
+ * worse, that the board can change *between* the operator checking it and the
+ * key being pressed in VHUD, which is the one moment nothing should move.
+ *
+ * `swapped` deliberately sits outside both. It is the operator's answer to a
+ * question the feed cannot answer - an observer client's `teammate` flag says
+ * which side the *reporting* machine was on, which is not a fact about the
+ * broadcast - so it applies to whatever board is being looked at and survives
+ * re-staging. Having it snapshot with the board would mean every new stage
+ * silently un-swapped the sides.
+ */
+function makeLobbyFeed() {
+  let revision = 0;
+  let incoming = emptyLobby();
+  let staged = null;
+  let swapped = false;
+  let stagedAt = 0;
+  const listeners = new Set();
+
+  const view = () => ({ incoming, staged, swapped, stagedAt });
+
+  const publish = () => {
+    revision += 1;
+    const state = view();
+    for (const listener of listeners) {
+      try {
+        listener({ revision, state });
+      } catch {
+        /* a dead connection must not take the feed down with it */
+      }
+    }
+  };
+
+  return {
+    get revision() {
+      return revision;
+    },
+    get state() {
+      return view();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+
+    /** One webhook post. Returns what ingestLobby made of it. */
+    receive(payload) {
+      const result = ingestLobby(incoming, payload);
+      // Identity, not `applied`: a post can be accepted and change nothing a
+      // seat can see, and repainting every dashboard for that is the cue-counter
+      // mistake in a different coat.
+      if (result.state !== incoming) {
+        incoming = result.state;
+        publish();
+      }
+      return result;
+    },
+
+    /** The operator's "this is right". Snapshots incoming for the export. */
+    stage() {
+      staged = incoming;
+      stagedAt = Date.now();
+      publish();
+      return view();
+    },
+
+    /** Which side is which. Applies to both boards - see above. */
+    swap() {
+      swapped = !swapped;
+      publish();
+      return view();
+    },
+
+    /**
+     * Back to nothing.
+     *
+     * Clears the staged board too. Leaving it behind would mean the export kept
+     * serving the last lobby after the operator had visibly emptied the panel,
+     * which is the worst kind of stale: it looks cleared.
+     */
+    clear() {
+      incoming = clearLobbyState(incoming);
+      staged = null;
+      swapped = false;
+      stagedAt = 0;
+      publish();
+      return view();
+    },
+  };
+}
+
+/**
  * A tracker.gg Cloudflare solve any operator can drive from their own browser.
  *
  * The clearance is bound to the IP and user agent that earned it, so the solve
@@ -889,6 +996,9 @@ function installSession(bundle) {
   bundle.lookups = makeLookupSlot();
   // Likewise the match-id feed: in memory, per session, never flushed.
   bundle.matchFeed = makeMatchFeed();
+  // And the staged lobby: the Overwolf feed writes it, the operator stages it,
+  // the GStack export reads it. Memory only, per session.
+  bundle.lobby = makeLobbyFeed();
 
   /**
    * Auto-hide.
@@ -1109,7 +1219,7 @@ async function handleApi(pathname, params, ctx) {
   // The session being read. Resolved by the gate, which has already checked
   // that whoever is asking is allowed to see it - by that point this is just
   // the set of stores to answer from.
-  const { graphics, winner, select, globals, aliases, presets, teams, lookups } = ctx.bundle ?? {};
+  const { graphics, winner, select, globals, aliases, presets, teams, lookups, lobby } = ctx.bundle ?? {};
 
   // The configured default, unless it is the source an administrator has just
   // switched off - in which case falling back to it would break every lookup
@@ -1179,6 +1289,90 @@ async function handleApi(pathname, params, ctx) {
 
     case '/api/valorant-assets':
       return assets.get();
+
+    /*
+     * The staged lobby, in the shape GStack's "GET JSON" reads.
+     *
+     * This is the one route here written to somebody else's schema, and the
+     * names are theirs: VHUD.exe parses `attackers` / `defenders`, each player
+     * as `displayName` + `lockedAgentCharacterId`, and it matches the agent on
+     * the *uuid*. Getting a name into the right seat is therefore two joins -
+     * the UI order onto the roster, then the internal agent name onto the
+     * catalogue - and neither of the two programs at the ends of this pipe can
+     * do either, because only this one holds the valorant-api catalogue.
+     *
+     * GET only, deliberately. It is in KEYED_ROUTES so VHUD can reach it with
+     * the same key as the output pages, and that list ends "a key shows a
+     * graphic and feeds it a lobby; it does not operate the desk" - reading a
+     * staged board is showing, and it is exactly as much as a key should buy.
+     * Nothing here writes, so the open question hanging over keyed POSTs to
+     * /api/graphic does not get a second instance.
+     *
+     * Serves `staged` and never `incoming`: the export must not change between
+     * an operator checking the board and somebody pressing the key in VHUD.
+     * Before the first Stage it answers with empty sides rather than 404, so a
+     * misconfigured URL and an unstaged board look different from VHUD's end.
+     */
+    case '/api/gstack': {
+      const { staged, swapped, stagedAt } = lobby.state;
+      const catalogue = await assets.get().catch(() => null);
+      const sides = lobbySides(staged ?? emptyLobby(), catalogue?.agents ?? [], { swapped });
+
+      const absolute = (value) => {
+        const raw = String(value ?? '').trim();
+        if (!raw) return '';
+        return /^https?:\/\//i.test(raw) ? raw : `${ctx.origin}${raw.startsWith('/') ? '' : '/'}${raw}`;
+      };
+
+      const side = (players) =>
+        players
+          .filter((player) => player.filled)
+          .map((player) => ({
+            // The alias library resolved here rather than at ingest, so a name
+            // an operator fixes after the lobby landed is used by the very next
+            // pull instead of needing the feed to say it again.
+            displayName: displayName(player.riotId, aliases.aliasFor(player.playerId, player.riotId)),
+            lockedAgentCharacterId: player.agentUuid,
+            player: player.riotId,
+          }));
+
+      const team = (half) => {
+        const entry = half.teamId ? teams.get(half.teamId) : null;
+        return {
+          name: half.teamName ?? '',
+          // The tricode lives in the library, not on the graphic - the graphic
+          // only keeps the id it was picked from.
+          shortForm: entry?.shortName ?? '',
+          logo: absolute(half.logo),
+          score: half.roundsWon ?? 0,
+        };
+      };
+
+      const left = team(graphics.state.left);
+      const right = team(graphics.state.right);
+
+      return {
+        attackers: side(sides.left),
+        defenders: side(sides.right),
+        attackerTeam: left.name,
+        attackerTeamShortForm: left.shortForm,
+        attackerTeamLogo: left.logo,
+        attackerTeamScore: left.score,
+        defenderTeam: right.name,
+        defenderTeamShortForm: right.shortForm,
+        defenderTeamLogo: right.logo,
+        defenderTeamScore: right.score,
+        // Not ours to know. Sent as the shape expects so the parse does not
+        // fall over, and left at the values that mean "still playing".
+        bestOf: 0,
+        completed: false,
+        winner: '',
+        // Ours, not GStack's, and ignored by it. Here because the first
+        // question about a pull that looked wrong is "which board was that".
+        stagedAt,
+        staged: Boolean(staged),
+      };
+    }
 
     case '/api/graphic':
       return { revision: graphics.revision, state: graphics.state };
@@ -1952,10 +2146,16 @@ const KEYED_ROUTES = new Set([
   '/api/roster',
   '/api/game',
   '/api/match-id',
+  // The fourth webhook, and the read the fourth webhook exists to feed. The
+  // export is GET-only and shows a staged board; the hook only writes a board
+  // nothing is looking at yet. Neither operates the desk - staging does, and
+  // that is /api/lobby/control, which is not here.
+  '/api/lobby',
+  '/api/gstack',
 ]);
 
 /** The webhooks. A key is the only credential a game client can carry. */
-const WEBHOOK_ROUTES = new Set(['/api/roster', '/api/game', '/api/match-id']);
+const WEBHOOK_ROUTES = new Set(['/api/roster', '/api/game', '/api/match-id', '/api/lobby']);
 
 /**
  * The Companion control channel - and the reason it is NOT in the list above.
@@ -3381,6 +3581,20 @@ async function route(req, res) {
 
   const ctx = await contextFor(req, url);
 
+  /*
+   * Where this server looks like it is, from the outside.
+   *
+   * Only the GStack export needs it, and it needs it because that payload
+   * carries logo URLs which a *different* program fetches. A relative
+   * "/media/<hash>" is correct for a browser source that already has an origin
+   * and useless to VHUD, which downloads them into its own PlayerPic folder.
+   * Taken from the request rather than from configuration because whatever host
+   * reached us is by construction a host the caller can reach - which is the
+   * only property the URL actually needs, and the one a configured base URL
+   * gets wrong the first time somebody runs this behind the tunnel.
+   */
+  ctx.origin = `${String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() || 'http'}://${req.headers.host ?? HOST}`;
+
   if (ctx.viaKey) {
     // A session key on a route that is not a browser source or a webhook. It
     // lives in OBS configuration and gets read out over screen shares, so it
@@ -3449,7 +3663,7 @@ async function route(req, res) {
 
 /** The SSE routes. Returns true if this request was one. */
 async function handleStream(pathname, req, res, ctx) {
-  const { graphics, winner, select, globals, lookups, matchFeed } = ctx.bundle;
+  const { graphics, winner, select, globals, lookups, matchFeed, lobby } = ctx.bundle;
 
   if (pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res), true;
   if (pathname === '/api/winner/events') return streamState(winner, 'winner', req, res), true;
@@ -3478,6 +3692,7 @@ async function handleStream(pathname, req, res, ctx) {
         ['global', globals],
         ['lookup', lookups],
         ['matchFeed', matchFeed],
+        ['lobby', lobby],
         // The one entry that is not this session's: there is a single browser
         // on this machine, so a solve concerns everybody. Filtered so the
         // password reaches only whoever started it.
@@ -3495,7 +3710,7 @@ async function handleStream(pathname, req, res, ctx) {
 /** The write routes. `ctx.bundle` is the session, and it may be written to. */
 async function handlePost(pathname, req, res, ctx) {
   const bundle = ctx.bundle;
-  const { graphics, winner, select, globals, aliases, matchFeed } = bundle;
+  const { graphics, winner, select, globals, aliases, matchFeed, lobby } = bundle;
 
   switch (pathname) {
     // Starting a login is a POST because it launches a browser; the progress
@@ -3722,6 +3937,67 @@ async function handlePost(pathname, req, res, ctx) {
         log.info('feed', `match id ${fresh ? 'received' : 're-sent'}: ${matchId}`, { session: ctx.owner?.id });
 
         return { matchId, fresh };
+      });
+
+    /*
+     * The Overwolf lobby feed - a fourth hook, and the only one that shows
+     * nothing.
+     *
+     * Same envelope as /api/roster, because it is the same client sending it:
+     * Shots Fired splits its event key on "." and posts {gameId, feature, event,
+     * category, eventIndex, data}. A separate route rather than a mode on the
+     * roster hook so an operator can point one Shots Fired action at the graphic
+     * and another at the staging board, or at only one of them, without either
+     * choice being implied by the other.
+     *
+     * Answers with what it made of the post rather than with the board: the
+     * caller is a game client, and "applied: 1" is the useful thing to find in
+     * its log.
+     */
+    case '/api/lobby':
+      return handleWrite(res, async () => {
+        const result = lobby.receive(await readJsonBody(req));
+
+        // The alias library learns from this feed exactly as it learns from the
+        // roster one - a player seen in a staged lobby is a player worth having
+        // a name for, whether or not the operator ever stages them.
+        aliases.seen(result.seen);
+
+        // Debug, for the same reason the roster hook is: a lobby produces ten of
+        // these and one line each is noise until the moment you need every one.
+        log.debug('feed', `lobby: ${result.applied} applied`, {
+          session: ctx.owner?.id,
+          seats: lobby.state.incoming.seats.filter((seat) => seat.seen).length,
+        });
+
+        return { applied: result.applied, count: lobby.state.incoming.count };
+      });
+
+    /*
+     * The operator's three buttons.
+     *
+     * Split from the hook above because they are a different credential: this
+     * is the desk, so it wants a signed-in editor and the CSRF shape, where the
+     * hook wants a key and a game client. A key must never reach these - staging
+     * is the act of putting ten names on air.
+     */
+    case '/api/lobby/control':
+      return handleWrite(res, async () => {
+        const body = await readJsonBody(req);
+        const action = String(body?.action ?? '').trim().toLowerCase();
+
+        switch (action) {
+          case 'stage':
+            log.info('feed', 'lobby staged', { session: ctx.owner?.id });
+            return lobby.stage();
+          case 'swap':
+            return lobby.swap();
+          case 'clear':
+            log.info('feed', 'lobby cleared', { session: ctx.owner?.id });
+            return lobby.clear();
+          default:
+            throw new ProviderError(400, 'Unknown lobby action.', 'One of: stage, swap, clear.');
+        }
       });
 
     case '/api/aliases':

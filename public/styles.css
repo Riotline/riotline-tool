@@ -2503,3 +2503,71 @@ label.is-off {
 .companion-table tr.is-danger code {
   color: var(--danger, #ff6b6b);
 }
+
+/* ----------------------------------------------------- lobby staging --- */
+/* Two fixed columns of five. The rows are a fixed grid and the seat number is
+   always painted, so a lobby filling up one event at a time cannot reflow the
+   board under an operator who is reading it - the same rule the output pages
+   follow, for the same reason. */
+
+.lobby-board {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.lobby-col-label {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.lobby-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.lobby-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--bg-input);
+  font-size: 11px;
+}
+
+.lobby-row-empty {
+  opacity: 0.4;
+}
+
+.lobby-seat {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.lobby-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.lobby-agent {
+  color: var(--text-faint);
+  text-align: right;
+}
+
+/* The catalogue could not place this agent, so the export will carry an empty
+   uuid and GStack will not match it. Worth seeing before it is on air. */
+.lobby-agent-unknown {
+  color: var(--warn);
+}
