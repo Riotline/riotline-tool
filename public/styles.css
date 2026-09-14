@@ -974,7 +974,7 @@ pre {
    *
    * These sit in .graphic-toolbar, which is a wrapping flex row - so without a
    * basis each box is as wide as its own contents. That was fine while they read
-   * `/output.html` and unusable once they became a real hostname plus a session
+   * `/post-match.html` and unusable once they became a real hostname plus a session
    * key: one box stretched the toolbar, and the three on the agent select tab no
    * longer lined up with each other.
    *
@@ -1021,7 +1021,7 @@ pre {
  * One width for every OBS and webhook URL, whatever is in it.
  *
  * These used to be as wide as their contents, which was fine while they read
- * `/output.html` and unusable once they became a real hostname plus a session
+ * `/post-match.html` and unusable once they became a real hostname plus a session
  * key - one box stretched its panel and the five of them no longer lined up.
  *
  * Truncated in CSS rather than in the text, and that distinction is load-bearing:

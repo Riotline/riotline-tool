@@ -11,7 +11,7 @@
  * and API keys must never reach the client.
  *
  * It also hosts the broadcast graphic (see graphics.js): /graphic edits the
- * state, /output.html renders it, and they stay in sync over SSE because OBS
+ * state, /post-match.html renders it, and they stay in sync over SSE because OBS
  * runs the output page in its own browser process.
  *
  * Zero npm dependencies - Node 18+ built-ins only.
@@ -3327,6 +3327,28 @@ async function route(req, res) {
     if ((pathname === '/' || pathname === '/index.html') && !userFor(req)) {
       const next = encodeURIComponent(pathname === '/' ? '/' : pathname);
       res.writeHead(302, { Location: `/login.html?next=${next}`, 'Cache-Control': 'no-store' });
+      return res.end();
+    }
+
+    /*
+     * The scoreboard's old address.
+     *
+     * It was `/output.html` for the whole life of this tool, which means it is
+     * sitting in OBS browser sources on machines nobody is about to edit, and
+     * in scene collections saved months ago. Renaming the file without this
+     * would take those sources black at the next show, with the only clue being
+     * a 404 in a log nobody reads mid-broadcast.
+     *
+     * The query string is carried across because the whole point of the URL is
+     * the `?key=` on the end of it.
+     *
+     * 302 rather than 301: a permanent redirect is cached by the browser more
+     * or less forever, and if `/output.html` is ever wanted for something else
+     * that cache is unreachable from here. This costs one extra request when a
+     * browser source starts, which is once.
+     */
+    if (pathname === '/output.html') {
+      res.writeHead(302, { Location: `/post-match.html${url.search}`, 'Cache-Control': 'no-store' });
       return res.end();
     }
 

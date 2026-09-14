@@ -32,7 +32,7 @@ The schema modules are:
 
 | Module | Sanitiser | Dashboard | Output page |
 | --- | --- | --- | --- |
-| `public/preset-schema.js` | `sanitisePreset`, `sanitiseState` (graphics.js) | `dashboard.js` | `output.js` |
+| `public/preset-schema.js` | `sanitisePreset`, `sanitiseState` (graphics.js) | `dashboard.js` | `post-match.js` |
 | `public/winner-schema.js` | `sanitiseWinner`, `sanitiseSeq`, `sanitiseAudio`, `sanitiseWinnerStyle` | `winner-dashboard.js` | `winner.js` |
 | `public/select-schema.js` | `sanitiseSelect`, `sanitiseSelectStyle`, `sanitiseSelectAnim`, `sanitiseSelectAuto`, `sanitiseTimer` | `select-dashboard.js` | `select.js` |
 | `public/global-schema.js` | `sanitiseGlobal` | `global-dashboard.js` | (pushed into the three above by `pushGlobal`) |

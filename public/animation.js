@@ -106,8 +106,8 @@ export const ANIM_GROUPS = [...new Set(ANIM_FIELDS.map((field) => field.group))]
 /**
  * Stagger steps in the layout: headers, MVP panels, map/art, then one per roster
  * row. Which elements are in which tier is a DOM question and lives in
- * output.js; only the count is needed here, so the server can work out how long
- * an entry takes without a browser. output.js warns if the two disagree.
+ * post-match.js; only the count is needed here, so the server can work out how long
+ * an entry takes without a browser. post-match.js warns if the two disagree.
  */
 export const ANIM_TIER_COUNT = 7;
 

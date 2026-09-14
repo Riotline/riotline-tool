@@ -629,7 +629,7 @@ img[hidden],
  * is what makes "hidden" mean fully transparent rather than merely empty.
  *
  * Only ancestors are animated. The team and MVP names carry their own scaleX
- * squeeze from output.js, and a transform written here would fight it; nested
+ * squeeze from post-match.js, and a transform written here would fight it; nested
  * transforms compose, so animating the band around them does not.
  *
  * CSS transitions rather than the animation API, because a transition

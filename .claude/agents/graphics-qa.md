@@ -1,6 +1,6 @@
 ---
 name: graphics-qa
-description: Drive the output pages in a real browser at 1920x1080, screenshot them, and measure painted geometry - to catch the layout shifts, invisible blend modes and truncated names that DOM assertions miss. Use after any change to output.html/winner.html/select.html, their JS, or the graphic CSS.
+description: Drive the output pages in a real browser at 1920x1080, screenshot them, and measure painted geometry - to catch the layout shifts, invisible blend modes and truncated names that DOM assertions miss. Use after any change to post-match.html/winner.html/select.html, their JS, or the graphic CSS.
 tools: Bash, Read, Write, Glob, Grep
 model: sonnet
 ---
@@ -36,11 +36,11 @@ asked to create.
 ## Getting a page on screen
 
 The output pages need a session key now — they have no login. Create an admin,
-sign in, read the key, and open `/output.html?key=<key>`:
+sign in, read the key, and open `/post-match.html?key=<key>`:
 
 ```js
 // POST /api/auth/login {username, password} -> { user: { sessionKey } }
-// then: page.goto(`${BASE}/output.html?key=${sessionKey}`)
+// then: page.goto(`${BASE}/post-match.html?key=${sessionKey}`)
 // and drive state with POST /api/graphic {state} carrying the login cookie
 ```
 

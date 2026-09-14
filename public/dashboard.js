@@ -969,7 +969,7 @@ async function start() {
   // nothing at all. Filled in asynchronously because the key comes from the
   // account, so the markup holds a placeholder until this resolves.
   void targetKey().then((key) => {
-    const url = outputUrl('/output.html', key);
+    const url = outputUrl('/post-match.html', key);
     // textContent stays whole - the copy button reads it, and the box is
     // narrowed with an ellipsis in CSS rather than by shortening the string.
     els.obsUrl.textContent = url;

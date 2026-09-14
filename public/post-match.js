@@ -1,13 +1,13 @@
 /**
  * Broadcast scoreboard - output renderer.
  *
- * Point an OBS browser source at /output.html (1920x1080, transparent) and
+ * Point an OBS browser source at /post-match.html (1920x1080, transparent) and
  * leave it. State arrives over SSE from the local server, so the dashboard and
  * OBS stay in sync even though they are separate browser processes.
  *
  * Two rules this file is built around:
  *   - Never recreate an element. A repaint that rebuilt the DOM would flash
- *     every portrait and map splash on air. The skeleton in output.html is
+ *     every portrait and map splash on air. The skeleton in post-match.html is
  *     built once and only text and src attributes are ever written.
  *   - Never write markup. All text goes in via textContent, so nothing in the
  *     graphic state can become executable, no matter where it was imported from.

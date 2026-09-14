@@ -444,7 +444,7 @@ Each account has its own **session key**, shown on the Account tab and already
 embedded in the URLs on each graphics tab. Copy them from there.
 
 ```
-https://gfx.example.com/output.html?key=<session key>
+https://gfx.example.com/post-match.html?key=<session key>
 https://gfx.example.com/winner.html?key=<session key>
 https://gfx.example.com/select.html?key=<session key>
 ```
