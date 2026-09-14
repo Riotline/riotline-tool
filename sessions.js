@@ -30,18 +30,31 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import {
   makeAliasStore,
   makeGlobalStore,
-  makeGraphicStore,
   makePresetStore,
-  makeSelectStore,
   makeTeamStore,
-  makeWinnerStore,
 } from './graphics.js';
+import { BUS_KEYS, makeBus } from './buses.js';
 
-/** The stores a session owns, and the file each one lives in. */
+/**
+ * The plain stores a session owns, and the file each one lives in.
+ *
+ * The three graphics are NOT here. They are preview/program pairs and live in
+ * BUS_KEYS below, because each of them is two files and a take rather than one
+ * store - see buses.js.
+ *
+ * What stayed a single store is the interesting half of the list, and the rule
+ * is "does an audience ever see this":
+ *
+ *   globals   the production's shared settings. It feeds preview, so it is one
+ *             step behind air already; staging the stager would be a second
+ *             take for no gain.
+ *   presets   a library of styles, not a thing on screen.
+ *   teams     a library of orgs, likewise.
+ *   aliases   player-name corrections, which are wanted everywhere at once -
+ *             an alias staged on preview while air keeps the wrong name is not
+ *             a feature anybody asked for.
+ */
 const STORES = [
-  ['graphics', makeGraphicStore, 'graphic.json'],
-  ['winner', makeWinnerStore, 'winner.json'],
-  ['select', makeSelectStore, 'select.json'],
   ['globals', makeGlobalStore, 'global.json'],
   ['presets', makePresetStore, 'presets.json'],
   ['teams', makeTeamStore, 'teams.json'],
@@ -74,11 +87,28 @@ export function makeSessionRegistry({ root, onCreate, onDispose, log = () => {} 
     for (const [key, make, file] of STORES) {
       bundle[key] = make(path.join(dir, file));
     }
+    for (const key of BUS_KEYS) {
+      bundle[key] = makeBus(key, (file) => path.join(dir, file));
+    }
 
     // Loaded together: a session with half its state restored would render a
     // scoreboard from disk beside a winner sequence from the defaults.
-    const restored = await Promise.all(STORES.map(([key]) => bundle[key].load()));
-    log('session', `opened ${id} (${restored.filter(Boolean).length}/${STORES.length} restored from disk)`);
+    const [plain, buses] = await Promise.all([
+      Promise.all(STORES.map(([key]) => bundle[key].load())),
+      Promise.all(BUS_KEYS.map((key) => bundle[key].load())),
+    ]);
+
+    const restored = plain.filter(Boolean).length + buses.filter((r) => r.program).length;
+    const total = STORES.length + BUS_KEYS.length;
+    // Said out loud, because it happens exactly once per session per upgrade
+    // and it is the moment preview comes into existence. A silent seed is a
+    // thing somebody later wonders about.
+    const seeded = buses.filter((r) => r.seeded).length;
+    log(
+      'session',
+      `opened ${id} (${restored}/${total} restored from disk` +
+        (seeded ? `, ${seeded} preview bus${seeded === 1 ? '' : 'es'} seeded from what is on air)` : ')'),
+    );
 
     // The drivers - auto-hide, the winner sequence, the agent-select clock -
     // are wired by the caller, because what they do is server.js's business and

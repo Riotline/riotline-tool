@@ -989,7 +989,12 @@ const legacyState = existsSync(path.join(STATE_DIR, 'graphic.json'));
  * connects before its operator has touched anything still gets a live clock.
  */
 function installSession(bundle) {
-  const { graphics, winner, select } = bundle;
+  // The drivers run on air. Preview deliberately has none of them - it does not
+  // auto-hide, does not auto-advance and does not expire a clock, because it is
+  // a thing being looked at rather than a thing playing out.
+  const graphics = bundle.graphics.program;
+  const winner = bundle.winner.program;
+  const select = bundle.select.program;
 
   // Every session gets its own lookup slot - see makeLookupSlot. It is not a
   // persisted store, so the registry does not know about it.
@@ -1219,7 +1224,13 @@ async function handleApi(pathname, params, ctx) {
   // The session being read. Resolved by the gate, which has already checked
   // that whoever is asking is allowed to see it - by that point this is just
   // the set of stores to answer from.
-  const { graphics, winner, select, globals, aliases, presets, teams, lookups, lobby } = ctx.bundle ?? {};
+  const { globals, aliases, presets, teams, lookups, lobby } = ctx.bundle ?? {};
+  // Stage 1 of the preview/program split: every existing caller stays on
+  // program, so behaviour is unchanged. Preview exists and can be taken from;
+  // nothing reads it yet.
+  const graphics = ctx.bundle?.graphics?.program;
+  const winner = ctx.bundle?.winner?.program;
+  const select = ctx.bundle?.select?.program;
 
   // The configured default, unless it is the source an administrator has just
   // switched off - in which case falling back to it would break every lookup
@@ -1699,6 +1710,11 @@ async function handleTeamAction({ teams }, body) {
  * @returns {string[]} the graphics that changed, for the caller to report.
  */
 function pushGlobal({ graphics, winner, select, globals }) {
+  // Unwrapped here rather than at the call sites, so the loop below keeps
+  // reading as "for each graphic". Stage 2 gives this a bus argument.
+  graphics = graphics.program;
+  winner = winner.program;
+  select = select.program;
   const pushed = [];
   for (const [name, store] of [['graphic', graphics], ['winner', winner], ['select', select]]) {
     const patch = graphicPatch(globals.state, name, store.state);
@@ -3663,7 +3679,13 @@ async function route(req, res) {
 
 /** The SSE routes. Returns true if this request was one. */
 async function handleStream(pathname, req, res, ctx) {
-  const { graphics, winner, select, globals, lookups, matchFeed, lobby } = ctx.bundle;
+  const { globals, lookups, matchFeed, lobby } = ctx.bundle;
+  // Stage 1 of the preview/program split: every existing caller stays on
+  // program, so behaviour is unchanged. Preview exists and can be taken from;
+  // nothing reads it yet.
+  const graphics = ctx.bundle.graphics.program;
+  const winner = ctx.bundle.winner.program;
+  const select = ctx.bundle.select.program;
 
   if (pathname === '/api/graphic/events') return streamState(graphics, 'graphic', req, res), true;
   if (pathname === '/api/winner/events') return streamState(winner, 'winner', req, res), true;
@@ -3710,7 +3732,13 @@ async function handleStream(pathname, req, res, ctx) {
 /** The write routes. `ctx.bundle` is the session, and it may be written to. */
 async function handlePost(pathname, req, res, ctx) {
   const bundle = ctx.bundle;
-  const { graphics, winner, select, globals, aliases, matchFeed, lobby } = bundle;
+  const { globals, aliases, matchFeed, lobby } = bundle;
+  // Stage 1 of the preview/program split: every existing caller stays on
+  // program, so behaviour is unchanged. Preview exists and can be taken from;
+  // nothing reads it yet.
+  const graphics = bundle.graphics.program;
+  const winner = bundle.winner.program;
+  const select = bundle.select.program;
 
   switch (pathname) {
     // Starting a login is a POST because it launches a browser; the progress

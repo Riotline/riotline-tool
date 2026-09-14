@@ -12,7 +12,7 @@
  *
  * Every operation here is *the same store write the dashboard button makes*.
  * Not an equivalent one - the same one. `winner.next` does what pressing Next
- * does, by writing to `bundle.winner`, and then stops.
+ * does, by writing to `bundle.winner.program`, and then stops.
  *
  * Everything else follows for free, because it already follows from the
  * dashboard: the SSE fan-out tells every browser source and every open
@@ -414,7 +414,9 @@ function projectSelect(state) {
  */
 const GRAPHICS = {
   scoreboard: {
-    store: (bundle) => bundle.graphics,
+    // Stage 1: the control channel still drives air directly. Stage 6 points
+    // it at preview and gives it a take.
+    store: (bundle) => bundle.graphics.program,
     ops: scoreboardOps,
     project: projectScoreboard,
     // Called with nothing, each sanitiser returns a clean copy of its own
@@ -422,8 +424,8 @@ const GRAPHICS = {
     // without a store, a session or a disk.
     defaults: sanitiseState(),
   },
-  winner: { store: (bundle) => bundle.winner, ops: winnerOps, project: projectWinner, defaults: sanitiseWinner() },
-  select: { store: (bundle) => bundle.select, ops: selectOps, project: projectSelect, defaults: sanitiseSelect() },
+  winner: { store: (bundle) => bundle.winner.program, ops: winnerOps, project: projectWinner, defaults: sanitiseWinner() },
+  select: { store: (bundle) => bundle.select.program, ops: selectOps, project: projectSelect, defaults: sanitiseSelect() },
 };
 
 assertContract();
@@ -687,7 +689,7 @@ export function makeCompanionHub({ ownerForKey, bundleFor, enabled, log, maxConn
     function armClock() {
       clearInterval(clockTick);
       clockTick = null;
-      if (!bundle.select.state.timer.running) return;
+      if (!bundle.select.program.state.timer.running) return;
       clockTick = setInterval(() => push('select', { reason: 'clock' }), 1000);
       clockTick.unref?.();
     }
