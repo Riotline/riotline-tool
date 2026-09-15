@@ -324,6 +324,25 @@
         <span class="cue-hint" id="g-cue-hint"></span>
       </div>
 
+      <!--
+        The take. A second row rather than more buttons in the cue bar above,
+        because the two are different jobs: everything up there changes what is
+        being STAGED, and this puts it on air. A vision mixer keeps its preview
+        and program rows apart for the same reason.
+      -->
+      <div class="take-bar" id="g-take-bar">
+        <span class="prog-state" id="g-prog">
+          <span class="prog-dot" aria-hidden="true"></span>
+          <span id="g-prog-label">Off air</span>
+        </span>
+        <button type="button" id="g-take" class="btn btn-take">Send to program</button>
+        <button type="button" id="g-revert" class="btn btn-ghost" title="Pull what is on air back into preview, throwing away what is staged">
+          Revert to air
+        </button>
+        <span class="toolbar-gap"></span>
+        <span class="staged-note" id="g-staged" hidden>Preview differs from air</span>
+      </div>
+
       <section class="panel preview-panel">
         <h2 class="panel-title">
           Live preview
@@ -397,9 +416,36 @@
         </span>
         <button type="button" id="w-music" class="btn btn-ghost" hidden>Cue music</button>
 
+        <!-- Preview never advances on its own - next and prev are for stepping
+             through and looking at a scene. This is the opt-in: run it once at
+             the real timings to see whether the holds are right. Never touches
+             what is on air. -->
+        <button type="button" id="w-play" class="btn btn-ghost" title="Play the sequence in preview at its real timings">
+          &#9658; Play in preview
+        </button>
+
         <span class="toolbar-gap"></span>
         <span class="cue-hint" id="w-cue-hint"></span>
       </div>
+      <!--
+        The take. A second row rather than more buttons in the cue bar above,
+        because the two are different jobs: everything up there changes what is
+        being STAGED, and this puts it on air. A vision mixer keeps its preview
+        and program rows apart for the same reason.
+      -->
+      <div class="take-bar" id="w-take-bar">
+        <span class="prog-state" id="w-prog">
+          <span class="prog-dot" aria-hidden="true"></span>
+          <span id="w-prog-label">Off air</span>
+        </span>
+        <button type="button" id="w-take" class="btn btn-take">Send to program</button>
+        <button type="button" id="w-revert" class="btn btn-ghost" title="Pull what is on air back into preview, throwing away what is staged">
+          Revert to air
+        </button>
+        <span class="toolbar-gap"></span>
+        <span class="staged-note" id="w-staged" hidden>Preview differs from air</span>
+      </div>
+
 
       <div class="stage-pips" id="w-stages"></div>
 
@@ -493,6 +539,29 @@
         </button>
 
         <span class="cue-hint" id="s-cue-hint"></span>
+      </div>
+
+      <!--
+        The take. A second row rather than more buttons in the cue bar above,
+        because the two are different jobs: everything up there changes what is
+        being STAGED, and this puts it on air.
+
+        Agent select is the one graphic whose data reaches air without this -
+        the game client's picks go to both buses, or an operator would be
+        pressing take once per lock-in. What still needs taking is everything
+        an operator does by hand: showing it, swapping the sides, the styling.
+      -->
+      <div class="take-bar" id="s-take-bar">
+        <span class="prog-state" id="s-prog">
+          <span class="prog-dot" aria-hidden="true"></span>
+          <span id="s-prog-label">Off air</span>
+        </span>
+        <button type="button" id="s-take" class="btn btn-take">Send to program</button>
+        <button type="button" id="s-revert" class="btn btn-ghost" title="Pull what is on air back into preview, throwing away what is staged">
+          Revert to air
+        </button>
+        <span class="toolbar-gap"></span>
+        <span class="staged-note" id="s-staged" hidden>Preview differs from air</span>
       </div>
 
       <section class="panel preview-panel">

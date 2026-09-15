@@ -20,16 +20,18 @@ import { mapDisplayName } from './maps.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import { api, account, outputUrl, targetKey } from './session.js';
 import { diffPlayers, downloadLibraryFile, importSummary, readLibraryFile, resolveImport } from './library-file.js';
+import { makeTakeBar } from './take-bar.js';
 
 /*
  * Which bus this dashboard edits.
  *
- * Pinned to air while the preview/program split is being built: the take
- * button does not exist yet, so a dashboard that staged its edits would be a
- * dashboard that cannot reach an audience. Stage 4 changes this to 'preview'
- * and adds the button in the same commit.
+ * Preview. Everything typed, imported, swapped or cued here stages, and reaches
+ * an audience only when Send to program is pressed - see take-bar.js. The one
+ * exception is not here but in the server: the game client's roster and scene
+ * feeds write both buses, because an operator taking once per lock-in is not a
+ * workflow anybody wants.
  */
-const EDIT_BUS = 'program';
+const EDIT_BUS = 'preview';
 import {
   SELECT_ANIM_FIELDS,
   SELECT_ANIM_GROUPS,
@@ -218,7 +220,14 @@ function syncCueUi() {
 
   const visible = Boolean(anim.visible);
   els.air.classList.toggle('is-live', visible);
-  els.airLabel.textContent = visible ? 'On air' : 'Off air';
+  /*
+   * "Preview", not "On air". This lamp reads the bus this dashboard EDITS, and
+   * since the split that is the staged copy - so the old wording would have sat
+   * a few pixels above a second lamp that means the opposite, both lit red. The
+   * one thing an operator must never have to work out is which of two identical
+   * indicators is the one an audience can see.
+   */
+  els.airLabel.textContent = visible ? 'Preview up' : 'Preview off';
   els.showBtn.disabled = visible;
   els.hideBtn.disabled = !visible;
   els.swapBtn.classList.toggle('is-active', Boolean(state.swap));
@@ -282,7 +291,7 @@ onState('graphic', (next) => {
   graphicVisible = Boolean(next?.anim?.visible);
 });
 
-onState('select', (next) => {
+onState('selectPreview', (next) => {
   if (!state) return;
 
   const rosterChanged = JSON.stringify(next.slots) !== JSON.stringify(state.slots);
@@ -1086,4 +1095,16 @@ async function start() {
 
 start().catch((error) => {
   els.editors.teams.replaceChildren(el('p', 'empty', {}, `Could not load agent select: ${error.message}`));
+});
+
+// ------------------------------------------------------------- the take ---
+
+makeTakeBar({
+  graphic: 'select',
+  prefix: 's',
+  programChannel: 'select',
+  previewChannel: 'selectPreview',
+  isLive: (state) => Boolean(state.anim?.visible),
+  describe: (state) => (state.anim?.visible ? 'ON AIR' : 'Off air'),
+  toast,
 });

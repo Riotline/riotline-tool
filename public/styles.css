@@ -2571,3 +2571,112 @@ label.is-off {
 .lobby-agent-unknown {
   color: var(--warn);
 }
+
+/* ------------------------------------------------------------- the take ---
+ *
+ * A second row under the cue bar, reading as a different job: everything above
+ * stages, this row is air. Kept visually quieter than the cue buttons until it
+ * has something to say - a permanently loud "SEND TO PROGRAM" beside a preview
+ * that matches air is a button an operator learns to stop seeing.
+ */
+.take-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  background: var(--bg-raised);
+}
+
+/* Lit only while something is staged, so the eye is drawn to it exactly when
+   there is a decision to make. */
+.take-bar.is-staged {
+  border-color: var(--accent, #ff4655);
+  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--accent, #ff4655) 40%, transparent);
+}
+
+.prog-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 132px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.prog-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.45;
+}
+
+/* The one thing on this page that means "an audience can see this". Red, and
+   the only red dot in the dashboard. */
+.prog-state.is-live {
+  color: var(--accent, #ff4655);
+}
+
+.prog-state.is-live .prog-dot {
+  background: var(--accent, #ff4655);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #ff4655) 25%, transparent);
+}
+
+.btn-take {
+  background: var(--accent, #ff4655);
+  border-color: var(--accent, #ff4655);
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.btn-take:disabled {
+  opacity: 0.45;
+}
+
+.staged-note {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent, #ff4655);
+}
+
+/* Play, while it is running. Same treatment as the music lamp - a transport
+   control that is currently doing something, rather than one that would. */
+#w-play.is-active {
+  border-color: var(--accent, #ff4655);
+  color: var(--accent, #ff4655);
+}
+
+/* The cue bar loses its bottom corners where a take bar sits under it, so the
+   two read as one control surface split into preview and program halves. */
+.cue-bar:has(+ .take-bar) {
+  margin-bottom: 0;
+  border-radius: 8px 8px 0 0;
+}
+
+/*
+ * The preview lamp is NOT the program lamp.
+ *
+ * Both sit in the same control surface a few pixels apart, and one of them
+ * means an audience can see this. Red belongs to that one alone - see
+ * .prog-state.is-live - so the cue bar's own lamp takes the neutral accent
+ * instead. Two identical indicators meaning opposite things is the mistake this
+ * rule exists to prevent.
+ */
+.cue-bar .cue-state.is-live {
+  color: var(--ok, #58c98b);
+}
+
+.cue-bar .cue-state.is-live .cue-dot {
+  background: var(--ok, #58c98b);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok, #58c98b) 22%, transparent);
+}

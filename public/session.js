@@ -119,7 +119,17 @@ export async function targetKey() {
   return data.sessions?.find((entry) => entry.id === SESSION_ID)?.sessionKey ?? '';
 }
 
-/** An in-page link (a preview iframe, an "open in a tab") for the target. */
-export function pageUrl(page) {
-  return SESSION_ID ? `${page}?session=${encodeURIComponent(SESSION_ID)}` : page;
+/**
+ * An in-page link (a preview iframe, an "open in a tab") for the target.
+ *
+ * `bus` is what makes the dashboard's iframes show the staged copy while the
+ * OBS URL beside them, which carries no bus, keeps showing air. An output page
+ * reads it back out of its own URL - see PAGE_BUS - because there is no
+ * cross-document call anywhere in this dashboard.
+ */
+export function pageUrl(page, bus) {
+  const url = new URL(page, location.origin);
+  if (SESSION_ID) url.searchParams.set('session', SESSION_ID);
+  if (bus) url.searchParams.set('bus', bus);
+  return url.pathname + url.search;
 }

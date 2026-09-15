@@ -21,16 +21,18 @@ import { TEAM_FIELDS, TEAM_REGIONS, EMPTY_TEAM, applyTeam, teamLabel } from './t
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import { api, account, outputUrl, targetKey } from './session.js';
 import { diffTeams, downloadLibraryFile, importSummary, readLibraryFile, resolveImport } from './library-file.js';
+import { makeTakeBar } from './take-bar.js';
 
 /*
  * Which bus this dashboard edits.
  *
- * Pinned to air while the preview/program split is being built: the take
- * button does not exist yet, so a dashboard that staged its edits would be a
- * dashboard that cannot reach an audience. Stage 4 changes this to 'preview'
- * and adds the button in the same commit.
+ * Preview. Everything typed, imported, swapped or cued here stages, and reaches
+ * an audience only when Send to program is pressed - see take-bar.js. The one
+ * exception is not here but in the server: the game client's roster and scene
+ * feeds write both buses, because an operator taking once per lock-in is not a
+ * workflow anybody wants.
  */
-const EDIT_BUS = 'program';
+const EDIT_BUS = 'preview';
 import {
   AUDIO_FIELDS,
   AUDIO_GROUPS,
@@ -71,6 +73,7 @@ const els = {
   replayBtn: $('w-replay'),
   stopBtn: $('w-stop'),
   musicBtn: $('w-music'),
+  playBtn: $('w-play'),
   music: $('w-music-state'),
   air: $('w-air'),
   airLabel: $('w-air-label'),
@@ -223,7 +226,14 @@ function syncCueUi() {
 
   const active = Boolean(seq.active);
   els.air.classList.toggle('is-live', active);
-  els.airLabel.textContent = active ? `On air - scene ${seq.stage + 1}` : 'Off air';
+  /*
+   * "Preview", not "On air". This lamp reads the bus this dashboard EDITS, and
+   * since the split that is the staged copy - so the old wording would have sat
+   * a few pixels above a second lamp that means the opposite, both lit red. The
+   * one thing an operator must never have to work out is which of two identical
+   * indicators is the one an audience can see.
+   */
+  els.airLabel.textContent = active ? `Preview - scene ${seq.stage + 1}` : 'Preview off';
 
   els.activateBtn.disabled = active;
   els.stopBtn.disabled = !active;
@@ -267,6 +277,44 @@ els.nextBtn.addEventListener('click', () => step(1));
 els.backBtn.addEventListener('click', () => step(-1));
 els.musicBtn.addEventListener('click', () => setMusic(!state.seq.music));
 
+/*
+ * Play the sequence in preview, at the real timings.
+ *
+ * Its own route rather than a cue, because it is not a change to the graphic -
+ * it is a flag beside the session saying "let preview advance itself for a
+ * while". Kept out of the winner state deliberately: a field there would be
+ * copied to air by the very next take. See makeRehearsal in server.js.
+ */
+let rehearsing = false;
+
+async function togglePlay() {
+  const run = !rehearsing;
+  try {
+    const response = await fetch(api('/api/rehearse'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ graphic: 'winner', run }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.error) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`);
+  } catch (error) {
+    toast(`Could not play the sequence: ${error.message}`);
+  }
+}
+
+els.playBtn.addEventListener('click', togglePlay);
+
+// The flag is server state - another dashboard on the same production sees the
+// rehearsal too - so the button reads it back rather than tracking its own.
+onState('rehearsal', (next) => {
+  rehearsing = Boolean(next?.winner);
+  els.playBtn.textContent = rehearsing ? '■ Stop preview' : '▶ Play in preview';
+  els.playBtn.classList.toggle('is-active', rehearsing);
+  els.playBtn.title = rehearsing
+    ? 'Stop the preview run and hold on the scene it is showing'
+    : 'Play the sequence in preview at its real timings. Never touches what is on air.';
+});
+
 /**
  * What another operator changed, arriving live.
  *
@@ -280,7 +328,7 @@ els.musicBtn.addEventListener('click', () => setMusic(!state.seq.music));
  * what was just typed. `syncFields` also skips whatever holds focus, so a
  * field being typed in is never rewritten under the caret.
  */
-onState('winner', (next) => {
+onState('winnerPreview', (next) => {
   if (!state || !next) return;
 
   if (next.seq) {
@@ -1079,4 +1127,18 @@ async function start() {
 
 start().catch((error) => {
   els.editors.content.replaceChildren(el('p', 'empty', {}, `Could not load the winner graphic: ${error.message}`));
+});
+
+// ------------------------------------------------------------- the take ---
+
+makeTakeBar({
+  graphic: 'winner',
+  prefix: 'w',
+  programChannel: 'winner',
+  previewChannel: 'winnerPreview',
+  isLive: (state) => Boolean(state.seq?.active),
+  // The scene number, because "on air" alone is not enough to act on when the
+  // sequence is three scenes long and running itself.
+  describe: (state) => (state.seq?.active ? `ON AIR - scene ${(state.seq.stage ?? 0) + 1}` : 'Off air'),
+  toast,
 });

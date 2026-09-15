@@ -19,16 +19,18 @@ import { STATS, STAT_FIELDS, STAT_SLOTS, resultText, statDef } from './stats.js'
 import { ANIM_FIELDS, ANIM_GROUPS, ANIM_TIER_COUNT, inDurationMs } from './animation.js';
 import { el, field, grid, help, makeFields, subhead, title } from './fields.js';
 import { api, outputUrl, pageUrl, targetKey } from './session.js';
+import { makeTakeBar } from './take-bar.js';
 
 /*
  * Which bus this dashboard edits.
  *
- * Pinned to air while the preview/program split is being built: the take
- * button does not exist yet, so a dashboard that staged its edits would be a
- * dashboard that cannot reach an audience. Stage 4 changes this to 'preview'
- * and adds the button in the same commit.
+ * Preview. Everything typed, imported, swapped or cued here stages, and reaches
+ * an audience only when Send to program is pressed - see take-bar.js. The one
+ * exception is not here but in the server: the game client's roster and scene
+ * feeds write both buses, because an operator taking once per lock-in is not a
+ * workflow anybody wants.
  */
-const EDIT_BUS = 'program';
+const EDIT_BUS = 'preview';
 import {
   FONT_CHOICES,
   PRESET_FIELDS,
@@ -106,7 +108,9 @@ function loadPreview(panel) {
     // Through pageUrl, so a preview of somebody else's production shows theirs.
     // An output page reads its target out of its own URL and has no other way
     // to learn it - there is no cross-document call anywhere in this dashboard.
-    frame.src = pageUrl(frame.dataset.src);
+    // The dashboard previews the staged copy. The OBS URL beside them carries
+    // no bus and therefore keeps showing air, which is the whole arrangement.
+    frame.src = pageUrl(frame.dataset.src, 'preview');
     delete frame.dataset.src;
   }
 }
@@ -514,7 +518,14 @@ function syncCueUi() {
 
   const visible = Boolean(anim.visible);
   els.air.classList.toggle('is-live', visible);
-  els.airLabel.textContent = visible ? 'On air' : 'Hidden';
+  /*
+   * "Preview", not "On air". This lamp reads the bus this dashboard EDITS, and
+   * since the split that is the staged copy - so the old wording would have sat
+   * a few pixels above a second lamp that means the opposite, both lit red. The
+   * one thing an operator must never have to work out is which of two identical
+   * indicators is the one an audience can see.
+   */
+  els.airLabel.textContent = visible ? 'Preview up' : 'Preview hidden';
   // Doubles as the state readout: whichever button is available is the one that
   // would change something.
   els.showBtn.disabled = visible;
@@ -554,7 +565,7 @@ els.replayBtn.addEventListener('click', () => cue('replay'));
  * need a reload to show a remote structural change; wire them through
  * makeFields (or give them their own bind) if that starts to bite.
  */
-onState('graphic', (next) => {
+onState('graphicPreview', (next) => {
   if (!state || !next) return;
 
   if (next.anim) {
@@ -1039,4 +1050,16 @@ async function start() {
 
 start().catch((error) => {
   els.editors.match.replaceChildren(el('p', 'empty', {}, `Could not load the graphic: ${error.message}`));
+});
+
+// ------------------------------------------------------------- the take ---
+
+makeTakeBar({
+  graphic: 'graphics',
+  prefix: 'g',
+  programChannel: 'graphic',
+  previewChannel: 'graphicPreview',
+  isLive: (state) => Boolean(state.anim?.visible),
+  describe: (state) => (state.anim?.visible ? 'ON AIR' : 'Off air'),
+  toast,
 });

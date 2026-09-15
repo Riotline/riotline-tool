@@ -1837,11 +1837,22 @@ async function handleTeamAction({ teams }, body) {
  * @returns {string[]} the graphics that changed, for the caller to report.
  */
 function pushGlobal({ graphics, winner, select, globals }) {
-  // Unwrapped here rather than at the call sites, so the loop below keeps
-  // reading as "for each graphic". Stage 2 gives this a bus argument.
-  graphics = graphics.program;
-  winner = winner.program;
-  select = select.program;
+  /*
+   * Onto PREVIEW, and only preview.
+   *
+   * The Global tab is where an operator sets the map, the event logo and the
+   * colour source once for the production, and those are staged data like any
+   * other - a map typed there must not appear on air before the operator says
+   * so. The take is what carries them across, per graphic, like everything else.
+   *
+   * This also removes a whole class of surprise: with the push landing on air,
+   * touching Global would have been the one edit in the dashboard that went
+   * live immediately, which is exactly the kind of exception nobody remembers
+   * at the wrong moment.
+   */
+  graphics = graphics.preview;
+  winner = winner.preview;
+  select = select.preview;
   const pushed = [];
   for (const [name, store] of [['graphic', graphics], ['winner', winner], ['select', select]]) {
     const patch = graphicPatch(globals.state, name, store.state);
