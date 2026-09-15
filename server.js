@@ -3920,6 +3920,40 @@ async function handleStream(pathname, req, res, ctx, params) {
   return false;
 }
 
+/**
+ * A game-client event, applied to BOTH of agent select's buses.
+ *
+ * Agent select is the one graphic whose data reaches an audience without a
+ * take, and that is a decision rather than an oversight: a draft produces ten
+ * picks and a handful of scene changes, and an operator pressing Send to
+ * program once per lock-in is not a workflow anybody wants. So the feed is
+ * auto-taken. What still needs taking is everything an operator does by hand -
+ * showing the strip, swapping the sides, the styling.
+ *
+ * Applied to each bus SEPARATELY rather than applied once and copied, and the
+ * difference matters. Preview may be carrying operator edits that air has not
+ * been given yet; copying would throw them away on the next pick, which is the
+ * opposite of what staging is for. Running the same event against each state
+ * folds the pick into whatever that bus already held.
+ *
+ * `now` is shared so the two clocks agree. Letting each call Date.now() for
+ * itself would leave the countdown on the dashboard a few milliseconds from the
+ * one on air - invisible, until somebody screenshots both.
+ *
+ * @param {object} bus      the select bus
+ * @param {(state: object) => object} apply  state -> {state, ...}
+ * @returns {object} the result for AIR, which is what the client is told about
+ */
+function feedBothBuses(bus, apply) {
+  const air = apply(bus.program.state);
+  if (air.state !== bus.program.state) bus.program.replace(air.state);
+
+  const staged = apply(bus.preview.state);
+  if (staged.state !== bus.preview.state) bus.preview.replace(staged.state);
+
+  return air;
+}
+
 /** The write routes. `ctx.bundle` is the session, and it may be written to. */
 async function handlePost(pathname, req, res, ctx, params) {
   const bundle = ctx.bundle;
@@ -4108,7 +4142,12 @@ async function handlePost(pathname, req, res, ctx, params) {
      */
     case '/api/roster':
       return handleWrite(res, async () => {
-        const result = ingestRoster(selectAir.state, await readJsonBody(req), (id, riotId) => aliases.aliasFor(id, riotId));
+        // Read once - a request body is a stream and the second bus would get
+        // an empty one.
+        const payload = await readJsonBody(req);
+        const result = feedBothBuses(bundle.select, (state) =>
+          ingestRoster(state, payload, (id, riotId) => aliases.aliasFor(id, riotId)),
+        );
 
         // Recorded before the state goes out, so a player who has just been seen
         // is already in the library by the time the dashboard repaints.
@@ -4122,8 +4161,6 @@ async function handlePost(pathname, req, res, ctx, params) {
          * on `applied` threw those away. Identity is the honest test:
          * ingestRoster only rebuilds what it touched.
          */
-        if (result.state !== selectAir.state) selectAir.replace(result.state);
-
         // At debug: a lobby produces ten of these, and one line each is noise
         // right up until the moment you need every one of them.
         log.debug('feed', `roster: ${result.applied} applied`, {
@@ -4156,16 +4193,25 @@ async function handlePost(pathname, req, res, ctx, params) {
         // event. Null when there is no network and nothing on disk, which the
         // written-down table covers.
         const catalogue = await assets.get().catch(() => null);
-        const result = ingestGame(selectAir.state, body, { catalogue });
+        /*
+         * Read BEFORE the feed is applied. `feedBothBuses` replaces the store,
+         * so a comparison made afterwards is the new state against itself and
+         * the shared map would never move again - a silent no-op that only
+         * shows up as "the map stopped following the game".
+         */
+        const mapOnAirBefore = selectAir.state.mapName;
+
+        // One stamp for both buses, so the two clocks cannot drift apart.
+        const now = Date.now();
+        const result = feedBothBuses(bundle.select, (state) => ingestGame(state, body, { catalogue, now }));
+
         // The feed knowing the map is the whole reason to share one: the game
         // says it once and every graphic gets it.
         const mapBefore = globals.state.mapName;
-        if (result.state.mapName && result.state.mapName !== selectAir.state.mapName) {
+        if (result.state.mapName && result.state.mapName !== mapOnAirBefore) {
           globals.patch({ mapName: result.state.mapName });
         }
         const movedTheSharedMap = globals.state.mapName !== mapBefore;
-        if (result.applied) selectAir.replace(result.state);
-
         // A scene change is different from a roster event: it drives the
         // automation toggles, so it is worth a line at info even when the ten
         // events around it are not.
