@@ -10,6 +10,23 @@ Key comes from the dashboard: **Account → Stream deck / Bitfocus Companion →
 
 ---
 
+## Preview and program
+
+**Every op stages. `<graphic>.take` is the only one that reaches an audience.**
+
+Press `winner.activate` and the winner graphic goes up in preview, on the dashboard and in any browser source opened with `?bus=preview`. The OBS sources carrying no bus keep showing whatever was last taken. `winner.take` cuts it across.
+
+Two exceptions:
+
+- **Agent select picks reach air on their own.** The game client writes both buses, so a draft does not need a take per lock-in. Everything an operator does by hand - showing the strip, swapping sides, the styling - still does.
+- **You can drive air directly** with `{"op": "winner.next", "bus": "program"}`. Useful if you would rather one button per scene than two. Anything that does not say `program` stages.
+
+For a one-press scene change, put two actions on the button: `winner.next` then `winner.take`.
+
+Variable names follow the same rule as everything else here: **unqualified means air**. `winner_active` is what an audience can see; `winner_staged` says something is waiting.
+
+---
+
 ## Sending
 
 Plain text, one op per message:
@@ -41,6 +58,8 @@ Separators `.` `/` `:` all work. Case, spaces, `_` and `-` are ignored in the op
 | `scoreboard.swap` | Move everything to the other side - names, logos, rosters and scores. Colours stay put; they belong to the design, not the teams. |
 | `scoreboard.swapNames` | Move only the names, logos and library links. Rosters and scores stay where the import put them - which is the usual fix after a map where the orgs changed ends. |
 | `scoreboard.sort` | Re-order both rosters, so the top player becomes the MVP. |
+| `scoreboard.take` | Cut what is staged to air. This is the only op that reaches an audience. |
+| `scoreboard.revert` | Throw away what is staged and copy what is on air back into preview. **⚠ fires immediately** |
 | `scoreboard.reset` | Clear every field back to defaults. There is no confirmation on a button press. |
 
 Aliases: `on`→`show`, `off`→`hide`, `start`→`show`, `stop`→`hide`, `sides`→`swap`, `swapsides`→`swap`, `names`→`swapNames`, `sortacs`→`sort`
@@ -59,6 +78,8 @@ Aliases: `on`→`show`, `off`→`hide`, `start`→`show`, `stop`→`hide`, `side
 | `winner.music` | Start or fade the bed without touching the graphic. |
 | `winner.musicOn` | Start the bed early, before the sequence. |
 | `winner.musicOff` | Fade the bed out, leaving the graphic where it is. |
+| `winner.take` | Cut what is staged to air. This is the only op that reaches an audience. |
+| `winner.revert` | Throw away what is staged and copy what is on air back into preview. **⚠ fires immediately** |
 | `winner.reset` | Clear every field back to defaults. There is no confirmation on a button press. |
 
 Aliases: `show`→`activate`, `on`→`activate`, `start`→`activate`, `hide`→`stop`, `off`→`stop`, `forward`→`next`, `advance`→`next`, `back`→`prev`, `previous`→`prev`, `scene`→`stage`, `musictoggle`→`music`
@@ -74,6 +95,8 @@ Aliases: `show`→`activate`, `on`→`activate`, `start`→`activate`, `hide`→
 | `select.clear` | Empty all ten cards and forget the game id. No confirmation on a button press. |
 | `select.clockStart` | Start - or restart - the 85 second clock from now. |
 | `select.clockEnd` | Fill the bar and stop. Refused if the clock is not running. |
+| `select.take` | Cut what is staged to air. This is the only op that reaches an audience. |
+| `select.revert` | Throw away what is staged and copy what is on air back into preview. **⚠ fires immediately** |
 | `select.reset` | Clear every field back to defaults. **⚠ fires immediately** |
 
 Aliases: `on`→`show`, `off`→`hide`, `start`→`show`, `sides`→`swap`, `swapsides`→`swap`, `clearroster`→`clear`, `startclock`→`clockStart`, `endclock`→`clockEnd`, `stopclock`→`clockEnd`
@@ -133,6 +156,8 @@ Companion creates none of these automatically. Per value: add the feedback **“
 | `scoreboard_right_score` | number | Right rounds won |
 | `scoreboard_score` | text | Both, as "13-5" |
 | `scoreboard_auto_hide_ms` | number | Auto-hide delay, 0 if off |
+| `scoreboard_staged` | bool +`_n` | Preview differs from air - something is waiting to be taken |
+| `scoreboard_preview_air` | text | What preview is doing, for a legend |
 
 ### `winner`
 
@@ -155,6 +180,9 @@ Companion creates none of these automatically. Per value: add the feedback **“
 | `winner_left_score` | number | Left series score |
 | `winner_right_score` | number | Right series score |
 | `winner_cue` | number | Cue counter |
+| `winner_staged` | bool +`_n` | Preview differs from air - something is waiting to be taken |
+| `winner_preview_air` | text | What preview is doing, for a legend |
+| `winner_preview_scene` | number | Scene preview is holding, 1-based |
 
 ### `select`
 
@@ -175,6 +203,8 @@ Companion creates none of these automatically. Per value: add the feedback **“
 | `select_in_agent_select` | bool +`_n` | The client says it is in agent select |
 | `select_game_id` | text | Lobby id, when one is known |
 | `select_cue` | number | Cue counter |
+| `select_staged` | bool +`_n` | Preview differs from air - something is waiting to be taken |
+| `select_preview_air` | text | What preview is doing, for a legend |
 | `select_slot1_name` | text | Seat 1 - Player name |
 | `select_slot1_agent` | text | Seat 1 - Agent, blank until they pick |
 | `select_slot1_locked` | bool +`_n` | Seat 1 - Locked in |

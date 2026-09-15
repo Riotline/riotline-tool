@@ -83,6 +83,7 @@ import {
   companionVariables,
   companionOps,
 } from './public/companion-schema.js';
+import { busName } from './buses.js';
 import { accept, refuseUpgrade, CLOSE } from './websocket.js';
 
 /** Matches the dashboards. The counter wraps so it cannot grow without bound. */
@@ -123,6 +124,17 @@ function scoreboardCue(store, visible) {
 
 /** Identity only: the same three keys public/dashboard.js calls IDENTITY_KEYS. */
 const IDENTITY_KEYS = ['teamName', 'logo', 'teamId'];
+
+/**
+ * The two ops every graphic has, and the only ones that reach an audience.
+ *
+ * They take the bus rather than a store, because a take is a move BETWEEN the
+ * two - the one operation a single store cannot express.
+ */
+const takeOps = {
+  take: (store, value, bus) => ({ replayed: bus.take().replayed }),
+  revert: (store, value, bus) => void bus.revert(),
+};
 
 const scoreboardOps = {
   show: (store) => scoreboardCue(store, true),
@@ -166,12 +178,43 @@ const scoreboardOps = {
     });
   },
 
+  ...takeOps,
   reset: (store) => void store.reset(),
 };
 
-function projectScoreboard(state) {
+
+/**
+ * The staged half of every projection.
+ *
+ * Three names rather than a preview twin for every variable: each one costs
+ * the operator a hand-typed feedback, and a stream deck's job is air plus "is
+ * there something waiting". The dashboard is where you look at what is staged.
+ *
+ * The cue counters are stripped before comparing, exactly as take-bar.js does
+ * in the browser - the two buses keep their own on purpose, so a raw
+ * comparison would report "staged" permanently within a minute of going live.
+ * (Duplicated rather than imported because buses.js is Node-only and take-bar
+ * runs in a page; if a third copy ever appears, that is the moment to move it.)
+ */
+const withoutCue = (state, path) => {
+  if (!state) return '';
+  const clone = structuredClone(state);
+  if (clone[path]) delete clone[path].cue;
+  return JSON.stringify(clone);
+};
+
+function stagedFields(name, cuePath, program, preview, legend) {
+  const differs = Boolean(program && preview) && withoutCue(preview, cuePath) !== withoutCue(program, cuePath);
+  return {
+    ...lamp(`${name}_staged`, differs),
+    [`${name}_preview_air`]: preview ? legend(preview) : '',
+  };
+}
+
+function projectScoreboard(state, preview) {
   const { anim, left, right } = state;
   return {
+    ...stagedFields('scoreboard', 'anim', state, preview, (p) => (p.anim?.visible ? 'UP' : 'OFF')),
     ...lamp('scoreboard_visible', anim.visible),
     scoreboard_air: anim.visible ? 'ON AIR' : 'OFF',
     scoreboard_cue: anim.cue ?? 0,
@@ -269,15 +312,20 @@ const winnerOps = {
   musicOn: (store) => setMusic(store, true),
   musicOff: (store) => setMusic(store, false),
 
+  ...takeOps,
   reset: (store) => void store.reset(),
 };
 
-function projectWinner(state) {
+function projectWinner(state, preview) {
   const seq = state.seq;
   const stage = WINNER_STAGES[seq.stage] ?? WINNER_STAGES[0];
   const champion = state[resolveWinner(state)] ?? {};
 
   return {
+    ...stagedFields('winner', 'seq', state, preview, (p) =>
+      p.seq?.active ? `SCENE ${(p.seq.stage ?? 0) + 1}` : 'OFF',
+    ),
+    winner_preview_scene: (preview?.seq?.stage ?? 0) + 1,
     ...lamp('winner_active', seq.active),
     winner_air: seq.active ? `SCENE ${seq.stage + 1}` : 'OFF',
     // One-based, matching the wire format of winner.stage and the desk's own
@@ -352,15 +400,17 @@ const selectOps = {
     writeSelect(store, stopTimer(store.state, { filled: true }));
   },
 
+  ...takeOps,
   reset: (store) => void store.reset(),
 };
 
-function projectSelect(state) {
+function projectSelect(state, preview) {
   const { picked, locked, total } = selectProgress(state);
   const timer = state.timer;
   const remaining = timer.running ? Math.ceil(timerRemainingMs(timer) / 1000) : 0;
 
   const out = {
+    ...stagedFields('select', 'anim', state, preview, (p) => (p.anim?.visible ? 'UP' : 'OFF')),
     ...lamp('select_visible', state.anim.visible),
     select_air: state.anim.visible ? 'ON AIR' : 'OFF',
     select_picked: picked,
@@ -414,9 +464,12 @@ function projectSelect(state) {
  */
 const GRAPHICS = {
   scoreboard: {
-    // Stage 1: the control channel still drives air directly. Stage 6 points
-    // it at preview and gives it a take.
-    store: (bundle) => bundle.graphics.program,
+    /*
+     * The BUS, not a store. Ops drive preview and a take is what reaches an
+     * audience - so the control channel needs both halves, and the take needs
+     * the move between them, which no single store can express.
+     */
+    bus: (bundle) => bundle.graphics,
     ops: scoreboardOps,
     project: projectScoreboard,
     // Called with nothing, each sanitiser returns a clean copy of its own
@@ -424,8 +477,8 @@ const GRAPHICS = {
     // without a store, a session or a disk.
     defaults: sanitiseState(),
   },
-  winner: { store: (bundle) => bundle.winner.program, ops: winnerOps, project: projectWinner, defaults: sanitiseWinner() },
-  select: { store: (bundle) => bundle.select.program, ops: selectOps, project: projectSelect, defaults: sanitiseSelect() },
+  winner: { bus: (bundle) => bundle.winner, ops: winnerOps, project: projectWinner, defaults: sanitiseWinner() },
+  select: { bus: (bundle) => bundle.select, ops: selectOps, project: projectSelect, defaults: sanitiseSelect() },
 };
 
 assertContract();
@@ -460,7 +513,7 @@ function assertContract() {
     for (const op of actual) if (!documented.has(op)) problems.push(`${entry.key}.${op} is implemented but not documented`);
 
     const promised = new Set(companionVariables(entry.key).map((field) => field.key));
-    const emitted = new Set(Object.keys(implemented.project(implemented.defaults)));
+    const emitted = new Set(Object.keys(implemented.project(implemented.defaults, implemented.defaults)));
     for (const key of promised) if (!emitted.has(key)) problems.push(`${entry.key} promises the variable "${key}" and never sends it`);
     for (const key of emitted) if (!promised.has(key)) problems.push(`${entry.key} sends "${key}", which is in no table the operator can read`);
   }
@@ -651,7 +704,11 @@ export function makeCompanionHub({ ownerForKey, bundleFor, enabled, log, maxConn
 
     const push = (name, { force = false, reason = 'update' } = {}) => {
       const entry = GRAPHICS[name];
-      const next = entry.project(entry.store(bundle).state);
+      const bus = entry.bus(bundle);
+      // Air first, because that is what the unqualified names mean - here, on
+      // the SSE channels and on the HTTP routes. Preview rides along as the
+      // handful of `_staged` names beside it.
+      const next = entry.project(bus.program.state, bus.preview.state);
       const previous = sent.get(name);
       // Cheap and exact: the projections are flat objects of scalars, so
       // stringify is a total comparison and there is nothing here big enough
@@ -669,12 +726,21 @@ export function makeCompanionHub({ ownerForKey, bundleFor, enabled, log, maxConn
 
     // ---- live updates -----------------------------------------------------
 
-    const unsubscribes = Object.entries(GRAPHICS).map(([name, entry]) =>
-      entry.store(bundle).subscribe(() => {
+    /*
+     * Both buses, per graphic. A take moves program, an operator's op moves
+     * preview, and either can change what a button should be showing - so a
+     * channel subscribed to only one of them would go quiet at exactly the
+     * wrong moment. The projection is deduped, so the second subscription
+     * costs nothing when nothing a button can see has changed.
+     */
+    const unsubscribes = Object.entries(GRAPHICS).flatMap(([name, entry]) => {
+      const bus = entry.bus(bundle);
+      const onChange = () => {
         push(name);
         if (name === 'select') armClock();
-      }),
-    );
+      };
+      return [bus.program.subscribe(onChange), bus.preview.subscribe(onChange)];
+    });
 
     /*
      * The agent-select clock, which is the one thing here that changes with
@@ -689,7 +755,7 @@ export function makeCompanionHub({ ownerForKey, bundleFor, enabled, log, maxConn
     function armClock() {
       clearInterval(clockTick);
       clockTick = null;
-      if (!bundle.select.program.state.timer.running) return;
+      if (!bundle.select.program.state.timer.running) return; // air's clock is the one on screen
       clockTick = setInterval(() => push('select', { reason: 'clock' }), 1000);
       clockTick.unref?.();
     }
@@ -754,9 +820,24 @@ export function makeCompanionHub({ ownerForKey, bundleFor, enabled, log, maxConn
       if (!op) refuse(`"${split.op || message.op}" is not something ${name} can do. Send "ops" for the list.`);
 
       const entry = GRAPHICS[name];
-      entry.ops[op](entry.store(bundle), message.value);
+      const bus = entry.bus(bundle);
 
-      log.info('companion', `${name}.${op}`, { session: owner.id });
+      /*
+       * Ops drive PREVIEW, and `take` is the only thing that reaches an
+       * audience. That is the whole point of the feature and it is a change in
+       * what these buttons do, so it is worth being blunt: a stream deck that
+       * used to put the scoreboard up now stages it.
+       *
+       * `bus` on the message is the escape hatch, mirroring `?bus=` on the HTTP
+       * routes - {"op":"winner.next","bus":"program"} drives air directly, for
+       * an operator who wants one button per scene rather than two. Defaults to
+       * preview for the same reason a write does: the two ways of being wrong
+       * are not comparable.
+       */
+      const target = busName(message.bus);
+      const result = entry.ops[op](bus.of(target), message.value, bus);
+
+      log.info('companion', `${name}.${op} (${target})`, { session: owner.id });
 
       /*
        * The answer is the graphic that was touched, and only that one.
@@ -768,7 +849,7 @@ export function makeCompanionHub({ ownerForKey, bundleFor, enabled, log, maxConn
        * dedupe means the far end does not get it twice.
        */
       push(name, { force: true, reason: `op:${op}` });
-      connection.sendJson({ type: 'ok', graphic: name, op, ...echo });
+      connection.sendJson({ type: 'ok', graphic: name, op, bus: target, ...(result ?? {}), ...echo });
     }
 
     // ---- lifecycle --------------------------------------------------------

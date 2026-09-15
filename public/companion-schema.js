@@ -73,6 +73,8 @@ export const COMPANION_GRAPHICS = [
         help: 'Move only the names, logos and library links. Rosters and scores stay where the import put them - which is the usual fix after a map where the orgs changed ends.',
       },
       { key: 'sort', label: 'Sort by ACS', help: 'Re-order both rosters, so the top player becomes the MVP.' },
+      { key: 'take', label: 'Send to program', help: 'Cut what is staged to air. This is the only op that reaches an audience.' },
+      { key: 'revert', label: 'Revert to air', help: 'Throw away what is staged and copy what is on air back into preview.', danger: true },
       { key: 'reset', label: 'Reset', help: 'Clear every field back to defaults. There is no confirmation on a button press.', danger: true },
     ],
     variables: [
@@ -86,6 +88,19 @@ export const COMPANION_GRAPHICS = [
       { key: 'right_score', kind: 'number', label: 'Right rounds won' },
       { key: 'score', kind: 'text', label: 'Both, as "13-5"' },
       { key: 'auto_hide_ms', kind: 'number', label: 'Auto-hide delay, 0 if off' },
+    ],
+    /*
+     * What is waiting, as opposed to what is on air.
+     *
+     * Deliberately three or four names rather than a preview twin for every
+     * variable above. Every variable costs the operator a hand-typed feedback,
+     * and a stream deck's job is air plus "is there something waiting" - it is
+     * not a second dashboard. The dashboard is where you look at what is
+     * staged; this is where you see that it exists.
+     */
+    staged: [
+      { key: 'staged', kind: 'lamp', label: 'Preview differs from air - something is waiting to be taken' },
+      { key: 'preview_air', kind: 'text', label: 'What preview is doing, for a legend' },
     ],
   },
 
@@ -109,6 +124,8 @@ export const COMPANION_GRAPHICS = [
       { key: 'music', label: 'Music toggle', help: 'Start or fade the bed without touching the graphic.' },
       { key: 'musicOn', label: 'Cue music', help: 'Start the bed early, before the sequence.' },
       { key: 'musicOff', label: 'Fade music', help: 'Fade the bed out, leaving the graphic where it is.' },
+      { key: 'take', label: 'Send to program', help: 'Cut what is staged to air. This is the only op that reaches an audience.' },
+      { key: 'revert', label: 'Revert to air', help: 'Throw away what is staged and copy what is on air back into preview.', danger: true },
       { key: 'reset', label: 'Reset', help: 'Clear every field back to defaults. There is no confirmation on a button press.', danger: true },
     ],
     variables: [
@@ -130,6 +147,20 @@ export const COMPANION_GRAPHICS = [
       { key: 'right_score', kind: 'number', label: 'Right series score' },
       { key: 'cue', kind: 'number', label: 'Cue counter' },
     ],
+    /*
+     * What is waiting, as opposed to what is on air.
+     *
+     * Deliberately three or four names rather than a preview twin for every
+     * variable above. Every variable costs the operator a hand-typed feedback,
+     * and a stream deck's job is air plus "is there something waiting" - it is
+     * not a second dashboard. The dashboard is where you look at what is
+     * staged; this is where you see that it exists.
+     */
+    staged: [
+      { key: 'staged', kind: 'lamp', label: 'Preview differs from air - something is waiting to be taken' },
+      { key: 'preview_air', kind: 'text', label: 'What preview is doing, for a legend' },
+      { key: 'preview_scene', kind: 'number', label: 'Scene preview is holding, 1-based' },
+    ],
   },
 
   {
@@ -144,6 +175,8 @@ export const COMPANION_GRAPHICS = [
       { key: 'clear', label: 'Clear roster', help: 'Empty all ten cards and forget the game id. No confirmation on a button press.', danger: true },
       { key: 'clockStart', label: 'Start clock', help: 'Start - or restart - the 85 second clock from now.' },
       { key: 'clockEnd', label: 'End clock', help: 'Fill the bar and stop. Refused if the clock is not running.' },
+      { key: 'take', label: 'Send to program', help: 'Cut what is staged to air. This is the only op that reaches an audience.' },
+      { key: 'revert', label: 'Revert to air', help: 'Throw away what is staged and copy what is on air back into preview.', danger: true },
       { key: 'reset', label: 'Reset', help: 'Clear every field back to defaults.', danger: true },
     ],
     variables: [
@@ -171,6 +204,19 @@ export const COMPANION_GRAPHICS = [
      * not a count of them. Generated rather than typed out, so the seat count
      * comes from one place.
      */
+    /*
+     * What is waiting, as opposed to what is on air.
+     *
+     * Deliberately three or four names rather than a preview twin for every
+     * variable above. Every variable costs the operator a hand-typed feedback,
+     * and a stream deck's job is air plus "is there something waiting" - it is
+     * not a second dashboard. The dashboard is where you look at what is
+     * staged; this is where you see that it exists.
+     */
+    staged: [
+      { key: 'staged', kind: 'lamp', label: 'Preview differs from air - something is waiting to be taken' },
+      { key: 'preview_air', kind: 'text', label: 'What preview is doing, for a legend' },
+    ],
     slots: {
       count: 10,
       fields: [
@@ -256,6 +302,8 @@ export function companionVariables(graphicKey) {
   };
 
   for (const field of entry.variables) add(field.key, field.kind, field.label);
+  // What is waiting, after what is on air - the order the table reads in.
+  for (const field of entry.staged ?? []) add(field.key, field.kind, field.label);
 
   if (entry.slots) {
     for (let seat = 1; seat <= entry.slots.count; seat += 1) {
