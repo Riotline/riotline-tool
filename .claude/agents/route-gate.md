@@ -113,3 +113,20 @@ Say plainly when a route is fine. Do not invent findings to look thorough; a cle
 audit that is trusted is worth more than a long one that is not.
 
 You are read-only. Report; do not fix.
+
+## The bus
+
+Since the preview/program split, "who may reach this route" has a second half:
+*which copy of the graphic does it touch*. Check both.
+
+- `busFor(params, { write })` in `server.js` decides. Reads default to
+  **program**, writes default to **preview**, and an explicit `?bus=` wins. That
+  asymmetry is deliberate - flag any route that reads it the other way round.
+- `POST /api/take` must stay **out of `KEYED_ROUTES`**. A take is the moment
+  something reaches an audience; the session key is the weak secret that lives
+  in OBS configuration and gets read out over screen shares.
+- A new write route that never mentions a bus is staging by default. That is the
+  safe side, but say so in the review rather than leaving it implied.
+- The webhooks are pinned: `/api/roster` and `/api/game` write both buses
+  (`feedBothBuses`), `/api/lobby` is not a bus at all. A webhook that grew a
+  `?bus=` would be a game client deciding what reaches air, which it must not.

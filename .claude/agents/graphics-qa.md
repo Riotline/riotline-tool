@@ -108,3 +108,16 @@ not say what it covered cannot be trusted the next time somebody changes the CSS
 
 Do not fix the code. You may write throwaway probe scripts; you may not edit the
 graphics. Report, with evidence.
+
+## The bus, when driving an output page
+
+An output page with no `?bus=` renders **program**. A dashboard-driven fixture
+writes **preview**. Getting these crossed is the most likely reason a page you
+are measuring sits on stale state:
+
+- measuring painted geometry? Write the fixture with `?bus=program`, because that
+  is what a browser source shows.
+- driving the dashboard UI and reading back? Read `?bus=preview`, because the
+  dashboard stages.
+- want the page to show what the dashboard just typed? Open it with
+  `&bus=preview`, which is what the preview iframes do.

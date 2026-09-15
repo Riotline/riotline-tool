@@ -452,6 +452,17 @@ https://gfx.example.com/select.html?key=<session key>
 Browser source, **1920×1080**, no custom CSS. The scoreboard and agent select are
 transparent; the winner sequence is full screen.
 
+**Those URLs show what is on air.** Every graphic has two copies - program, which
+is what an audience sees, and preview, where the next thing is staged - and a URL
+that says nothing about it means program. So a browser source configured before
+this feature existed keeps behaving exactly as it did, and nothing in OBS needs
+re-pointing.
+
+Adding `&bus=preview` gives a source that renders the staged copy instead. That
+is what the dashboard's own preview panes use. It is occasionally worth putting
+on a second monitor as a proper preview feed, but **never in the scene an
+audience sees** - it shows work in progress by definition.
+
 The game webhooks carry the same key:
 
 ```

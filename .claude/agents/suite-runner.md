@@ -23,7 +23,10 @@ session scratchpad has been wiped mid-task before and six suites were lost.
 | `matchid-e2e.mjs` | 8151 | 25 | the match-id webhook: the key gate, the bare-string body, envelope shapes, the 400 on junk, SSE replay and live delivery, cross-session isolation |
 | `matchid-ui-e2e.mjs` | 8152 | 28 | Playwright: the tracker-only panel, the hook filling the box, a miss that stays retryable, a hit that reaches the graphics Import, and typing that is not clobbered |
 | `mosaic-e2e.mjs` | 8154 | 37 | painted geometry at 1920x1080: the mosaic covers the frame, its rings are symmetric, nothing rotates in flight, and the event logo scale resizes both slots without moving the corner pin, and the grid texture is square-on where the lattice leans |
-| `companion-e2e.mjs` | 8163 | 99 | the Companion control channel: a session key does not open it, every op moves the real store, an op answers with only the graphic it touched, an invisible edit sends nothing, a roster webhook pushes agent select unprompted, cross-account isolation, key rotation drops the socket, the admin switch drops what is connected |
+| `buses-test.mjs` | - | 60 | the preview/program pair as a unit test: migration, the four cue cases, revert, and that the old store API throws |
+| `bus-routes-e2e.mjs` | 8173 | 52 | the bus on the wire: read defaults to air and write defaults to preview, streams, take and revert, the select feed reaching both buses |
+| `bus-drivers-e2e.mjs` | 8174 | 26 | which automatic behaviours each bus runs, and the preview rehearsal |
+| `companion-e2e.mjs` | 8163 | 116 | the Companion control channel: a session key does not open it, every op moves the real store, an op answers with only the graphic it touched, an invisible edit sends nothing, a roster webhook pushes agent select unprompted, cross-account isolation, key rotation drops the socket, the admin switch drops what is connected |
 | `companion-ui-e2e.mjs` | 8164 | 46 | the Account panel: starts with no key, both reference tables render, and every variable and action printed on the page is checked against a live socket |
 | `winner-layout-e2e.mjs` | 8161 | 39 | painted geometry: the winner name band is the column not the text, the cap holds, everything centres on 960, nothing leaves the frame, the winner name shrinks its type rather than condensing with nothing above it moving, and vertical spacing scales gaps in all three scenes |
 | `winner-ui-e2e.mjs` | 8156 | 35 | Playwright: the mosaic opening and the grid texture save, the logo size slider reads out as a percentage and stores above 1, and no other ratio slider changed |
@@ -41,6 +44,9 @@ node "d:/Projects/Local VAL Prod App/.claude-tests/matchid-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/matchid-ui-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/mosaic-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/winner-ui-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/buses-test.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/bus-routes-e2e.mjs"
+node "d:/Projects/Local VAL Prod App/.claude-tests/bus-drivers-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/companion-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/companion-ui-e2e.mjs"
 node "d:/Projects/Local VAL Prod App/.claude-tests/winner-layout-e2e.mjs"
